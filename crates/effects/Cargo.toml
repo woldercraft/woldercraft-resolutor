@@ -1,0 +1,24 @@
+[package]
+name = "filmcraft-effects"
+description = "EffectCraft VFX registry (specs, parameters, categories) and CPU/tracking implementations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+chrono = { workspace = true }
+tempfile = "3"
+miniz_oxide = "0.9"
+web-time = "1"
+
+[dev-dependencies]
+proptest = { workspace = true }
