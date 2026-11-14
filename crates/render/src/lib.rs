@@ -578,7 +578,7 @@ pub(crate) fn item_layer_ex(
     }
     // plain media: nothing but the frame itself reaches the output
     let plain_media = matches!(pi.kind, ItemKind::Media(_) | ItemKind::Subclip { .. })
-        && !(opts.effects && item.has_standard_effects())
+        && !(opts.effects && has_standard_or_group_effects(seq, item))
         && !item.effect("opacity").is_some_and(|e| e.enabled && !e.masks.is_empty());
     let mut fetched = None;
     if allow_region && plain_media {
@@ -617,7 +617,13 @@ pub(crate) fn item_layer_ex(
             frame_rate: seq.settings.frame_rate.as_f64(),
             working: seq.settings.color.working,
         };
-        for e in item.effects.iter().filter(|e| e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e)) {
+        let group_effects = seq.color_group_of(item.id).into_iter().flat_map(|g| g.effects.iter());
+        for e in item
+            .effects
+            .iter()
+            .chain(group_effects)
+            .filter(|e| e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e))
+        {
             if filmcraft_media::cancel::cancelled() {
                 return None;
             }
@@ -628,6 +634,11 @@ pub(crate) fn item_layer_ex(
     let placed = if layer.w == w && layer.h == h && identity_placement(&m) { layer } else { layer.transformed(w, h, &m) };
     let (op, bl) = opacity_blend(item, mt);
     Some(Layer::Full { image: placed, opacity: op, blend: bl, opaque: false })
+}
+
+pub(crate) fn has_standard_or_group_effects(seq: &Sequence, item: &TrackItem) -> bool {
+    item.has_standard_effects()
+        || seq.color_group_of(item.id).is_some_and(|g| g.effects.iter().any(|e| e.enabled))
 }
 
 /// The layer of a plain media frame (see [`item_layer_ex`]): only the part with alpha when the frame

@@ -125,6 +125,8 @@ impl FilmcraftApp {
             applied_prefs: None,
             applied_ui_scale: None,
             workspace_restored: false,
+            last_saved_dock: None,
+            dock_dirty_since: None,
             workspaces,
             menu_workspaces: Default::default(),
         }
@@ -444,6 +446,7 @@ impl FilmcraftApp {
             // has no new events and must not re-run a click, shortcut or drop.
             self.auto.begin_frame();
             self.apply_prefs(&ctx);
+            self.maybe_persist_workspace(&ctx);
             self.sync_timeline_view();
             panels::metadata::follow_selection(self);
             self.handle_drops(&ctx);
@@ -571,6 +574,7 @@ impl eframe::App for FilmcraftApp {
     /// state, shut the session down so its recovery journal is flushed or removed, and start an
     /// update that waits for the exit.
     fn on_exit(&mut self) {
+        self.save_current_workspace();
         // Late screenshot callbacks now find a dropped slot and write nothing; clients get one error.
         capture::cancel_all(self);
         for viewport in self.ime_viewports.drain(..) {

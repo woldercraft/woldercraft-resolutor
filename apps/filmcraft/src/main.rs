@@ -398,6 +398,23 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
             // From here the app drains the queue on its first pass: stop rejecting requests.
             ready.store(true, Ordering::Relaxed);
         }
+        let ai_mgr = Arc::new(std::sync::Mutex::new(control_server::ControlServerManager::new(
+            cc.egui_ctx.clone(),
+            data_dir.clone().or_else(default_data_dir),
+            control_port,
+        )));
+        let mgr_cfg = Arc::clone(&ai_mgr);
+        app.hooks.configure_ai_control = Some(Box::new(move |enabled, port| {
+            mgr_cfg.lock().unwrap_or_else(std::sync::PoisonError::into_inner).configure(enabled, port)
+        }));
+        let mgr_status = Arc::clone(&ai_mgr);
+        app.hooks.ai_control_status = Some(Box::new(move || {
+            mgr_status.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status()
+        }));
+        let mgr_regen = Arc::clone(&ai_mgr);
+        app.hooks.regenerate_ai_token = Some(Box::new(move || {
+            mgr_regen.lock().unwrap_or_else(std::sync::PoisonError::into_inner).regenerate_token()
+        }));
         Ok(Box::new(app))
     })
 }
@@ -477,6 +494,36 @@ impl filmcraft_export::FrameRenderer for GpuFrameRenderer {
 
     fn render_plan_nv12(&mut self, plan: &filmcraft_render::plan::FramePlan) -> Option<(u32, u32, Vec<u8>)> {
         self.0.render_plan_nv12(plan)
+    }
+
+    fn render_plans_pipelined(
+        &mut self,
+        requests: &[(&filmcraft_render::plan::FramePlan, filmcraft_export::PlanRenderMode)],
+    ) -> Vec<Option<filmcraft_export::PlanRenderOutput>> {
+        let mapped: Vec<(&filmcraft_render::plan::FramePlan, filmcraft_gpu::ExportReadbackMode)> = requests
+            .iter()
+            .map(|(plan, mode)| {
+                let m = match mode {
+                    filmcraft_export::PlanRenderMode::RgbaF32 => filmcraft_gpu::ExportReadbackMode::RgbaF32,
+                    filmcraft_export::PlanRenderMode::Rgba8 => filmcraft_gpu::ExportReadbackMode::Rgba8,
+                    filmcraft_export::PlanRenderMode::Nv12 => filmcraft_gpu::ExportReadbackMode::Nv12,
+                };
+                (*plan, m)
+            })
+            .collect();
+        self.0
+            .render_plans_pipelined(&mapped)
+            .into_iter()
+            .map(|res| {
+                res.map(|out| match out {
+                    filmcraft_gpu::ExportOutput::RgbaF32(w, h, px) => {
+                        filmcraft_export::PlanRenderOutput::RgbaF32(filmcraft_render::Image { w: w as usize, h: h as usize, px })
+                    }
+                    filmcraft_gpu::ExportOutput::Rgba8(w, h, px) => filmcraft_export::PlanRenderOutput::Rgba8(w, h, px),
+                    filmcraft_gpu::ExportOutput::Nv12(w, h, px) => filmcraft_export::PlanRenderOutput::Nv12(w, h, px),
+                })
+            })
+            .collect()
     }
 
     fn trim(&mut self) {

@@ -548,6 +548,21 @@ pub(super) static CATEGORIES: &[Category] = &[
         ],
     },
     Category {
+        id: "aiIntegration",
+        title: "AI Integration",
+        rows: &[
+            Row::Group(
+                "Local Control Server",
+                &[
+                    b("aiIntegration.enabled", "Enable AI integration (local control server)", true),
+                    f("aiIntegration.port", "Port", Kind::Int { min: 1024.0, max: 65535.0, unit: "" }, false),
+                ],
+            ),
+            Row::Note("Listens only on 127.0.0.1 using a local token. Changes apply immediately without closing your project or unloading media from memory."),
+            Row::Custom("aiControlStatus"),
+        ],
+    },
+    Category {
         id: "timeline",
         title: "Timeline",
         rows: &[

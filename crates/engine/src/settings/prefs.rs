@@ -428,6 +428,20 @@ pub struct PluginPrefs {
     pub developer_mode: bool,
 }
 
+/// Settings ▸ AI Integration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AiIntegrationPrefs {
+    pub enabled: bool,
+    pub port: u16,
+}
+
+impl Default for AiIntegrationPrefs {
+    fn default() -> Self {
+        Self { enabled: false, port: 9876 }
+    }
+}
+
 /// Indeterminate Media Timebase choices → frame rates.
 pub fn timebase_rate(v: &str) -> FrameRate {
     match v {

@@ -696,15 +696,15 @@ fn lumetri_unsupported_sections_fall_back() {
     let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
     assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
 
-    // curve_luma modified
+    // curve_luma modified (SDR: GPU supported)
     let e = effect("lumetri", &[("curve_luma", ParamValue::Curve(vec![[0.0, 0.1], [1.0, 0.9]]))]);
     let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
+    assert!(op.as_ref().is_some_and(FxOp::gpu_ok));
 
-    // hue_vs_sat non-empty
+    // hue_vs_sat non-empty (SDR: GPU supported)
     let e = effect("lumetri", &[("hue_vs_sat", ParamValue::Curve(vec![[0.5, 0.5]]))]);
     let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
+    assert!(op.as_ref().is_some_and(FxOp::gpu_ok));
 
     // wheel offset (GPU supported)
     let e = effect("lumetri", &[("wheel_shadows", pt(0.5, 0.0))]);
@@ -716,9 +716,14 @@ fn lumetri_unsupported_sections_fall_back() {
     let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
     assert!(op.as_ref().is_some_and(FxOp::gpu_ok));
 
-    // HSL secondary on
+    // HSL secondary on (SDR: GPU supported when median radius <= 3)
     let e = effect("lumetri", &[("hsl_on", ParamValue::Bool(true))]);
     let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
+    assert!(op.as_ref().is_some_and(FxOp::gpu_ok));
+
+    // HSL secondary with denoise radius > 3 (falls back to CPU)
+    let e = effect("lumetri", &[("hsl_on", ParamValue::Bool(true)), ("hsl_denoise", fl(100.0))]);
+    let op = FxOp::eval(&e, &cx(Tick::ZERO, 2.0), w, h);
     assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
 
     // HDR working space
@@ -959,4 +964,155 @@ fn effect_source_integer_decimation_preserves_cpu_box_oracle() {
             assert!(worst <= EXACT && flips == 0.0, "{w}x{h} n{n} source box: {worst}, {flips}");
         }
     }
+}
+
+/// GPU vs CPU parity for SDR Lumetri Curves (RGB + Hue/Luma/Sat curves) and HSL Secondary
+/// (including median denoise, Gaussian mask blur, color adjust, and mask views).
+#[test]
+fn gpu_lumetri_curves_and_hsl_match_cpu() {
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut c = GpuCompositor::new(&dev, &q);
+    let (w, h) = (67u32, 41u32);
+    let px = picture(w, h);
+    let frame = VideoFrame::rgba_f32(w, h, px.clone());
+    let cases: Vec<(&str, Vec<(&str, ParamValue)>)> = vec![
+        (
+            "rgb_and_luma_curves",
+            vec![
+                ("curve_luma", ParamValue::Curve(vec![[0.0, 0.05], [0.5, 0.58], [1.0, 0.95]])),
+                ("curve_red", ParamValue::Curve(vec![[0.0, 0.0], [0.4, 0.5], [1.0, 1.0]])),
+                ("curve_green", ParamValue::Curve(vec![[0.0, 0.02], [0.6, 0.52], [1.0, 0.98]])),
+                ("curve_blue", ParamValue::Curve(vec![[0.0, 0.0], [0.5, 0.42], [1.0, 1.0]])),
+            ],
+        ),
+        (
+            "hsl_curves",
+            vec![
+                ("hue_vs_hue", ParamValue::Curve(vec![[0.1, 0.55], [0.5, 0.4], [0.9, 0.6]])),
+                ("hue_vs_sat", ParamValue::Curve(vec![[0.2, 0.7], [0.7, 0.3]])),
+                ("luma_vs_sat", ParamValue::Curve(vec![[0.2, 0.3], [0.8, 0.75]])),
+                ("sat_vs_sat", ParamValue::Curve(vec![[0.2, 0.65], [0.8, 0.4]])),
+                ("hue_vs_luma", ParamValue::Curve(vec![[0.3, 0.62], [0.7, 0.38]])),
+            ],
+        ),
+        (
+            "hsl_secondary_color",
+            vec![
+                ("hsl_on", ParamValue::Bool(true)),
+                ("hsl_hue", fl(120.0)),
+                ("hsl_hue_range", fl(90.0)),
+                ("hsl_sat_min", fl(10.0)),
+                ("hsl_luma_min", fl(5.0)),
+                ("hsl_luma_max", fl(95.0)),
+                ("hsl_soft", fl(35.0)),
+                ("hsl_temp", fl(30.0)),
+                ("hsl_tint", fl(-20.0)),
+                ("hsl_sat", fl(140.0)),
+                ("hsl_hue_shift", fl(45.0)),
+                ("hsl_denoise", fl(60.0)),
+                ("hsl_blur", fl(25.0)),
+            ],
+        ),
+        (
+            "hsl_secondary_mask_gray",
+            vec![("hsl_on", ParamValue::Bool(true)), ("hsl_hue", fl(200.0)), ("hsl_show_mask", ch(1)), ("hsl_denoise", fl(40.0))],
+        ),
+        (
+            "hsl_secondary_mask_black",
+            vec![("hsl_on", ParamValue::Bool(true)), ("hsl_hue", fl(40.0)), ("hsl_show_mask", ch(2))],
+        ),
+        (
+            "hsl_secondary_mask_white",
+            vec![("hsl_on", ParamValue::Bool(true)), ("hsl_hue", fl(310.0)), ("hsl_show_mask", ch(3))],
+        ),
+    ];
+
+    for (name, params) in cases {
+        let e = effect("lumetri", &params);
+        let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w as usize, h as usize).unwrap_or_else(|| panic!("{name}: no op"));
+        assert!(op.gpu_ok(), "{name}: must be gpu_ok");
+        let mut cpu = filmcraft_render::Image { w: w as usize, h: h as usize, px: px.clone() };
+        op.apply(&mut cpu);
+        let fx = LayerFx { size: (w, h), decimation: 1, turns: 0, ops: vec![op] };
+        let (_, _, gpu) = c.effect_image(&frame, &fx).expect("effect image");
+        let (worst, flips) = compare(&cpu.px, &gpu);
+        eprintln!("{name}: max rel diff {worst:.2e}, {:.3}% flipped", flips * 100.0);
+        assert!(worst <= EXACT && flips <= FLIPS, "{name}: {worst}, {flips}");
+    }
+}
+
+/// GPU vs CPU parity for Masked Lumetri (Power Window) combining HSL Secondary + Sharpen
+/// (requiring both `orig` and `mask_orig` simultaneously -> 4 pooled textures) AND composited
+/// `FramePlan` execution plus uniform buffer pool reuse across repeated frames.
+#[test]
+fn gpu_masked_lumetri_and_hsl_match_cpu() {
+    use filmcraft_project::{Mask, MaskPath};
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut c = GpuCompositor::new(&dev, &q);
+    let (w, h) = (96usize, 54usize);
+    let px = picture(w as u32, h as u32);
+    let frame = Arc::new(VideoFrame::rgba_f32(w as u32, h as u32, px.clone()));
+
+    let mut e = effect(
+        "lumetri",
+        &[
+            ("exposure", fl(1.0)),
+            ("contrast", fl(30.0)),
+            ("saturation", fl(140.0)),
+            ("curve_luma", ParamValue::Curve(vec![[0.0, 0.05], [0.5, 0.65], [1.0, 0.95]])),
+            ("hsl_on", ParamValue::Bool(true)),
+            ("hsl_hue", fl(150.0)),
+            ("hsl_hue_range", fl(120.0)),
+            ("hsl_sat", fl(150.0)),
+            ("hsl_denoise", fl(50.0)),
+            ("hsl_blur", fl(20.0)),
+            ("sharpen", fl(35.0)),
+        ],
+    );
+    let mut mask = Mask::new("power-window", MaskPath::ellipse(Vec2::new(48.0, 27.0), Vec2::new(28.0, 16.0)));
+    mask.feather.value = ParamValue::Float(6.0);
+    e.masks.push(mask);
+
+    let op = FxOp::eval_masked(&e, &cx(Tick::ZERO, 1.0), w, h).expect("masked lumetri op");
+    assert!(op.gpu_ok(), "masked lumetri must be gpu_ok");
+
+    let mut cpu = filmcraft_render::Image { w, h, px };
+    op.apply(&mut cpu);
+    let fx = LayerFx { size: (w as u32, h as u32), decimation: 1, turns: 0, ops: vec![op.clone()] };
+    let (_, _, gpu) = c.effect_image(&frame, &fx).expect("masked effect image");
+    let (worst, flips) = compare(&cpu.px, &gpu);
+    assert!(worst <= EXACT && flips <= FLIPS, "masked lumetri direct: {worst}, {flips}");
+
+    // Also test inside a full FramePlan::Layers composite, repeated twice to verify uniform pool reuse.
+    let plan = FramePlan::Layers {
+        width: w,
+        height: h,
+        layers: vec![PlanLayer {
+            frame,
+            matrix: Affine::IDENTITY,
+            opacity: 1.0,
+            blend: Blend::Normal,
+            fx: Some(Arc::new(fx)),
+            input: None,
+        }],
+    };
+    let cpu_plan = execute_cpu(&plan).over_black_rgba8();
+    c.composite(&plan);
+    let (_, _, gpu_plan) = c.read_output().expect("plan readback");
+    let keep = vec![true; w * h];
+    let (p99, mean, max) = stats8(&cpu_plan, &gpu_plan, &keep);
+    assert!(p99 <= 2 && mean < 0.5, "masked lumetri plan: p99={p99} mean={mean} max={max}");
+
+    let pool_after_first = c.fx.as_ref().map_or(0, |f| f.uniform_pool_len());
+    assert!(pool_after_first > 0);
+    c.composite(&plan);
+    let (_, _, gpu_plan2) = c.read_output().expect("plan readback 2");
+    assert_eq!(gpu_plan, gpu_plan2);
+    assert_eq!(c.fx.as_ref().map_or(0, |f| f.uniform_pool_len()), pool_after_first, "uniform buffer pool grew on repeated frame");
 }

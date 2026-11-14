@@ -26,6 +26,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("window.dockPanel", "Dock Panel", [], None),
     uic!("window.floatPanel", "Undock Panel", [], None),
     uic!("window.closePanel", "Close Panel", [], None),
+    uic!("window.toggleInspector", "Inspector", ["Window"], None),
     uic!("app.language.english", "English", ["Edit", "Language"], None),
     // Alphabetical by the language's own name after English; Cyrillic, then CJK names follow
     // the Latin ones. Settings ▸ General ▸ Interface Language lists them the same way.
@@ -107,6 +108,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("view.guideTemplates.delete", "Delete Guide Template", [], None),
     uic!("view.compare.setReference", "Set Comparison Reference", [], None),
     uic!("view.dynamicAudioWaveforms", "Dynamic Audio Waveforms", ["View"], None),
+    uic!("view.toggleGlobalBypass", "Bypass Color Grades & Effects", ["View"], None),
     uic!("multicam.toggleView", "Multi-Camera View", ["View"], Some("Shift+0")),
     uic!("multicam.recordToggle", "Multi-Camera Record On/Off Toggle", [], Some("0")),
     uic!("multicam.editCamerasDialog", "Edit Cameras…", [], None),
@@ -313,6 +315,10 @@ pub fn invoke_command(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut
     }
     if let Some(result) = crate::dock_ui::route(app, ctx, id, &params) {
         return result;
+    }
+    if id == "window.toggleInspector" {
+        crate::dock::LayoutExt::toggle_inspector(&mut app.ui.dock);
+        return Ok(json!({"open": crate::dock::LayoutExt::is_inspector_open(&app.ui.dock)}));
     }
     if let Some(rest) = id.strip_prefix("window.panel.") {
         let p = PanelKind::from_name(rest).ok_or_else(|| format!("unknown panel `{rest}`"))?;
@@ -634,6 +640,11 @@ pub fn invoke_command(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut
             return Ok(json!({"dialog": "recovery"}));
         }
         _ => {}
+    }
+    if id == "view.toggleGlobalBypass" {
+        app.ui.global_bypass = !app.ui.global_bypass;
+        ctx.request_repaint();
+        return Ok(json!({"globalBypass": app.ui.global_bypass}));
     }
     if id == "view.appearanceMode.next" {
         crate::panels::settings::cycle_appearance(app, ctx);
@@ -957,7 +968,11 @@ pub fn menu_items(app: &FilmcraftApp) -> Vec<MenuItem> {
             it.checked = Some(on);
         }
         if it.id.starts_with("view.") {
-            it.checked = crate::panels::monitor_view::checked(app, &it.id).or(crate::panels::menu_dialogs::checked(app, &it.id));
+            it.checked = if it.id == "view.toggleGlobalBypass" {
+                Some(app.ui.global_bypass)
+            } else {
+                crate::panels::monitor_view::checked(app, &it.id).or(crate::panels::menu_dialogs::checked(app, &it.id))
+            };
             it.enabled &= crate::panels::monitor_view::enabled(app, &it.id);
         }
     }

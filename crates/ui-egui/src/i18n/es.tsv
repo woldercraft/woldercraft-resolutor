@@ -3836,3 +3836,52 @@
 	Audio Codec:	Códec de audio:
 	Audio Format:	Formato de audio:
 	Location:	Ubicación:
+	+ Add Effect	+ Añadir efecto
+	Reset Speed	Restablecer velocidad
+	No video effects added. Use + Add Effect or drag from Effects.	Sin efectos de video. Usa + Añadir efecto o arrastra desde Efectos.
+	No audio effects added. Use + Add Effect or drag from Effects.	Sin efectos de audio. Usa + Añadir efecto o arrastra desde Efectos.
+	Inspector	Inspector
+	Show or hide the Inspector (Video / Audio / Properties)	Mostrar u ocultar el Inspector (Video / Audio / Propiedades)
+	Toggle section	Activar o desactivar sección
+	Enable effect	Activar efecto
+	Add Video Effect	Añadir efecto de Video
+	Add Audio Effect	Añadir efecto de Audio
+	Search effects…	Buscar efectos…
+	No matching effects.	No hay efectos coincidentes.
+	Groups	Grupos
+	Ungrouped	Sin grupo
+	Graded	Con color
+	Bypassed	Desactivado
+	+ Group	+ Grupo
+	Group Selection	Agrupar selección
+	Add to Group	Añadir a grupo
+	Remove from Group	Quitar del grupo
+	Copy Grade	Copiar gradación
+	Paste Grade	Pegar gradación
+	Toggle Bypass	Activar/Desactivar gradación
+	Reset Grade	Restablecer gradación
+	Grade copied	Gradación copiada
+	+ New Group	+ Nuevo grupo
+	Edit Clip	Editar clip
+	No color groups yet. Select clips in Clips or click '+ New Group'.	Aún no hay grupos de color. Selecciona clips en Clips o pulsa '+ Nuevo grupo'.
+	Empty	Vacío
+	Assign Selected Clips	Asignar clips seleccionados
+	Delete Group	Eliminar grupo
+	(color grading effect unavailable)	(efecto de gradación de color no disponible)
+	Group: {name}	Grupo: {name}
+	Group · {name}	Grupo · {name}
+	Create New Group ({n})	Crear nuevo grupo ({n})
+	Create New Group	Crear nuevo grupo
+	(No groups yet)	(Aún no hay grupos)
+	+ Create New Group	+ Crear nuevo grupo
+	Wheels & Match	Ruedas & Match
+	Bypass Color Grading (on/off)	Activar/Desactivar gradación de color
+	Reset all color adjustments	Restablecer todos los ajustes de color
+	Clip · {name}	Clip · {name}
+	Color Wheels	Ruedas de Color
+	Custom RGB	Personalizada (RGB)
+	Channel:	Canal:
+	Reset curve	Restablecer curva
+	Global	Global
+	Reset this wheel (or double-click)	Restablecer esta rueda (o doble clic)
+	Drag horizontally to adjust luminance (Shift = fine, Double-click = reset)	Arrastra horizontalmente para ajustar luminancia (Shift = preciso, Doble clic = restablecer)

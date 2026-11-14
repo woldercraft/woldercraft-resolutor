@@ -36,9 +36,11 @@ pub struct CpalOut {
     /// Status-bar note: the host's default device could not be opened and a fallback device is
     /// in use, or no output device was found (playing without sound).
     note: Option<Note>,
-    /// The fallback picked when the default device could not be opened, as (host, device) names,
+    /// Fallback picked when the default device could not be opened, as (host, device) names,
     /// so later lookups (`devices`, `configure`, `start`) reuse it instead of probing every PCM.
     fallback: Mutex<Option<(String, String)>>,
+    /// After a backend stream error at a fixed buffer size, fall back to `BufferSize::Default`.
+    safe_buffer: bool,
 }
 
 /// A hardware note for the status bar, translated when it is shown.
@@ -59,6 +61,29 @@ impl Note {
             Note::NoDevice => t("No audio output device found: playing without sound (check Settings > Audio Hardware)").to_string(),
         }
     }
+}
+
+/// Minimum ALSA total ring-buffer size in frames (~40 ms rounded up to a power of two).
+///
+/// cpal's ALSA backend translates `BufferSize::Fixed(v)` directly into a `v`-frame ring buffer
+/// with `v / 4`-frame periods, unlike CoreAudio/WASAPI where `v` is a callback block. Under
+/// sound servers like `pipewire-alsa` (typically 1024-frame quantums), tiny fixed buffers like
+/// the default 512 frames produce immediate `POLLERR` stalls.
+fn min_alsa_buffer_frames(rate: u32) -> u32 {
+    (rate / 25).checked_next_power_of_two().unwrap_or(2048).max(2048)
+}
+
+/// Effective `cpal::BufferSize` for `host_name` ("ALSA", "CoreAudio", etc.) given the device's
+/// supported range, requested frames, and whether an earlier error triggered safe default sizing.
+fn effective_buffer_size(host_name: &str, rate: u32, supported: cpal::SupportedBufferSize, requested: u32, safe_fallback: bool) -> cpal::BufferSize {
+    if safe_fallback || requested == 0 {
+        return cpal::BufferSize::Default;
+    }
+    let cpal::SupportedBufferSize::Range { min, max } = supported else {
+        return cpal::BufferSize::Default;
+    };
+    let frames = if host_name == "ALSA" { requested.max(min_alsa_buffer_frames(rate)) } else { requested };
+    if (min..=max).contains(&frames) { cpal::BufferSize::Fixed(frames) } else { cpal::BufferSize::Default }
 }
 
 /// Whether the settings name a sample rate the device does not already run at, so its supported
@@ -181,6 +206,7 @@ impl CpalOut {
             document_rate: None,
             note,
             fallback,
+            safe_buffer: false,
         }
     }
 
@@ -235,11 +261,7 @@ impl CpalOut {
             return Err(format!("the output device now runs at {} Hz with {} channels", cfg.sample_rate().0, cfg.channels()));
         }
         let mut config: cpal::StreamConfig = cfg.clone().into();
-        if let cpal::SupportedBufferSize::Range { min, max } = cfg.buffer_size()
-            && (*min..=*max).contains(&self.hw.buffer_size)
-        {
-            config.buffer_size = cpal::BufferSize::Fixed(self.hw.buffer_size);
-        }
+        config.buffer_size = effective_buffer_size(host.id().name(), cfg.sample_rate().0, *cfg.buffer_size(), self.hw.buffer_size, self.safe_buffer);
         self.rate = cfg.sample_rate().0;
         self.channels = cfg.channels();
         let stream = match cfg.sample_format() {
@@ -280,6 +302,21 @@ impl CpalOut {
         self.stream = None;
         self.health.clear_errors();
         self.open(fill, Some(expect))
+    }
+
+    /// On a backend stream error (`!lost`), switch future restarts to `BufferSize::Default`.
+    fn prepare_restart(&mut self, lost: bool) {
+        if !lost && !self.safe_buffer {
+            self.safe_buffer = true;
+            log::warn!("falling back to backend default audio buffer sizing after stream error");
+        }
+    }
+
+    /// Clear fallback buffer mode when the user picks a different device or buffer size.
+    fn reset_safe_buffer_if_changed(&mut self, hw: &AudioHardwarePrefs) {
+        if self.hw.buffer_size != hw.buffer_size || self.hw.device_class != hw.device_class || self.hw.default_output != hw.default_output {
+            self.safe_buffer = false;
+        }
     }
 }
 
@@ -387,6 +424,7 @@ fn stream_error(health: &Health, e: cpal::StreamError) {
         cpal::StreamError::BackendSpecific { .. } => health.errored.store(true, Ordering::SeqCst),
     }
     if !health.reported.swap(true, Ordering::SeqCst) {
+        log::warn!("audio stream error: {e}");
         eprintln!("filmcraft: audio stream error: {e}");
     }
 }
@@ -424,6 +462,7 @@ impl AudioOut for CpalOut {
             Verdict::Healthy => {}
             Verdict::Restart => {
                 log::warn!("the audio output stream {}; restarting it", if lost { "lost its device" } else { "stopped after an error" });
+                self.prepare_restart(lost);
                 if let Err(e) = self.restart() {
                     log::warn!("the audio output stream could not be restarted: {e}");
                     self.stream = None;
@@ -454,6 +493,7 @@ impl AudioOut for CpalOut {
         AudioDevices { hosts: cpal::available_hosts().iter().map(|h| h.name().to_string()).collect(), inputs, outputs, output_channels }
     }
     fn configure(&mut self, hw: &AudioHardwarePrefs, document_rate: Option<u32>) {
+        self.reset_safe_buffer_if_changed(hw);
         self.hw = hw.clone();
         self.document_rate = document_rate;
         // the rate playback mixes at must be known before `start`
@@ -603,5 +643,41 @@ mod tests {
         buf = [1.0; 4];
         render(&fill, &mut buf, 2, &played, &health);
         assert_eq!(buf, [0.0; 4]);
+    }
+
+    #[test]
+    fn alsa_enforces_a_safe_minimum_buffer_while_other_hosts_keep_requested_size() {
+        let range = cpal::SupportedBufferSize::Range { min: 1, max: 4_194_304 };
+        assert_eq!(min_alsa_buffer_frames(44_100), 2048);
+        assert_eq!(min_alsa_buffer_frames(48_000), 2048);
+        assert_eq!(min_alsa_buffer_frames(96_000), 4096);
+        assert_eq!(effective_buffer_size("ALSA", 48_000, range, 512, false), cpal::BufferSize::Fixed(2048));
+        assert_eq!(effective_buffer_size("ALSA", 96_000, range, 1024, false), cpal::BufferSize::Fixed(4096));
+        assert_eq!(effective_buffer_size("ALSA", 48_000, range, 4096, false), cpal::BufferSize::Fixed(4096));
+        assert_eq!(effective_buffer_size("CoreAudio", 48_000, range, 512, false), cpal::BufferSize::Fixed(512));
+        assert_eq!(effective_buffer_size("WASAPI", 48_000, range, 512, false), cpal::BufferSize::Fixed(512));
+        assert_eq!(effective_buffer_size("ALSA", 48_000, range, 512, true), cpal::BufferSize::Default);
+        let narrow = cpal::SupportedBufferSize::Range { min: 64, max: 1024 };
+        assert_eq!(effective_buffer_size("ALSA", 48_000, narrow, 512, false), cpal::BufferSize::Default);
+        assert_eq!(effective_buffer_size("ALSA", 48_000, cpal::SupportedBufferSize::Unknown, 512, false), cpal::BufferSize::Default);
+    }
+
+    #[test]
+    fn backend_error_restart_switches_to_safe_default_buffer() {
+        let mut out = CpalOut::new();
+        assert!(!out.safe_buffer);
+        // A hot-unplugged device keeps the configured buffer size on restart.
+        out.prepare_restart(true);
+        assert!(!out.safe_buffer);
+        // A backend error restart switches future opens to BufferSize::Default.
+        out.prepare_restart(false);
+        assert!(out.safe_buffer);
+        // Identical hardware prefs preserve safe_buffer; changing buffer size resets it.
+        out.reset_safe_buffer_if_changed(&AudioHardwarePrefs::default());
+        assert!(out.safe_buffer);
+        let mut hw = AudioHardwarePrefs::default();
+        hw.buffer_size = 4096;
+        out.reset_safe_buffer_if_changed(&hw);
+        assert!(!out.safe_buffer);
     }
 }

@@ -278,6 +278,52 @@ impl filmcraft_export::FrameRenderer for GpuFrameRenderer {
         self.0.caps()
     }
 
+    fn supports_plan(&self) -> bool {
+        true
+    }
+
+    fn render_plan(&mut self, plan: &filmcraft_render::plan::FramePlan) -> Option<filmcraft_render::Image> {
+        self.0.render_plan(plan)
+    }
+
+    fn render_plan_rgba8(&mut self, plan: &filmcraft_render::plan::FramePlan) -> Option<(u32, u32, Vec<u8>)> {
+        self.0.render_plan_rgba8(plan)
+    }
+
+    fn render_plan_nv12(&mut self, plan: &filmcraft_render::plan::FramePlan) -> Option<(u32, u32, Vec<u8>)> {
+        self.0.render_plan_nv12(plan)
+    }
+
+    fn render_plans_pipelined(
+        &mut self,
+        requests: &[(&filmcraft_render::plan::FramePlan, filmcraft_export::PlanRenderMode)],
+    ) -> Vec<Option<filmcraft_export::PlanRenderOutput>> {
+        let mapped: Vec<(&filmcraft_render::plan::FramePlan, filmcraft_gpu::ExportReadbackMode)> = requests
+            .iter()
+            .map(|(plan, mode)| {
+                let m = match mode {
+                    filmcraft_export::PlanRenderMode::RgbaF32 => filmcraft_gpu::ExportReadbackMode::RgbaF32,
+                    filmcraft_export::PlanRenderMode::Rgba8 => filmcraft_gpu::ExportReadbackMode::Rgba8,
+                    filmcraft_export::PlanRenderMode::Nv12 => filmcraft_gpu::ExportReadbackMode::Nv12,
+                };
+                (*plan, m)
+            })
+            .collect();
+        self.0
+            .render_plans_pipelined(&mapped)
+            .into_iter()
+            .map(|res| {
+                res.map(|out| match out {
+                    filmcraft_gpu::ExportOutput::RgbaF32(w, h, px) => {
+                        filmcraft_export::PlanRenderOutput::RgbaF32(filmcraft_render::Image { w: w as usize, h: h as usize, px })
+                    }
+                    filmcraft_gpu::ExportOutput::Rgba8(w, h, px) => filmcraft_export::PlanRenderOutput::Rgba8(w, h, px),
+                    filmcraft_gpu::ExportOutput::Nv12(w, h, px) => filmcraft_export::PlanRenderOutput::Nv12(w, h, px),
+                })
+            })
+            .collect()
+    }
+
     fn trim(&mut self) {
         self.0.trim();
     }

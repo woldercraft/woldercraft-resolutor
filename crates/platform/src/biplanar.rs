@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-use rayon::prelude::*;
 use filmcraft_frame::{Chroma, PixelData, VideoFrame, pool};
 
 /// A mapped biplanar surface: a luma plane followed by interleaved chroma, `stride` bytes per row.
@@ -52,12 +51,24 @@ pub fn to_frame(src: &Biplanar, g: &Geometry) -> Result<VideoFrame, String> {
     if src.rows < needs_rows || src.stride < needs_cols || src.stride < (cox + cw) * 2 * bps {
         return Err(format!("decoded surface ({} rows, {} byte rows) is smaller than the {w}x{h} picture at {ox},{oy}", src.rows, src.stride));
     }
+    let last_chroma_end = coy
+        .checked_add(ch)
+        .and_then(|r| r.checked_sub(1))
+        .and_then(|r| r.checked_mul(src.stride))
+        .and_then(|s| s.checked_add((cox + cw) * 2 * bps))
+        .ok_or("chroma plane offset overflows")?;
+    if src.chroma.len() < last_chroma_end {
+        return Err("chroma plane shorter than picture".into());
+    }
+    // Sequential row copies: `to_frame` runs inside `Readback::read` while holding `gpu.gate`
+    // (on the `decode_pool`). Dispatching to the global `rayon` pool here deadlocks when global
+    // `rayon` workers are blocked waiting on `decode_pool` / `gpu.gate`.
     let data = if bps == 1 {
         let mut yp = pool::take_u8_overwritten(w * h);
         if ox == 0 && oy == 0 && src.stride == w {
             yp.copy_from_slice(src.luma.get(..w * h).ok_or("luma plane shorter than picture")?);
         } else {
-            yp.par_chunks_exact_mut(w).enumerate().for_each(|(y, dst_row)| {
+            yp.chunks_exact_mut(w).enumerate().for_each(|(y, dst_row)| {
                 if let Ok(src_row) = row(src.luma, src.stride, oy + y, ox, w) {
                     dst_row.copy_from_slice(src_row);
                 }
@@ -65,8 +76,8 @@ pub fn to_frame(src: &Biplanar, g: &Geometry) -> Result<VideoFrame, String> {
         }
         let mut u = pool::take_u8_overwritten(cw * ch);
         let mut v = pool::take_u8_overwritten(cw * ch);
-        u.par_chunks_exact_mut(cw)
-            .zip(v.par_chunks_exact_mut(cw))
+        u.chunks_exact_mut(cw)
+            .zip(v.chunks_exact_mut(cw))
             .enumerate()
             .for_each(|(y, (u_row, v_row))| {
                 if let Ok(src_row) = row(src.chroma, src.stride, coy + y, cox * 2, cw * 2) {
@@ -80,7 +91,7 @@ pub fn to_frame(src: &Biplanar, g: &Geometry) -> Result<VideoFrame, String> {
     } else {
         let shift = 16 - g.bits;
         let mut yp = pool::take_u16_overwritten(w * h);
-        yp.par_chunks_exact_mut(w).enumerate().for_each(|(y, dst_row)| {
+        yp.chunks_exact_mut(w).enumerate().for_each(|(y, dst_row)| {
             if let Ok(src_row) = row(src.luma, src.stride, oy + y, ox * 2, w * 2) {
                 for (dst, b) in dst_row.iter_mut().zip(src_row.as_chunks::<2>().0) {
                     *dst = u16::from_le_bytes(*b) >> shift;
@@ -89,8 +100,8 @@ pub fn to_frame(src: &Biplanar, g: &Geometry) -> Result<VideoFrame, String> {
         });
         let mut u = pool::take_u16_overwritten(cw * ch);
         let mut v = pool::take_u16_overwritten(cw * ch);
-        u.par_chunks_exact_mut(cw)
-            .zip(v.par_chunks_exact_mut(cw))
+        u.chunks_exact_mut(cw)
+            .zip(v.chunks_exact_mut(cw))
             .enumerate()
             .for_each(|(y, (u_row, v_row))| {
                 if let Ok(src_row) = row(src.chroma, src.stride, coy + y, cox * 4, cw * 4) {

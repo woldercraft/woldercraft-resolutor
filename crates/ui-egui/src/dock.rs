@@ -34,6 +34,8 @@ pub enum PanelKind {
     EssentialGraphics,
     EssentialSound,
     TextToSpeech,
+    InspectorVideo,
+    InspectorAudio,
     Properties,
     Text,
     Events,
@@ -44,6 +46,7 @@ pub enum PanelKind {
     MacroTimeline,
     ColorNodes,
     ColorClips,
+    ColorGroups,
     ColorPrimaries,
     ColorWheels,
     ColorCurves,
@@ -55,7 +58,7 @@ pub enum PanelKind {
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 39] = [
+    pub const ALL: [PanelKind; 42] = [
         PanelKind::Project,
         PanelKind::MediaBrowser,
         PanelKind::Libraries,
@@ -77,6 +80,8 @@ impl PanelKind {
         PanelKind::EssentialGraphics,
         PanelKind::EssentialSound,
         PanelKind::TextToSpeech,
+        PanelKind::InspectorVideo,
+        PanelKind::InspectorAudio,
         PanelKind::Properties,
         PanelKind::Text,
         PanelKind::Events,
@@ -87,6 +92,7 @@ impl PanelKind {
         PanelKind::MacroTimeline,
         PanelKind::ColorNodes,
         PanelKind::ColorClips,
+        PanelKind::ColorGroups,
         PanelKind::ColorPrimaries,
         PanelKind::ColorWheels,
         PanelKind::ColorCurves,
@@ -119,6 +125,8 @@ impl PanelKind {
             PanelKind::EssentialGraphics => "Essential Graphics",
             PanelKind::EssentialSound => "Essential Sound",
             PanelKind::TextToSpeech => "Text to Speech",
+            PanelKind::InspectorVideo => "Video",
+            PanelKind::InspectorAudio => "Audio",
             PanelKind::Properties => "Properties",
             PanelKind::Text => "Text",
             PanelKind::Events => "Events",
@@ -129,6 +137,7 @@ impl PanelKind {
             PanelKind::MacroTimeline => "Macro Timeline",
             PanelKind::ColorNodes => "Color Nodes",
             PanelKind::ColorClips => "Clips",
+            PanelKind::ColorGroups => "Groups",
             PanelKind::ColorPrimaries => "Primaries",
             PanelKind::ColorWheels => "Color Wheels & Match",
             PanelKind::ColorCurves => "Curves",
@@ -443,6 +452,25 @@ mod legacy {
                 _ => {}
             }
         }
+        fn upgrade_inspector(node: &mut Node<PanelKind>) {
+            match node {
+                Node::Tabs { panels, active }
+                    if panels.as_slice() == [PanelKind::Properties, PanelKind::EssentialGraphics, PanelKind::Text] =>
+                {
+                    *panels = vec![PanelKind::InspectorVideo, PanelKind::InspectorAudio, PanelKind::Properties];
+                    *active = (*active).min(2);
+                }
+                Node::Tabs { panels, .. } if panels.as_slice() == [PanelKind::ColorClips, PanelKind::Timeline] => {
+                    panels.push(PanelKind::ColorGroups);
+                }
+                Node::Split { first, second, .. } => {
+                    upgrade_inspector(first);
+                    upgrade_inspector(second);
+                }
+                _ => {}
+            }
+        }
+        upgrade_inspector(root);
         if count(root) == 2 && selected_source(root) {
             remove_inactive(root);
         }
@@ -500,8 +528,8 @@ fn workspace_root(name: &str) -> Node<PanelKind> {
                 Ratio(0.35),
                 top_row,
                 vsplit(
-                    SplitSize::FixedFirst(76.0),
-                    tabs(&[ColorClips, Timeline], 0),
+                    SplitSize::FixedFirst(110.0),
+                    tabs(&[ColorClips, Timeline, ColorGroups], 0),
                     bottom_row,
                 ),
             )
@@ -573,14 +601,14 @@ fn workspace_root(name: &str) -> Node<PanelKind> {
             ),
             hsplit(Ratio(0.26), tabs(&[Project, MediaBrowser, Libraries, Info, Effects, Markers, History], 0), bottom_editing()),
         ),
-        // Editing (default), Learning, Review — Premiere 26 factory layout:
-        // top: Source group | Program | Properties; bottom: Project group | Tools | Timeline | Meters.
+        // Editing (default), Learning, Review — DaVinci Resolve-style Inspector tabs on the right:
+        // top: Source group | Program | Video / Audio / Properties; bottom: Project group | Tools | Timeline | Meters.
         _ => vsplit(
             Ratio(0.57),
             hsplit(
                 Ratio(0.72),
                 hsplit(Ratio(0.5), tabs(&[Source, EffectControls, AudioClipMixer, Metadata], 0), tabs(&[Program], 0)),
-                tabs(&[Properties, EssentialGraphics, Text], 0),
+                tabs(&[InspectorVideo, InspectorAudio, Properties], 0),
             ),
             hsplit(Ratio(0.29), tabs(&[Project, MediaBrowser, Libraries, Info, Effects, Markers, History], 0), bottom_editing()),
         ),
@@ -604,6 +632,10 @@ pub trait LayoutExt {
     fn replace_panel(&mut self, from: PanelKind, to: PanelKind) -> bool;
     /// Swap the positions of two panels anywhere in the tree.
     fn swap_panels(&mut self, p1: PanelKind, p2: PanelKind) -> bool;
+    /// Whether any Inspector tab (`Video`, `Audio`, or `Properties`) is open in the layout.
+    fn is_inspector_open(&self) -> bool;
+    /// Hide or restore the right-side Inspector tab group (`Video | Audio | Properties`).
+    fn toggle_inspector(&mut self);
 }
 
 impl LayoutExt for Layout {
@@ -725,6 +757,38 @@ impl LayoutExt for Layout {
             self.replace_panel(p2, p1)
         } else {
             false
+        }
+    }
+
+    fn is_inspector_open(&self) -> bool {
+        self.contains(&PanelKind::InspectorVideo) || self.contains(&PanelKind::InspectorAudio) || self.contains(&PanelKind::Properties)
+    }
+
+    fn toggle_inspector(&mut self) {
+        if self.is_inspector_open() {
+            for p in [PanelKind::InspectorVideo, PanelKind::InspectorAudio, PanelKind::Properties] {
+                let _ = self.apply(Action::Close { panel: p });
+            }
+            return;
+        }
+        fn beside_program(n: &mut Node<PanelKind>) -> bool {
+            match n {
+                Node::Split { first, second, .. } => beside_program(first) || beside_program(second),
+                Node::Tabs { panels, .. } if panels.contains(&PanelKind::Program) => {
+                    *n = hsplit(
+                        SplitSize::Ratio(0.72),
+                        n.clone(),
+                        tabs(&[PanelKind::InspectorVideo, PanelKind::InspectorAudio, PanelKind::Properties], 0),
+                    );
+                    true
+                }
+                _ => false,
+            }
+        }
+        if !self.root.as_mut().is_some_and(beside_program) {
+            self.open_near(PanelKind::InspectorVideo, PanelKind::Program);
+            self.open_near(PanelKind::InspectorAudio, PanelKind::InspectorVideo);
+            self.open_near(PanelKind::Properties, PanelKind::InspectorVideo);
         }
     }
 }
@@ -992,7 +1056,7 @@ mod tests {
             let layout = workspace(w);
             let fixed = layout.root.as_ref().map(fixed_splits).unwrap_or_default();
             if w == "Color" {
-                assert_eq!(fixed, vec![SplitSize::FixedFirst(270.0), SplitSize::FixedFirst(76.0)], "{w}");
+                assert_eq!(fixed, vec![SplitSize::FixedFirst(270.0), SplitSize::FixedFirst(110.0)], "{w}");
             } else if w == "Effects" {
                 assert_eq!(fixed, vec![SplitSize::FixedFirst(290.0), SplitSize::FixedFirst(76.0)], "{w}");
             } else {

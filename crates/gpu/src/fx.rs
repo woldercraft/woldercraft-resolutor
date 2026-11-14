@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use filmcraft_render::gpufx::FxOp;
+use filmcraft_render::gpufx::{FxOp, LUMETRI_CURVE_LEN, LumetriCurveTable, MaskCoverage};
 use filmcraft_render::plan::LayerFx;
 
 /// Working texture format.
@@ -61,6 +61,11 @@ const OP_THREE_WAY: u32 = 36;
 const OP_COLOR_WHEELS: u32 = 37;
 const OP_LUMETRI_LOOK: u32 = 38;
 const OP_LUT_3D: u32 = 39;
+const OP_LUMETRI_CURVES: u32 = 40;
+const OP_HSL_KEY: u32 = 41;
+const OP_HSL_MEDIAN: u32 = 42;
+const OP_HSL_APPLY: u32 = 43;
+const OP_MASK_MIX: u32 = 44;
 
 type Target = (wgpu::Texture, wgpu::TextureView);
 
@@ -73,6 +78,10 @@ pub(crate) struct FxStage {
     pool: HashMap<(u32, u32), Vec<Target>>,
     used: HashSet<(u32, u32)>,
     lut_cache: HashMap<usize, (Arc<filmcraft_color::Lut3d>, wgpu::Texture, wgpu::TextureView)>,
+    curve_cache: HashMap<usize, (Arc<Vec<[f32; 4]>>, wgpu::Texture, wgpu::TextureView)>,
+    mask_cache: HashMap<usize, (Arc<Vec<f32>>, wgpu::Texture, wgpu::TextureView)>,
+    uniform_buffers: Vec<wgpu::Buffer>,
+    uniform_buffer_idx: usize,
     /// Open [`begin_frame`](Self::begin_frame)s.
     frames: u32,
     /// Working textures created so far (a steady stream of frames creates none).
@@ -103,14 +112,20 @@ struct Step {
     code: u32,
     i1: [u32; 4],
     p: [f32; 24],
-    /// Unsharp combine: reads the blurred image and the original.
+    /// Combine with the preserved original in `orig` (Unsharp Mask or HSL Secondary apply).
     combine: bool,
-    /// A blur pass of Unsharp Mask (the original stays untouched until the combine).
-    unsharp_blur: bool,
+    /// Keeps `orig` untouched across intermediate passes (Unsharp blur or HSL key/denoise/blur).
+    preserve_orig: bool,
     /// Bokeh Blur's gather: its kernel (`filmcraft_render::vfx::bokeh_kernel`), read as the aux
     /// texture.
     kernel: Vec<(i32, i32, f32)>,
     lut: Option<Arc<filmcraft_color::Lut3d>>,
+    curves: Option<LumetriCurveTable>,
+    /// First pass of a masked op: save `cur` into `mask_stack`.
+    mask_save: bool,
+    /// Closing pass of a masked op: mix `cur` with saved original from `mask_stack` using `mask`.
+    mask_mix: bool,
+    mask: Option<MaskCoverage>,
 }
 
 fn step(code: u32, i1: [u32; 4], p: &[f32]) -> Step {
@@ -118,7 +133,20 @@ fn step(code: u32, i1: [u32; 4], p: &[f32]) -> Step {
     for (d, s) in q.iter_mut().zip(p) {
         *d = *s;
     }
-    Step { run: false, code, i1, p: q, combine: false, unsharp_blur: false, kernel: Vec::new(), lut: None }
+    Step {
+        run: false,
+        code,
+        i1,
+        p: q,
+        combine: false,
+        preserve_orig: false,
+        kernel: Vec::new(),
+        lut: None,
+        curves: None,
+        mask_save: false,
+        mask_mix: false,
+        mask: None,
+    }
 }
 
 /// Texels a row of a kernel texture holds.
@@ -229,7 +257,7 @@ fn steps(op: &FxOp, w: u32, h: u32) -> Vec<Step> {
             boxes(rx, false, true, &mut out);
             boxes(ry, true, true, &mut out);
             for s in &mut out {
-                s.unsharp_blur = true;
+                s.preserve_orig = true;
             }
             let mut s = step(OP_UNSHARP, [0; 4], &[*amount, *threshold]);
             s.combine = true;
@@ -302,6 +330,8 @@ fn steps(op: &FxOp, w: u32, h: u32) -> Vec<Step> {
             ls,
             lm,
             lh,
+            curves,
+            hsl,
             ..
         } => {
             if let Some(lut) = input_lut {
@@ -382,16 +412,59 @@ fn steps(op: &FxOp, w: u32, h: u32) -> Vec<Step> {
                 out.push(step(OP_COLOR_WHEELS, [0; 4], &wheels_p));
             }
 
+            if let Some(ct) = curves
+                && ct.active_mask != 0
+            {
+                let mut s = step(OP_LUMETRI_CURVES, [ct.active_mask, 0, 0, 0], &[]);
+                s.curves = Some(ct.clone());
+                out.push(s);
+            }
+
+            if let Some(hsl) = hsl {
+                let mut key_step = step(OP_HSL_KEY, [0; 4], &[hsl.hc, hsl.hr, hsl.smin, hsl.lmin, hsl.lmax, hsl.soft]);
+                key_step.preserve_orig = true;
+                out.push(key_step);
+                if hsl.denoise > 0.0 && hsl.denoise_r > 0 {
+                    let mut med_step = step(OP_HSL_MEDIAN, [hsl.denoise_r, 0, 0, 0], &[hsl.denoise]);
+                    med_step.preserve_orig = true;
+                    out.push(med_step);
+                }
+                if !hsl.blur_rx.is_empty() || !hsl.blur_ry.is_empty() {
+                    let blur_start = out.len();
+                    boxes(&hsl.blur_rx, false, true, &mut out);
+                    boxes(&hsl.blur_ry, true, true, &mut out);
+                    for bs in &mut out[blur_start..] {
+                        bs.preserve_orig = true;
+                    }
+                }
+                let mut apply_step = step(OP_HSL_APPLY, [hsl.show_mask, 0, 0, 0], &[hsl.htemp, hsl.htint, hsl.hsat, hsl.hshift]);
+                apply_step.combine = true;
+                out.push(apply_step);
+            }
+
             if sharpen.abs() > 1e-3 && !sharpen_rx.is_empty() {
                 let start = out.len();
                 boxes(sharpen_rx, false, true, &mut out);
                 boxes(sharpen_ry, true, true, &mut out);
                 for s in &mut out[start..] {
-                    s.unsharp_blur = true;
+                    s.preserve_orig = true;
                 }
                 let mut s = step(OP_UNSHARP, [0; 4], &[sharpen.max(-1.0), 0.0]);
                 s.combine = true;
                 out.push(s);
+            }
+        }
+        FxOp::Masked { inner, mask } => {
+            if mask.w == w && mask.h == h && mask.cov.len() == (w as usize).saturating_mul(h as usize) {
+                let mut inner_steps = steps(inner, w, h);
+                if let Some(first) = inner_steps.first_mut() {
+                    first.mask_save = true;
+                    out.extend(inner_steps);
+                    let mut mix_step = step(OP_MASK_MIX, [0; 4], &[]);
+                    mix_step.mask_mix = true;
+                    mix_step.mask = Some(mask.clone());
+                    out.push(mix_step);
+                }
             }
         }
     }
@@ -446,6 +519,7 @@ impl FxStage {
                     count: None,
                 },
                 tex(3),
+                tex(4),
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("fx"), bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
@@ -488,14 +562,20 @@ impl FxStage {
             pool: HashMap::new(),
             used: HashSet::new(),
             lut_cache: HashMap::new(),
+            curve_cache: HashMap::new(),
+            mask_cache: HashMap::new(),
+            uniform_buffers: Vec::new(),
+            uniform_buffer_idx: 0,
             frames: 0,
             created: 0,
         }
     }
 
-    /// Clear pooled textures and cached LUT textures.
+    /// Clear pooled textures and cached LUT / curve / mask textures.
     pub(crate) fn trim_uploads(&mut self) {
         self.lut_cache.clear();
+        self.curve_cache.clear();
+        self.mask_cache.clear();
         self.pool.clear();
     }
 
@@ -553,12 +633,138 @@ impl FxStage {
         view
     }
 
+    fn curve_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, ct: &LumetriCurveTable) -> wgpu::TextureView {
+        let key = Arc::as_ptr(&ct.texels) as usize;
+        if let Some((_, _, view)) = self.curve_cache.get(&key) {
+            return view.clone();
+        }
+        if self.curve_cache.len() >= 32 {
+            self.curve_cache.clear();
+        }
+        let width = LUMETRI_CURVE_LEN as u32;
+        let height = 3u32;
+        let row_bytes = width * 16;
+        let aligned_row_bytes = row_bytes.div_ceil(256) * 256;
+        let mut bytes = vec![0u8; (aligned_row_bytes * height) as usize];
+        for row in 0..height as usize {
+            let row_off = row * (aligned_row_bytes as usize);
+            let src_start = row * LUMETRI_CURVE_LEN;
+            for x in 0..LUMETRI_CURVE_LEN {
+                if let Some(c) = ct.texels.get(src_start + x) {
+                    let off = row_off + x * 16;
+                    if let Some(dst) = bytes.get_mut(off..off + 16) {
+                        dst[0..4].copy_from_slice(&c[0].to_le_bytes());
+                        dst[4..8].copy_from_slice(&c[1].to_le_bytes());
+                        dst[8..12].copy_from_slice(&c[2].to_le_bytes());
+                        dst[12..16].copy_from_slice(&c[3].to_le_bytes());
+                    }
+                }
+            }
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("filmcraft-fx-curves"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            texture.as_image_copy(),
+            &bytes,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(aligned_row_bytes), rows_per_image: Some(height) },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        let view = texture.create_view(&Default::default());
+        self.curve_cache.insert(key, (ct.texels.clone(), texture, view.clone()));
+        view
+    }
+
+    fn mask_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, mask: &MaskCoverage) -> wgpu::TextureView {
+        let key = Arc::as_ptr(&mask.cov) as usize;
+        if let Some((_, _, view)) = self.mask_cache.get(&key) {
+            return view.clone();
+        }
+        if self.mask_cache.len() >= 32 {
+            self.mask_cache.clear();
+        }
+        let (width, height) = (mask.w.max(1), mask.h.max(1));
+        let row_bytes = width * 4;
+        let aligned_row_bytes = row_bytes.div_ceil(256) * 256;
+        let mut bytes = vec![0u8; (aligned_row_bytes * height) as usize];
+        for y in 0..height as usize {
+            let row_off = y * (aligned_row_bytes as usize);
+            let src_off = y * (width as usize);
+            for x in 0..width as usize {
+                if let Some(&v) = mask.cov.get(src_off + x) {
+                    let off = row_off + x * 4;
+                    if let Some(dst) = bytes.get_mut(off..off + 4) {
+                        dst.copy_from_slice(&v.to_le_bytes());
+                    }
+                }
+            }
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("filmcraft-fx-mask"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            texture.as_image_copy(),
+            &bytes,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(aligned_row_bytes), rows_per_image: Some(height) },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        let view = texture.create_view(&Default::default());
+        self.mask_cache.insert(key, (mask.cov.clone(), texture, view.clone()));
+        view
+    }
+
+    fn uniform_buffer(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, bytes: &[u8]) -> wgpu::Buffer {
+        let idx = self.uniform_buffer_idx;
+        self.uniform_buffer_idx = idx.saturating_add(1);
+        let size = bytes.len() as u64;
+        let needs_new = self.uniform_buffers.get(idx).is_none_or(|b| b.size() < size);
+        if needs_new {
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("fx-u"),
+                size,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            if let Some(slot) = self.uniform_buffers.get_mut(idx) {
+                *slot = buf;
+            } else {
+                self.uniform_buffers.push(buf);
+            }
+        }
+        let buf = match self.uniform_buffers.get(idx) {
+            Some(b) => b.clone(),
+            None => device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("fx-u"),
+                size,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+        };
+        queue.write_buffer(&buf, 0, bytes);
+        buf
+    }
+
     /// Start a frame: pooled textures of sizes no layer uses by [`end_frame`](Self::end_frame)
     /// are released then. Frames nest (a composite of several steps is one frame around the
     /// layers of each step): the pool is trimmed when the outermost one ends.
     pub(crate) fn begin_frame(&mut self) {
         if self.frames == 0 {
             self.used.clear();
+            self.uniform_buffer_idx = 0;
         }
         self.frames = self.frames.saturating_add(1);
     }
@@ -580,6 +786,11 @@ impl FxStage {
     #[cfg(test)]
     pub(crate) fn is_idle(&self) -> bool {
         self.pool.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn uniform_pool_len(&self) -> usize {
+        self.uniform_buffers.len()
     }
 
     fn targets(&mut self, device: &wgpu::Device, size: (u32, u32), n: usize) -> Vec<Target> {
@@ -624,28 +835,55 @@ impl FxStage {
             return None;
         }
         let all: Vec<Step> = fx.ops.iter().flat_map(|op| steps(op, w, h)).collect();
-        let n = if all.iter().any(|s| s.combine) { 3 } else { 2 };
+        let mut n = 2usize;
+        let mut sim_orig = false;
+        let mut sim_mask_depth = 0usize;
+        for s in &all {
+            if (s.preserve_orig || s.combine) && !sim_orig {
+                sim_orig = true;
+            }
+            if s.mask_save {
+                sim_mask_depth = sim_mask_depth.saturating_add(1);
+            }
+            n = n.max(2 + usize::from(sim_orig) + sim_mask_depth);
+            if s.combine {
+                sim_orig = false;
+            }
+            if s.mask_mix {
+                sim_mask_depth = sim_mask_depth.saturating_sub(1);
+            }
+        }
         let targets = self.targets(device, (w, h), n);
         let views: Vec<wgpu::TextureView> = targets.iter().map(|t| t.1.clone()).collect();
         let mut dispatches = Vec::with_capacity(all.len());
         let mut cur = 0usize;
-        // Unsharp: the image its blur started from (kept while its blur passes run)
+        // Preserved original for two-stage effects (Unsharp Mask, HSL Secondary).
         let mut orig: Option<usize> = None;
+        // Saved originals before masked effects (Power Windows / effect masks).
+        let mut mask_stack: Vec<usize> = Vec::new();
         for s in &all {
-            // (an Unsharp without blur passes, radius 0, combines the original with itself)
-            if (s.unsharp_blur || s.combine) && orig.is_none() {
+            if s.mask_save {
+                mask_stack.push(cur);
+            }
+            if (s.preserve_orig || s.combine) && orig.is_none() {
                 orig = Some(cur);
             }
-            let keep = if s.unsharp_blur || s.combine { orig } else { None };
-            let dst = (0..n).find(|k| *k != cur && Some(*k) != keep)?;
+            let keep_orig = if s.preserve_orig || s.combine { orig } else { None };
+            let dst = (0..n).find(|k| *k != cur && Some(*k) != keep_orig && !mask_stack.contains(k))?;
             let kernel = (!s.kernel.is_empty()).then(|| kernel_texture(device, queue, &s.kernel));
             let lut_tex = s.lut.as_ref().map(|l| self.lut_texture(device, queue, l));
-            let aux = match (s.combine, orig, &kernel, &lut_tex) {
-                (true, Some(o), _, _) => views.get(o)?,
-                (_, _, Some(k), _) => k,
-                (_, _, _, Some(lt)) => lt,
+            let curve_tex = s.curves.as_ref().map(|c| self.curve_texture(device, queue, c));
+            let mask_tex_view = s.mask.as_ref().map(|m| self.mask_texture(device, queue, m));
+            let mask_orig = if s.mask_mix { mask_stack.pop() } else { None };
+            let aux = match (s.mask_mix, mask_orig, s.combine, orig, &kernel, &lut_tex, &curve_tex) {
+                (true, Some(mo), _, _, _, _, _) => views.get(mo)?,
+                (_, _, true, Some(o), _, _, _) => views.get(o)?,
+                (_, _, _, _, Some(k), _, _) => k,
+                (_, _, _, _, _, Some(lt), _) => lt,
+                (_, _, _, _, _, _, Some(ct)) => ct,
                 _ => dummy,
             };
+            let mask_view = mask_tex_view.as_ref().unwrap_or(dummy);
             let mut bytes = Vec::with_capacity(128);
             for v in [s.code, w, h, 0].iter().chain(&s.i1) {
                 bytes.extend_from_slice(&v.to_le_bytes());
@@ -653,13 +891,7 @@ impl FxStage {
             for v in &s.p {
                 bytes.extend_from_slice(&v.to_le_bytes());
             }
-            let buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("fx-u"),
-                size: bytes.len() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&buf, 0, &bytes);
+            let buf = self.uniform_buffer(device, queue, &bytes);
             let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("fx"),
                 layout: &self.bgl,
@@ -668,6 +900,7 @@ impl FxStage {
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(views.get(cur)?) },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(views.get(dst)?) },
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(aux) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(mask_view) },
                 ],
             });
             let groups = if s.run {

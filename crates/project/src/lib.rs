@@ -67,8 +67,8 @@ pub use item::{AudioChannelMap, Bin, BinEntry, Interpretation, ItemKind, MediaCl
 pub use label::Label;
 pub(crate) use sequence::bounded_time_range;
 pub use sequence::{
-    MAX_FRAME_PIXELS, MAX_FRAME_SIDE, MAX_PIXEL_ASPECT, Sequence, SequenceSettings, SplitMarks, checked_par, conformed_size, par_ratio, sane_par,
-    validate_frame_size,
+    ColorGroup, ColorGroupId, MAX_FRAME_PIXELS, MAX_FRAME_SIDE, MAX_PIXEL_ASPECT, Sequence, SequenceSettings, SplitMarks, checked_par,
+    conformed_size, par_ratio, sane_par, validate_frame_size,
 };
 pub use settings::{IngestAction, IngestSettings, ProjectSettings, ScratchDisks};
 pub use source::resolve_auto_points;
@@ -387,6 +387,7 @@ impl Project {
             multicam: None,
             merged: None,
             split: SplitMarks::default(),
+            color_groups: Vec::new(),
         };
         for i in 0..v {
             let id = TrackId(self.alloc_id());

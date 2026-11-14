@@ -816,6 +816,36 @@ fn custom(app: &mut FilmcraftApp, ui: &mut Ui, d: &mut SettingsDraft, name: &str
                 note(ui, &t, &last);
             }
         }
+        "aiControlStatus" => {
+            let status = app.hooks.ai_control_status.as_ref().map(|f| f()).unwrap_or_default();
+            let status_text = match &status {
+                crate::hooks::AiControlStatus::Disabled => tl!("Status: Disabled").to_string(),
+                crate::hooks::AiControlStatus::Listening { port } => tlf!("Status: Active on 127.0.0.1:{port}", port),
+                crate::hooks::AiControlStatus::Error(err) => tlf!("Status: Error ({err})", err),
+            };
+            note(ui, &t, &status_text);
+            if app.hooks.regenerate_ai_token.is_some() {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    field_label(ui, tl!("Control Token"));
+                    let b = ui.button(tl!("Regenerate Token"));
+                    app.auto.add("settings.aiIntegration.regenerateToken", b.rect, "Regenerate Token");
+                    if b.clicked()
+                        && let Some(regen) = app.hooks.regenerate_ai_token.as_mut()
+                    {
+                        let (rx, next_status) = regen();
+                        if let Some(rx) = rx {
+                            app.control_rx = Some(rx);
+                        }
+                        d.message = match next_status {
+                            crate::hooks::AiControlStatus::Listening { port } => tlf!("Token regenerated; listening on 127.0.0.1:{port}.", port),
+                            crate::hooks::AiControlStatus::Disabled => tl!("Token regenerated.").to_string(),
+                            crate::hooks::AiControlStatus::Error(err) => err,
+                        };
+                    }
+                });
+            }
+        }
         _ => {}
     }
 }

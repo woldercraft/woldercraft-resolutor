@@ -125,6 +125,7 @@ fn categories_follow_premiere_order() {
             "memory",
             "playback",
             "plugins",
+            "aiIntegration",
             "timeline",
             "trim"
         ]

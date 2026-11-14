@@ -156,7 +156,7 @@ pub(super) fn source_peaks(src: &dyn filmcraft_media::MediaSource, stream: usize
     let sr = 48_000u32;
     let total = dur.to_units_floor(sr as i64).max(0) as usize;
     let mut out = Vec::with_capacity(total / 256 + 1);
-    let chunk = 48_000 * 4;
+    let chunk = 48_000;
     let mut s = 0usize;
     while s < total {
         let n = chunk.min(total - s);
@@ -171,6 +171,7 @@ pub(super) fn source_peaks(src: &dyn filmcraft_media::MediaSource, stream: usize
             Err(_) => break,
         }
         s += n;
+        std::thread::yield_now();
     }
     out
 }

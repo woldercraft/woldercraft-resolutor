@@ -213,10 +213,17 @@ impl Pipeline {
     pub(crate) fn render_batch_limit(&self, requested: i64) -> i64 {
         let requested = requested.max(1);
         self.renderer.as_ref().map_or(requested, |pool| {
-            // Keep the batch bounded to the renderer pool capacity so every parallel frame
-            // task is guaranteed a renderer without condvar starvation or work-stealing deadlocks.
-            requested.min(i64::try_from(pool.capacity).unwrap_or(i64::MAX))
+            // Keep the batch bounded to the renderer pool capacity (times the 4-deep async
+            // readback ring when pipelined planning is supported) so every parallel task is
+            // guaranteed a renderer without condvar starvation or work-stealing deadlocks.
+            let per_renderer = if pool.supports_plan { 4 } else { 1 };
+            let cap = pool.capacity.saturating_mul(per_renderer);
+            requested.min(i64::try_from(cap).unwrap_or(i64::MAX))
         })
+    }
+
+    pub(crate) fn supports_pipelined_batch(&self) -> bool {
+        self.renderer.as_ref().is_some_and(|pool| pool.supports_plan)
     }
 
     pub fn new(project: Arc<Project>, seq: ItemId, settings: &ExportSettings, hdr_out: bool) -> Result<Self> {
@@ -289,17 +296,68 @@ impl Pipeline {
         self.nv12.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Whether the export needs no CPU post-processing between the composited linear accumulator
-    /// and the final sRGB over-black RGBA8 output (so the GPU can resolve directly to `Rgba8Unorm`).
-    fn can_direct_rgba8(&self) -> bool {
+    /// Whether the export needs no CPU post-processing (HDR, alpha, overlays) between the
+    /// composited linear accumulator and the final sRGB over-black RGBA8 output.
+    fn can_direct_rgba8_base(&self) -> bool {
         let fx = &self.effects;
         !self.hdr_out
             && !self.alpha
-            && self.geom.offset == (0, 0)
-            && self.geom.content.is_none_or(|(cw, ch)| (cw, ch) == (self.w as usize, self.h as usize))
             && self.overlay.is_none()
             && !(fx.name_overlay.enabled && !fx.name_overlay.text.trim().is_empty())
             && !fx.timecode_overlay.enabled
+    }
+
+    /// Whether the export needs no CPU post-processing and no geometry resampling/padding.
+    fn can_direct_rgba8(&self) -> bool {
+        self.can_direct_rgba8_base()
+            && self.geom.offset == (0, 0)
+            && self.geom.content.is_none_or(|(cw, ch)| (cw, ch) == (self.w as usize, self.h as usize))
+    }
+
+    /// Whether `self.geom` covers the full output `(self.w, self.h)` without letterbox/pillarbox
+    /// padding, so a `FramePlan::Layers` can be transformed directly into output space on the GPU.
+    fn can_bake_geom_in_layers(&self) -> bool {
+        match self.geom.content {
+            None => self.geom.offset == (0, 0),
+            Some((cw, ch)) => {
+                let (ox, oy) = self.geom.offset;
+                cw > 0 && ch > 0 && ox <= 0 && oy <= 0 && ox.saturating_add(cw as i64) >= self.w as i64 && oy.saturating_add(ch as i64) >= self.h as i64
+            }
+        }
+    }
+
+    /// If `self.can_direct_rgba8_base()` and `self.can_bake_geom_in_layers()`, return a `Layers`
+    /// plan whose layer matrices already include `self.geom` scaling and offset into `(self.w, self.h)`.
+    fn bake_geom_into_plan(&self, plan: &filmcraft_render::plan::FramePlan) -> Option<filmcraft_render::plan::FramePlan> {
+        if !self.can_direct_rgba8_base() || !self.can_bake_geom_in_layers() {
+            return None;
+        }
+        let filmcraft_render::plan::FramePlan::Layers { width, height, layers } = plan else {
+            return None;
+        };
+        if *width == 0 || *height == 0 {
+            return None;
+        }
+        if (*width, *height) == (self.w as usize, self.h as usize) && self.geom.offset == (0, 0) && self.geom.content.is_none_or(|(cw, ch)| (cw, ch) == (self.w as usize, self.h as usize)) {
+            return None;
+        }
+        let (cw, ch) = self.geom.content.unwrap_or((*width, *height));
+        let (ox, oy) = self.geom.offset;
+        let xform = filmcraft_geom::Affine::scale(cw as f64 / *width as f64, ch as f64 / *height as f64)
+            .then_apply(&filmcraft_geom::Affine::translate(ox as f64, oy as f64));
+        let baked_layers = layers
+            .iter()
+            .map(|l| {
+                let mut l = l.clone();
+                l.matrix = l.matrix.then_apply(&xform);
+                l
+            })
+            .collect();
+        Some(filmcraft_render::plan::FramePlan::Layers {
+            width: self.w as usize,
+            height: self.h as usize,
+            layers: baked_layers,
+        })
     }
 
     /// Plan and decode media for frame `f` when supported by the registered GPU renderer.
@@ -347,7 +405,15 @@ impl Pipeline {
                         .flatten()
                     }
                     filmcraft_render::plan::FramePlan::Layers { width, height, .. } => {
-                        if self.can_direct_rgba8() && (*width, *height) == (self.w as usize, self.h as usize) {
+                        let baked = self.bake_geom_into_plan(&plan);
+                        let direct_plan = if baked.is_some() {
+                            baked.as_ref()
+                        } else if self.can_direct_rgba8() && (*width, *height) == (self.w as usize, self.h as usize) {
+                            Some(&plan)
+                        } else {
+                            None
+                        };
+                        if let Some(direct_plan) = direct_plan {
                             // GPU colour conversion: only the NV12 picture comes back (the limiter
                             // works on RGBA, so it keeps the RGBA route)
                             if self.nv12.load(std::sync::atomic::Ordering::Relaxed) && !lim.enabled {
@@ -355,7 +421,7 @@ impl Pipeline {
                                 let nv12 = pool
                                     .with(|r| {
                                         crate::note_lock_wait(asked.elapsed());
-                                        r.render_plan_nv12(&plan)
+                                        r.render_plan_nv12(direct_plan)
                                     })
                                     .flatten();
                                 if let Some((_, _, nv12)) = nv12 {
@@ -367,7 +433,7 @@ impl Pipeline {
                             let direct = pool
                                 .with(|r| {
                                     crate::note_lock_wait(asked.elapsed());
-                                    r.render_plan_rgba8(&plan)
+                                    r.render_plan_rgba8(direct_plan)
                                 })
                                 .flatten();
                             if let Some((_, _, mut rgba)) = direct {
@@ -409,6 +475,11 @@ impl Pipeline {
                 filmcraft_render::render_sequence(&self.project, self.seq, t, self.opts, sources)
             }
         };
+        self.finalize_image(img, t)
+    }
+
+    /// Apply placement, export overlays, HDR output transform or sRGB flatten, and video limiter.
+    fn finalize_image(&self, img: Image, t: filmcraft_time::Tick) -> (Vec<u8>, Vec<f32>) {
         let mut img = self.place(img);
         self.overlays(&mut img, t);
         let lim = &self.effects.video_limiter;
@@ -433,6 +504,119 @@ impl Pipeline {
             limit_rgba8(&mut rgba, lim.min_percent, lim.max_percent);
         }
         (rgba, Vec::new())
+    }
+
+    /// Render a slice of `(frame_index, pre_plan)` items using pipelined GPU submission/readback
+    /// across the renderer pool, falling back to CPU for any frame the GPU declines.
+    pub fn render_plans_batch(
+        &self,
+        items: &[(i64, Option<filmcraft_render::plan::FramePlan>)],
+        sources: &dyn SourceProvider,
+    ) -> Vec<(Vec<u8>, Vec<f32>)> {
+        use crate::{PlanRenderMode, PlanRenderOutput};
+        let Some(pool) = self.renderer.as_ref().filter(|p| p.supports_plan) else {
+            return items.par_iter().map(|(fi, _)| self.render_plan_or_frame(*fi, None, sources)).collect();
+        };
+        let lim = &self.effects.video_limiter;
+        let direct_ok = self.can_direct_rgba8();
+        let use_nv12 = self.nv12.load(std::sync::atomic::Ordering::Relaxed) && !lim.enabled;
+
+        let baked_plans: Vec<Option<filmcraft_render::plan::FramePlan>> = items
+            .iter()
+            .map(|(_, plan)| plan.as_ref().and_then(|p| self.bake_geom_into_plan(p)))
+            .collect();
+
+        // Collect GPU-eligible items (index into `items`, &FramePlan, mode).
+        let mut gpu_indices: Vec<usize> = Vec::with_capacity(items.len());
+        let mut gpu_reqs: Vec<(&filmcraft_render::plan::FramePlan, PlanRenderMode)> = Vec::with_capacity(items.len());
+        for (idx, ((_, plan), baked)) in items.iter().zip(&baked_plans).enumerate() {
+            let Some(plan) = plan.as_ref() else { continue };
+            if matches!(plan, filmcraft_render::plan::FramePlan::Image(_)) {
+                continue;
+            }
+            let (req_plan, mode) = if let Some(baked) = baked.as_ref() {
+                (baked, if use_nv12 { PlanRenderMode::Nv12 } else { PlanRenderMode::Rgba8 })
+            } else {
+                let mode = match plan {
+                    filmcraft_render::plan::FramePlan::Layers { width, height, .. }
+                        if direct_ok && (*width, *height) == (self.w as usize, self.h as usize) =>
+                    {
+                        if use_nv12 { PlanRenderMode::Nv12 } else { PlanRenderMode::Rgba8 }
+                    }
+                    _ => PlanRenderMode::RgbaF32,
+                };
+                (plan, mode)
+            };
+            gpu_indices.push(idx);
+            gpu_reqs.push((req_plan, mode));
+        }
+
+        let mut gpu_outputs: Vec<Option<PlanRenderOutput>> = (0..items.len()).map(|_| None).collect();
+        if !gpu_reqs.is_empty() {
+            // Avoid wgpu Device/Queue lock contention: 1 renderer handles ~370 fps at 1080p,
+            // so cap workers per batch at 2 and keep at least 8 frames per renderer.
+            let workers = (gpu_reqs.len() / 8).clamp(1, pool.capacity.clamp(1, 2));
+            let chunk_size = gpu_reqs.len().div_ceil(workers).max(1);
+            let chunks: Vec<(usize, &[(&filmcraft_render::plan::FramePlan, PlanRenderMode)])> =
+                gpu_reqs.chunks(chunk_size).enumerate().map(|(c, slice)| (c * chunk_size, slice)).collect();
+            let chunk_results: Vec<(usize, Option<Vec<Option<PlanRenderOutput>>>)> = chunks
+                .into_par_iter()
+                .map(|(start, slice)| {
+                    let asked = web_time::Instant::now();
+                    let res = pool.with(|r| {
+                        crate::note_lock_wait(asked.elapsed());
+                        r.render_plans_pipelined(slice)
+                    });
+                    (start, res)
+                })
+                .collect();
+            for (start, res) in chunk_results {
+                if let Some(vec) = res {
+                    for (offset, out) in vec.into_iter().enumerate() {
+                        if let Some(&orig_idx) = gpu_indices.get(start + offset)
+                            && let Some(slot) = gpu_outputs.get_mut(orig_idx)
+                        {
+                            *slot = out;
+                        }
+                    }
+                }
+            }
+        }
+
+        items
+            .par_iter()
+            .zip(gpu_outputs.into_par_iter())
+            .map(|((fi, plan), gpu_out)| {
+                let t = self.rate.tick_of(*fi);
+                match gpu_out {
+                    Some(PlanRenderOutput::Nv12(_, _, nv12)) => {
+                        note_gpu_frame();
+                        (nv12, Vec::new())
+                    }
+                    Some(PlanRenderOutput::Rgba8(_, _, mut rgba)) => {
+                        note_gpu_frame();
+                        if lim.enabled {
+                            limit_rgba8(&mut rgba, lim.min_percent, lim.max_percent);
+                        }
+                        (rgba, Vec::new())
+                    }
+                    Some(PlanRenderOutput::RgbaF32(img)) => {
+                        note_gpu_frame();
+                        self.finalize_image(img, t)
+                    }
+                    None => {
+                        let img = match plan {
+                            Some(filmcraft_render::plan::FramePlan::Image(img)) => img.clone(),
+                            _ => {
+                                note_gpu_fallback();
+                                filmcraft_render::render_sequence(&self.project, self.seq, t, self.opts, sources)
+                            }
+                        };
+                        self.finalize_image(img, t)
+                    }
+                }
+            })
+            .collect()
     }
 
     /// Output frame `f` as straight sRGB RGBA8 at the output size, or for HDR exports the encoded

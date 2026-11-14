@@ -439,7 +439,7 @@ pub(super) fn text_edit(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &LayerView
     let panel_id = egui::Id::unique(TEXT_EDIT_ID).with("panel");
     let before = ui.data(|d| d.get_temp::<PanelKind>(panel_id));
     ui.data_mut(|d| d.insert_temp(panel_id, app.ui.focused));
-    if before.is_some_and(|b| b != app.ui.focused) && !matches!(app.ui.focused, PanelKind::Program | PanelKind::Properties | PanelKind::EssentialGraphics) {
+    if before.is_some_and(|b| b != app.ui.focused) && !matches!(app.ui.focused, PanelKind::Program | PanelKind::InspectorVideo | PanelKind::Properties | PanelKind::EssentialGraphics) {
         end_edit(app, ui);
         ime_off(app, ui);
         return;

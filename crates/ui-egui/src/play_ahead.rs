@@ -17,7 +17,7 @@ use std::time::Duration;
 
 /// How far ahead of the device the mixer keeps the ring (s). Edits made while playing are heard
 /// this much later.
-pub const LEAD_S: f64 = 0.2;
+pub const LEAD_S: f64 = 0.35;
 /// Frames mixed per block on the mixing thread.
 pub const BLOCK_FRAMES: usize = 1024;
 /// Ceiling on mixed channels (large interfaces and aggregate devices stay well under it).
@@ -132,15 +132,21 @@ where
     let lead = ((sample_rate as f64 * LEAD_S) as usize).max(BLOCK_FRAMES * 2);
     let ring = Arc::new(Ring::new(lead * ch));
     let mut block = vec![0.0; BLOCK_FRAMES * ch];
-    mix(start, &mut block, ch);
-    ring.push(&block);
+    let prefill_blocks = (lead / (2 * BLOCK_FRAMES)).clamp(1, 4);
+    let mut initial_cursor = start;
+    for _ in 0..prefill_blocks {
+        block.fill(0.0);
+        mix(initial_cursor, &mut block, ch);
+        ring.push(&block);
+        initial_cursor += BLOCK_FRAMES as i64;
+    }
     // Frames the callback played as silence that the mixer has not skipped yet.
     let skip = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     {
         let (ring, skip, stop) = (ring.clone(), skip.clone(), stop.clone());
         let body = move || {
-            let mut cursor = start + BLOCK_FRAMES as i64;
+            let mut cursor = initial_cursor;
             while !stop.load(Ordering::Acquire) {
                 if ring.len() + block.len() > lead * ch {
                     std::thread::sleep(Duration::from_millis(2));
@@ -190,4 +196,69 @@ where
             stats.min_lead_frames.fetch_min((left / ch) as u64, Ordering::Relaxed);
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn startup_prefill_serves_immediate_burst_without_underrun() {
+        let stats = Arc::new(AudioStats::default());
+        let mut fill = spawn(
+            |cursor, out, ch| {
+                for f in 0..(out.len() / ch) {
+                    let v = (cursor + f as i64) as f32;
+                    for c in 0..ch {
+                        out[f * ch + c] = v;
+                    }
+                }
+            },
+            100,
+            48_000,
+            2,
+            stats.clone(),
+        );
+        let mut buf = vec![0.0; BLOCK_FRAMES * 2];
+        for b in 0..3 {
+            fill(&mut buf, 2);
+            assert_eq!(buf[0], (100 + b * BLOCK_FRAMES) as f32);
+        }
+        assert_eq!(stats.underruns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn stall_recovery_resyncs_and_refills_ring() {
+        let stats = Arc::new(AudioStats::default());
+        let gate = Arc::new(AtomicBool::new(true));
+        let gate_bg = gate.clone();
+        let mut fill = spawn(
+            move |cursor, out, ch| {
+                if cursor >= (4 * BLOCK_FRAMES) as i64 && gate_bg.swap(false, Ordering::AcqRel) {
+                    std::thread::sleep(Duration::from_millis(30));
+                }
+                for f in 0..(out.len() / ch) {
+                    let v = (cursor + f as i64 + 1) as f32;
+                    for c in 0..ch {
+                        out[f * ch + c] = v;
+                    }
+                }
+            },
+            0,
+            48_000,
+            2,
+            stats.clone(),
+        );
+        let mut buf = vec![0.0; BLOCK_FRAMES * 2];
+        // Drain prefill + force an underrun while the background block sleeps.
+        for _ in 0..6 {
+            fill(&mut buf, 2);
+        }
+        assert!(stats.underruns.load(Ordering::Relaxed) >= 1);
+        // Let the mixer refill and confirm non-silent synced samples arrive.
+        std::thread::sleep(Duration::from_millis(60));
+        fill(&mut buf, 2);
+        assert!(buf[0] > 0.0, "expected audio to recover after stall, got {}", buf[0]);
+    }
 }

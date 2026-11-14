@@ -103,12 +103,17 @@ impl VideoEncoder for NvencEncoder {
         u32::try_from(self.rate.num).unwrap_or(u32::MAX)
     }
 
+    fn accepts_nv12(&self) -> bool {
+        !self.enc.is_ten_bit() && !self.enc.takes_rgba()
+    }
+
     fn encode(&mut self, f: &EncoderFrame) -> Result<Vec<EncodedPacket>> {
         if f.width != self.w || f.height != self.h {
             return Err(ExportError::Encode(format!("NVENC: a {}x{} picture for a {}x{} encoder", f.width, f.height, self.w, self.h)));
         }
         let (w, h) = (self.w as usize, self.h as usize);
         let hint = if self.enc.codec() == Codec::H264 { " (turn Export > Hardware encoding off to use the software encoder)" } else { "" };
+        let nv12_len = w.saturating_mul(h).saturating_mul(3) / 2;
         let ps = match (self.enc.is_ten_bit(), f.hdr) {
             // Main 10 takes the encoded R'G'B' floats: 10-bit limited-range BT.2020 NCL (or the signal's matrix)
             (true, Some(rgb)) => {
@@ -122,6 +127,9 @@ impl VideoEncoder for NvencEncoder {
             (false, Some(_)) => return Err(ExportError::Unsupported("NVENC Main (8-bit) does not take HDR pictures".into())),
             // the GPU converts the RGBA picture itself (BT.709 limited range, the same codes as `rgba_to_yuv420_8`)
             (false, None) if self.enc.takes_rgba() => self.enc.encode_rgba(f.rgba, f.index).map_err(|e| ExportError::Encode(format!("NVENC: {e}{hint}")))?,
+            (false, None) if f.rgba.len() == nv12_len => {
+                self.enc.encode_nv12(f.rgba, f.index).map_err(|e| ExportError::Encode(format!("NVENC: {e}{hint}")))?
+            }
             (false, None) => {
                 filmcraft_export::timed(filmcraft_export::Stage::Convert, || {
                     filmcraft_export::rgba_to_yuv420_8(f.rgba, w, h, &mut self.y, &mut self.u, &mut self.v)

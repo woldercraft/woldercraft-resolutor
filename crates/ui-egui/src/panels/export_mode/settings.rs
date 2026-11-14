@@ -744,8 +744,25 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
                 });
                 row(ui, t, "", |ui| {
                     let g_label = gpu_short.unwrap_or("GPU");
+                    let hw_blocker = if s.bitrate_mode == BitrateMode::Vbr2Pass {
+                        Some("VBR 2 pasadas")
+                    } else if s.bitrate_mode == BitrateMode::Crf {
+                        Some("CRF")
+                    } else if s.h264_intra_only {
+                        Some("All-Intra")
+                    } else if s.h264_profile == H264Profile::High10 {
+                        Some("High 10 (10-bit)")
+                    } else if s.field_order != FieldOrder::Progressive {
+                        Some("Entrelazado")
+                    } else {
+                        None
+                    };
                     let (status_text, is_hw) = if s.hardware_encoding == HardwareEncoding::Auto && hw_enc_available {
-                        (format!("🟢 Exportación 100% con GPU: {g_label} (Render Vulkan + Codificador Hardware)"), true)
+                        if let Some(reason) = hw_blocker {
+                            (format!("⚠ Codificador en CPU (x264): {reason} no es compatible con GPU"), false)
+                        } else {
+                            (format!("🟢 Exportación 100% con GPU: {g_label} (Render Vulkan + Codificador Hardware)"), true)
+                        }
                     } else {
                         (format!("ℹ Codificador en CPU (Software x264) · Efectos en {g_label}"), false)
                     };

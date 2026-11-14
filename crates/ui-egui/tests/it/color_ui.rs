@@ -353,18 +353,22 @@ fn hdr_lumetri_controls_hsl_refine_and_comparison_view() {
         assert!(!d.ids(id).is_empty(), "{id} missing: {:?}", d.ids("lumetri."));
     }
     d.click("lumetri.section.Curves");
+    d.frames(2);
     assert!(!d.ids("lumetri.param.curves_hdr_range").is_empty());
+    // Single-section exclusive display in LumetriColor: Basic Correction is hidden while Curves is active
+    assert!(d.ids("lumetri.param.hdr_white").is_empty());
     d.snapshot("color-lumetri-hdr", None);
-    // clicking on the HDR White slider sets it (an undoable engine edit)
+    // Switch back to Basic Correction and click HDR White slider (an undoable engine edit)
+    d.click("lumetri.section.Basic Correction");
+    d.frames(2);
     let r = d.element("lumetri.param.hdr_white").unwrap();
     d.ok("ui.click", json!({"x": r[0] + 112.0 + 4.0, "y": r[1] + r[3] / 2.0}));
     d.frames(3);
     let e = lumetri(&mut d, clip);
     assert_ne!(e["params"]["hdr_white"]["value"], json!("Float(1000.0)"), "{e}");
-    // HSL Secondary ▸ Refine (fold Basic Correction and Curves so the section is on screen)
-    d.click("lumetri.section.Curves");
-    d.click("lumetri.section.Basic Correction");
+    // HSL Secondary ▸ Refine (switches directly to HSL Secondary)
     d.click("lumetri.section.HSL Secondary");
+    d.frames(2);
     for id in ["lumetri.param.hsl_denoise", "lumetri.param.hsl_blur"] {
         assert!(!d.ids(id).is_empty(), "{id} missing");
     }
@@ -931,4 +935,55 @@ fn lumetri_index(d: &mut Driver, clip: u64) -> usize {
     let items = seq["video"][0]["items"].as_array().unwrap().clone();
     let it = items.into_iter().find(|i| i["clip"] == clip).unwrap();
     it["effects"].as_array().unwrap().iter().position(|e| e["effect"] == "lumetri").unwrap()
+}
+
+#[test]
+fn lumetri_primaries_wheels_and_controls_fit_inside_panel_at_1080p() {
+    for (w, h) in [(1920.0, 1080.0), (1366.0, 768.0), (1280.0, 720.0), (960.0, 720.0)] {
+        let mut session = Session::default();
+        session.execute("file.openDemoProject", json!({})).expect("demo project");
+        let (tx, rx) = channel();
+        let app = FilmcraftApp::new(session).with_control(rx);
+        let harness = Harness::builder().with_size(egui::vec2(w, h)).with_max_steps(10_000).build_eframe(move |_cc| app);
+        let mut d = Driver { harness, tx, snapshots: None };
+        d.frames(4);
+        d.ok("ui.menu.invoke", json!({"id": "app.language.spanish"}));
+        d.ok("ui.set", json!({"workspace": "Color"}));
+        d.frames(4);
+        let _clip = select_first_clip(&mut d);
+        d.frames(4);
+
+        let check_fit = |d: &mut Driver, tag: &str| {
+            let menu_lumetri = d.element("panel.menu.LumetriColor").expect("LumetriColor panel menu");
+            let panel_right = menu_lumetri[0] as f64 + menu_lumetri[2] as f64;
+            let elems = d.ok("ui.elements", json!({"prefix": "lumetri."}));
+            let arr = elems.as_array().unwrap();
+            for id in [
+                "lumetri.bar.top",
+                "lumetri.bar.bottom",
+                "lumetri.bar.left",
+                "lumetri.bar.dual",
+                "lumetri.mode.wheels",
+                "lumetri.mode.knobs",
+                "lumetri.mode.sliders",
+                "lumetri.wheel.lift",
+                "lumetri.wheel.gamma",
+                "lumetri.wheel.gain",
+                "lumetri.wheel.offset",
+            ] {
+                let rect = arr.iter().rfind(|el| el["id"] == id).unwrap_or_else(|| panic!("{tag}: missing {id} in {elems}"))["rect"]
+                    .clone();
+                let right = rect[0].as_f64().unwrap() + rect[2].as_f64().unwrap();
+                assert!(right <= panel_right + 1.0, "{tag}: {id} clipped past panel_right={panel_right}: rect={rect}");
+            }
+            let sw = arr.iter().rfind(|el| el["id"] == "lumetri.switch.Basic Correction").unwrap()["rect"].clone();
+            let sw_right = sw[0].as_f64().unwrap() + sw[2].as_f64().unwrap();
+            assert!(sw_right <= panel_right + 1.0, "{tag}: Basic Correction header switch clipped past panel_right={panel_right}: sw={sw}");
+        };
+
+        check_fit(&mut d, &format!("{w}x{h} single"));
+        d.click("lumetri.bar.dual");
+        d.frames(3);
+        check_fit(&mut d, &format!("{w}x{h} dual"));
+    }
 }

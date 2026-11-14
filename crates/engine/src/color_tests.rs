@@ -446,3 +446,81 @@ fn export_cube_goes_through_the_host_and_refuses_a_masked_lumetri() {
     assert!(s.execute("lumetri.exportCube", json!({"path": other})).is_err());
     assert!(files.read_file(other).is_err());
 }
+
+#[test]
+fn color_groups_create_assign_grade_render_and_undo() {
+    let mut s = demo();
+    let clip1 = pick_clip(&mut s);
+    let clip2 = {
+        let q = s.active_sequence().unwrap();
+        q.video_tracks[0].items.get(1).map(|i| i.id).unwrap_or(clip1)
+    };
+    let before = mean(&s.render_program(0.125).unwrap());
+
+    // Create group containing clip1 and clip2
+    let res = s.execute("color.groupCreate", json!({"clips": [clip1.0, clip2.0], "name": "Warm Scene"})).unwrap();
+    let gid = res["group"].as_u64().unwrap();
+    {
+        let q = s.active_sequence().unwrap();
+        let g = q.color_group(filmcraft_project::ColorGroupId(gid)).unwrap();
+        assert_eq!(g.name, "Warm Scene");
+        assert!(g.clips.contains(&clip1));
+        assert!(g.clips.contains(&clip2));
+    }
+
+    // Grading the group alters rendered output of member clip
+    s.execute("color.groupSetParam", json!({"group": gid, "param": "exposure", "value": 1.5})).unwrap();
+    let after = mean(&s.render_program(0.125).unwrap());
+    assert!(after[0] > before[0] + 0.02, "expected brighter render from group exposure: {before:?} -> {after:?}");
+
+    // Bypass group restores original render
+    s.execute("color.groupToggleBypass", json!({"group": gid})).unwrap();
+    let bypassed = mean(&s.render_program(0.125).unwrap());
+    assert!((bypassed[0] - before[0]).abs() < 0.01, "expected bypassed render to match before: {before:?} vs {bypassed:?}");
+
+    // Undo restores exposure & unbypass, then undo removes group
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.active_sequence().unwrap().color_groups.is_empty());
+}
+
+#[test]
+fn color_batch_paste_toggle_and_reset_grade() {
+    let mut s = demo();
+    let (clip1, clip2) = {
+        let q = s.active_sequence().unwrap();
+        let items = &q.video_tracks[0].items;
+        assert!(items.len() >= 2, "demo should have at least 2 V1 clips");
+        (items[0].id, items[1].id)
+    };
+    s.execute("effects.apply", json!({"clips": [clip1.0], "effect": "lumetri"})).unwrap();
+    s.execute("effects.setParam", json!({"clip": clip1.0, "effect": "lumetri", "param": "exposure", "value": 1.25})).unwrap();
+
+    // Paste grade from clip1 to clip2
+    s.execute("color.batchPasteGrade", json!({"from": clip1.0, "clips": [clip2.0]})).unwrap();
+    {
+        let q = s.active_sequence().unwrap();
+        let (_, it2) = q.find_item(clip2).unwrap();
+        let lum = it2.effects.iter().find(|e| e.effect == "lumetri").unwrap();
+        assert_eq!(lum.param("exposure").and_then(|p| p.value.as_f64()), Some(1.25));
+    }
+
+    // Batch toggle bypass disables lumetri on both
+    s.execute("color.batchToggleBypass", json!({"clips": [clip1.0, clip2.0]})).unwrap();
+    {
+        let q = s.active_sequence().unwrap();
+        for cid in [clip1, clip2] {
+            let (_, it) = q.find_item(cid).unwrap();
+            assert!(!it.effects.iter().find(|e| e.effect == "lumetri").unwrap().enabled);
+        }
+    }
+
+    // Batch reset removes/resets lumetri on clip2
+    s.execute("color.batchResetGrade", json!({"clips": [clip2.0]})).unwrap();
+    {
+        let q = s.active_sequence().unwrap();
+        let (_, it2) = q.find_item(clip2).unwrap();
+        assert!(it2.effects.iter().all(|e| e.effect != "lumetri"));
+    }
+}

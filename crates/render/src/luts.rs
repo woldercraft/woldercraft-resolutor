@@ -112,6 +112,11 @@ fn cache() -> &'static Mutex<HashMap<CacheKey, Arc<Lut>>> {
     C.get_or_init(Default::default)
 }
 
+fn baked_cache() -> &'static Mutex<HashMap<(CacheKey, usize), Arc<Lut3d>>> {
+    static B: OnceLock<Mutex<HashMap<(CacheKey, usize), Arc<Lut3d>>>> = OnceLock::new();
+    B.get_or_init(Default::default)
+}
+
 fn cached(key: CacheKey, make: impl FnOnce() -> Option<Lut>) -> Option<Arc<Lut>> {
     if let Some(l) = cache().lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return Some(l.clone());
@@ -123,6 +128,21 @@ fn cached(key: CacheKey, make: impl FnOnce() -> Option<Lut>) -> Option<Arc<Lut>>
     }
     c.insert(key, l.clone());
     Some(l)
+}
+
+fn resolve_key(project: Option<&Project>, spec: &str) -> Option<(CacheKey, String)> {
+    let spec = spec.trim();
+    if let Some(id) = spec.strip_prefix("builtin:") {
+        builtins().iter().find(|b| b.id == id)?;
+        return Some((CacheKey::Builtin(id.to_string()), spec.to_string()));
+    }
+    let id = spec.strip_prefix("lib:")?;
+    let entry = project?.luts.iter().find(|l| l.id == id)?;
+    if entry.text.len() > MAX_LUT_TEXT_BYTES {
+        return None;
+    }
+    let key = CacheKey::Library { text: LutText(entry.text.clone()), format: entry.format.clone() };
+    Some((key, spec.to_string()))
 }
 
 /// Resolve a Color Grading LUT reference (see module docs). `None` for "" or unknown references.
@@ -140,6 +160,24 @@ pub fn resolve(project: Option<&Project>, spec: &str) -> Option<Arc<Lut>> {
     let key = CacheKey::Library { text: LutText(entry.text.clone()), format: entry.format.clone() };
     let fmt = LutFormat::from_path(&format!("x.{}", entry.format));
     cached(key, || Lut::parse(&entry.text, fmt).ok())
+}
+
+/// Resolve a Color Grading LUT reference baked to a `size³` 3D cube, cached across frames so
+/// GPU uploads keep a stable `Arc` pointer while the LUT is unchanged.
+pub fn resolve_baked_cube(project: Option<&Project>, spec: &str, size: usize) -> Option<Arc<Lut3d>> {
+    let (key, norm_spec) = resolve_key(project, spec)?;
+    let bkey = (key, size);
+    if let Some(cube) = baked_cache().lock().unwrap_or_else(|e| e.into_inner()).get(&bkey) {
+        return Some(cube.clone());
+    }
+    let lut = resolve(project, &norm_spec)?;
+    let cube = Arc::new(lut.baked_cube(size).ok()?);
+    let mut cache_guard = baked_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if cache_guard.len() > 64 {
+        cache_guard.clear();
+    }
+    cache_guard.insert(bkey, cube.clone());
+    Some(cube)
 }
 
 /// Human-readable name of a LUT reference (for panels).
@@ -215,5 +253,14 @@ mod tests {
             text: "#".repeat(MAX_LUT_TEXT_BYTES + 1).into(),
         });
         assert!(resolve(Some(&p), "lib:too-big").is_none());
+    }
+
+    #[test]
+    fn resolve_baked_cube_shares_arc_across_repeated_calls() {
+        let p = Project::new("t");
+        let a = resolve_baked_cube(Some(&p), "builtin:look-teal-orange", 33).expect("baked LUT");
+        let b = resolve_baked_cube(Some(&p), "builtin:look-teal-orange", 33).expect("cached baked LUT");
+        assert!(Arc::ptr_eq(&a, &b), "baked LUT calls with the same spec and size should reuse the cached Arc");
+        assert!(resolve_baked_cube(Some(&p), "", 33).is_none());
     }
 }

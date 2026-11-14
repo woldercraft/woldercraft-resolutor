@@ -5,7 +5,8 @@
 //! decodes [`crate::audio::OPUS_PRE_ROLL`] of preceding packets first (≥ the 80 ms `roll` distance).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
 use filmcraft_color::ColorInfo;
 use filmcraft_frame::{AudioBuffer, Region, VideoFrame};
@@ -56,21 +57,33 @@ fn nominal_rate(timescale: u32, samples: &[Sample]) -> Option<FrameRate> {
     Some(FrameRate::from_f64_within(f64::from(timescale) / mean, STANDARD_RATE_TOLERANCE).sane())
 }
 
-struct AudioState {
-    decoder: Option<PacketDecoder>,
+/// Number of independent decoder cursor slots per MP4 audio track so concurrent playback and
+/// background waveform/scrub readers never reset or stall each other's sequential codec state.
+const MAX_AUDIO_DECODER_SLOTS: usize = 4;
+
+#[derive(Default)]
+struct AudioPacketCache {
     /// Decoded packets by sample index.
     packets: HashMap<usize, Arc<DecodedAudioPacket>>,
     order: Vec<usize>,
-    last_decoded: Option<usize>,
     /// Bytes of the decoded packets held in `packets`.
     bytes: usize,
 }
 
-/// One playable audio track with its own decoder state and timing tables.
+#[derive(Default)]
+struct AudioCursorState {
+    decoder: Option<PacketDecoder>,
+    last_decoded: Option<usize>,
+    last_used: u64,
+}
+
+/// One playable audio track with shared packet cache and independent cursor decoder slots.
 struct Mp4Audio {
     /// Index into `Mp4File::tracks`.
     track: usize,
-    state: Mutex<AudioState>,
+    cache: Mutex<AudioPacketCache>,
+    cursors: [Mutex<AudioCursorState>; MAX_AUDIO_DECODER_SLOTS],
+    cursor_seq: AtomicU64,
     /// Packet start positions in source sample frames (see [`audio_starts`]).
     starts: Vec<i64>,
     /// Presentation offset of the track in its timescale (edit list, or Opus pre-skip).
@@ -395,8 +408,9 @@ impl Mp4Source {
                     }
                     _ => (t.edit_offset, 0),
                 };
-                let state = Mutex::new(AudioState { decoder: None, packets: HashMap::new(), order: Vec::new(), last_decoded: None, bytes: 0 });
-                Some(Mp4Audio { track: i, state, starts, offset, preroll })
+                let cache = Mutex::new(AudioPacketCache::default());
+                let cursors = std::array::from_fn(|_| Mutex::new(AudioCursorState::default()));
+                Some(Mp4Audio { track: i, cache, cursors, cursor_seq: AtomicU64::new(0), starts, offset, preroll })
             })
             .collect();
         snap_to_frame_grid(&mut file, vtrack);
@@ -421,10 +435,47 @@ impl Mp4Source {
         self.video.frame_late(&Mp4Video { src: self, track: ti }, at(t), late)
     }
 
-    /// Decoded packet `i` of audio stream `a` (`ainfo` is its `AudioStreamInfo`; `st` its decoder state).
-    fn audio_packet(&self, a: &Mp4Audio, ainfo: &AudioStreamInfo, st: &mut AudioState, i: usize) -> crate::Result<Arc<DecodedAudioPacket>> {
-        if let Some(p) = st.packets.get(&i) {
-            return Ok(p.clone());
+    fn checkout_cursor<'a>(&self, a: &'a Mp4Audio, target: usize) -> MutexGuard<'a, AudioCursorState> {
+        let mut best: Option<(u64, MutexGuard<'a, AudioCursorState>)> = None;
+        let prev = target.checked_sub(1);
+        for m in &a.cursors {
+            let guard = match m.try_lock() {
+                Ok(g) => g,
+                Err(TryLockError::Poisoned(p)) => p.into_inner(),
+                Err(TryLockError::WouldBlock) => continue,
+            };
+            if prev.is_some() && guard.last_decoded == prev {
+                let mut g = guard;
+                g.last_used = a.cursor_seq.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+                return g;
+            }
+            let rank = if guard.decoder.is_none() { 0 } else { guard.last_used.max(1) };
+            if best.as_ref().is_none_or(|(r, _)| rank < *r) {
+                best = Some((rank, guard));
+            }
+        }
+        let mut guard = match best {
+            Some((_, g)) => g,
+            None => a.cursors[0].lock().unwrap_or_else(PoisonError::into_inner),
+        };
+        guard.last_used = a.cursor_seq.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+        guard
+    }
+
+    /// Decoded packet `i` of audio stream `a` (`ainfo` is its `AudioStreamInfo`).
+    fn audio_packet<'a>(
+        &self,
+        a: &'a Mp4Audio,
+        ainfo: &AudioStreamInfo,
+        cursor: &mut Option<MutexGuard<'a, AudioCursorState>>,
+        i: usize,
+        cache_insert: bool,
+    ) -> crate::Result<Arc<DecodedAudioPacket>> {
+        {
+            let c = a.cache.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(p) = c.packets.get(&i) {
+                return Ok(p.clone());
+            }
         }
         let ti = a.track;
         let track = self.file.tracks.get(ti).ok_or_else(|| CodecError::Unsupported("no audio track".into()))?;
@@ -435,6 +486,7 @@ impl Mp4Source {
         let (samples, failed) = match &entry.codec {
             CodecConfig::Pcm(p) => (decode_pcm(&data, p), false),
             c => {
+                let st = cursor.get_or_insert_with(|| self.checkout_cursor(a, i));
                 if st.decoder.is_none() {
                     st.decoder = Some(PacketDecoder::for_isobmff(c, ainfo.sample_rate)?);
                 }
@@ -463,7 +515,11 @@ impl Mp4Source {
             }
         };
         let p = Arc::new(DecodedAudioPacket { samples, failed });
-        crate::audio::cache_packet(&mut st.packets, &mut st.order, &mut st.bytes, i, &p);
+        if cache_insert {
+            let mut guard = a.cache.lock().unwrap_or_else(PoisonError::into_inner);
+            let c = &mut *guard;
+            crate::audio::cache_packet(&mut c.packets, &mut c.order, &mut c.bytes, i, &p);
+        }
         Ok(p)
     }
 }
@@ -540,7 +596,8 @@ impl MediaSource for Mp4Source {
         let s0 = i64::try_from(i128::from(p0) - offset).unwrap_or(if offset > 0 { i64::MIN } else { i64::MAX });
         let need_i64 = i64::try_from(need).unwrap_or(i64::MAX);
         let mut src: Vec<Vec<f32>> = vec![vec![0.0; need]; ch];
-        let mut st = a.state.lock().unwrap_or_else(|e| e.into_inner());
+        let cache_insert = source_frames <= (src_rate as usize / 2).max(2048);
+        let mut cursor = None;
         let first = a.starts.partition_point(|&x| x <= s0.max(0)).saturating_sub(1);
         let mut i = first;
         while let Some(sample) = track.samples.get(i) {
@@ -548,7 +605,7 @@ impl MediaSource for Mp4Source {
             if pk_start >= s0.saturating_add(need_i64) {
                 break;
             }
-            let pk = self.audio_packet(a, ainfo, &mut st, i)?;
+            let pk = self.audio_packet(a, ainfo, &mut cursor, i, cache_insert)?;
             if pk.failed {
                 let range = failed_audio_span(pk_start, s0, sample.duration, src.first().map_or(0, Vec::len));
                 for dst in &mut src {
@@ -570,7 +627,7 @@ impl MediaSource for Mp4Source {
             }
             i += 1;
         }
-        drop(st);
+        drop(cursor);
         if src_rate == sample_rate {
             let mut out = AudioBuffer::silence(sample_rate, ch, frames);
             for c in 0..ch {
@@ -1102,11 +1159,11 @@ mod corrupt_audio_tests {
         let source = super::Mp4Source::open("damaged.m4a", mux.finish().unwrap().into_inner().into()).unwrap();
         let audio = &source.audios[0];
         let info = &source.info.audio_streams[0];
-        let mut state = audio.state.lock().unwrap();
-        let packet = source.audio_packet(audio, info, &mut state, 0).unwrap();
+        let mut cursor = None;
+        let packet = source.audio_packet(audio, info, &mut cursor, 0, true).unwrap();
         assert!(packet.failed);
         assert!(packet.samples.is_empty(), "failed packet must not allocate from its untrusted duration");
-        drop(state);
+        drop(cursor);
 
         let window = source.audio(0, 128, 48_000).unwrap();
         assert_eq!(window.channels.len(), 2);
@@ -1133,12 +1190,45 @@ mod corrupt_audio_tests {
         let prior_packet_len = {
             let audio = &source.audios[0];
             let info = &source.info.audio_streams[0];
-            let mut state = audio.state.lock().unwrap();
-            source.audio_packet(audio, info, &mut state, 1).unwrap().samples.first().map_or(0, Vec::len)
+            let mut cursor = None;
+            source.audio_packet(audio, info, &mut cursor, 1, true).unwrap().samples.first().map_or(0, Vec::len)
         };
         assert!(prior_packet_len > 400, "valid packet must overlap the failed packet");
         assert!(crossing.channels[0][..124].iter().any(|v| v.abs() > 0.001));
         assert!(isolated.channels[0].iter().all(|&v| v == 0.0));
         assert_eq!(&crossing.channels[0][124..], &isolated.channels[0]);
+    }
+
+    #[test]
+    fn concurrent_distant_aac_reads_stay_isolated_and_sample_exact() {
+        let rate = 48_000u32;
+        let total = 32_768usize;
+        let tone: Vec<f32> = (0..total).map(|i| 0.35 * (i as f32 * 0.09).sin()).collect();
+        let mut encoder = filmcraft_aac::Encoder::new(filmcraft_aac::EncoderConfig::cbr(rate, 1, 64_000)).unwrap();
+        let mut units = encoder.encode(&[&tone]);
+        units.extend(encoder.flush());
+        let mut mux = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mp4)).unwrap();
+        let track = mux.add_track(TrackConfig::new(SampleEntry::aac(vec![0x11, 0x88], 1, rate), rate)).unwrap();
+        for u in &units {
+            mux.write_sample(track, WriteSample { data: u, duration: 1024, composition_offset: 0, is_sync: true }).unwrap();
+        }
+        let bytes: std::sync::Arc<[u8]> = mux.finish().unwrap().into_inner().into();
+        let ref_src = super::Mp4Source::open("ref.m4a", bytes.clone()).unwrap();
+        let mut want_head = Vec::new();
+        for k in 0..8 {
+            want_head.extend_from_slice(&ref_src.audio(k * 1024, 1024, rate).unwrap().channels[0]);
+        }
+        let want_tail = ref_src.audio(16_384, 8192, rate).unwrap().channels[0].clone();
+
+        let src = std::sync::Arc::new(super::Mp4Source::open("concurrent.m4a", bytes).unwrap());
+        let src_bg = src.clone();
+        let bg = std::thread::spawn(move || src_bg.audio(16_384, 8192, rate).unwrap().channels.into_iter().next().unwrap());
+        let mut got_head = Vec::new();
+        for k in 0..8 {
+            got_head.extend_from_slice(&src.audio(k * 1024, 1024, rate).unwrap().channels[0]);
+        }
+        let got_tail = bg.join().unwrap();
+        assert_eq!(got_head, want_head);
+        assert_eq!(got_tail, want_tail);
     }
 }

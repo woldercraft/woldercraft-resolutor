@@ -101,7 +101,7 @@ mod raw_input;
 use audio::shuttle_mix_rate;
 pub use audio::{AUDIO_RETRY_S, AUDIO_STALL_S, playback_mix};
 pub use gpu::{gpu_compositor_unsupported, software_rasterizer};
-pub use hooks::{AudioDevices, AudioOut, ClipboardMedia, HostHooks, RelinkHint, SystemThemeFn};
+pub use hooks::{AiControlStatus, AudioDevices, AudioOut, ClipboardMedia, HostHooks, RelinkHint, SystemThemeFn};
 pub(crate) use raw_input::rewrite_native_window_input;
 
 pub use ime_reset::install_ime_reset_callbacks;
@@ -386,6 +386,10 @@ pub struct FilmcraftApp {
     /// Settings ▸ Appearance ▸ UI Scale last applied, with the system scale it was applied for.
     applied_ui_scale: Option<(Option<f32>, f32)>,
     workspace_restored: bool,
+    /// Last workspace name and layout persisted to `workspaces.json`.
+    last_saved_dock: Option<(String, dock::Layout)>,
+    /// When the live dock layout first diverged from `last_saved_dock` (for debounced auto-save).
+    dock_dirty_since: Option<web_time::Instant>,
     /// Window ▸ Workspaces: saved layouts ([`dock::WORKSPACES_FILE`] in the data directory).
     pub workspaces: dock::WorkspacePrefs,
     /// Workspace names and the current one, as last handed to the native menu.
@@ -405,4 +409,6 @@ pub struct GpuState {
     pub broken: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Largest texture side the device accepts.
     pub max_texture: u32,
+    /// Last time a Scopes panel requested GPU scope capture (avoids readback when scopes are hidden).
+    pub scope_last_requested: Option<web_time::Instant>,
 }

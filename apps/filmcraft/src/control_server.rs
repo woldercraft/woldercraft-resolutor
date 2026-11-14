@@ -52,27 +52,102 @@ impl std::fmt::Display for ControlServerRequired {
 impl std::error::Error for ControlServerRequired {}
 
 impl DisabledWhy {
-    /// The reason as one line, for `filmcraft.log` and the status bar.
+    /// The reason as one line, for `resolutor.log` and the status bar.
     pub fn reason(&self) -> String {
         match self {
-            Self::Token => "FILMCRAFT_CONTROL_TOKEN must contain 64 random hex characters (see docs/control-protocol.md)".into(),
+            Self::Token => "RESOLUTOR_CONTROL_TOKEN / FILMCRAFT_CONTROL_TOKEN must contain 64 random hex characters (see docs/control-protocol.md)".into(),
             Self::Bind { port, error } => format!("could not bind 127.0.0.1:{port}: {error}"),
         }
     }
+}
+
+fn is_valid_token(t: &str) -> bool {
+    t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn env_token() -> Option<String> {
+    std::env::var("RESOLUTOR_CONTROL_TOKEN").ok().or_else(|| std::env::var("FILMCRAFT_CONTROL_TOKEN").ok())
+}
+
+fn token_file_path(data_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    data_dir.map(|d| d.join("control_token")).or_else(|| filmcraft_engine::autosave::default_data_dir().map(|d| d.join("control_token")))
+}
+
+fn read_token_file(data_dir: Option<&std::path::Path>) -> Option<String> {
+    let path = token_file_path(data_dir)?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let trimmed = raw.trim().to_string();
+    is_valid_token(&trimmed).then_some(trimmed)
+}
+
+fn generate_hex_token() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    #[cfg(unix)]
+    {
+        let mut f = std::fs::File::open("/dev/urandom").map_err(|e| format!("could not open /dev/urandom: {e}"))?;
+        f.read_exact(&mut bytes).map_err(|e| format!("could not read random bytes: {e}"))?;
+    }
+    #[cfg(not(unix))]
+    {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        for (i, chunk) in bytes.chunks_mut(8).enumerate() {
+            let mut h = RandomState::new().build_hasher();
+            h.write_usize(i);
+            h.write_u32(std::process::id());
+            let v = h.finish().to_le_bytes();
+            chunk.copy_from_slice(&v);
+        }
+    }
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn write_token_file(data_dir: Option<&std::path::Path>, token: &str) -> Result<(), String> {
+    let Some(path) = token_file_path(data_dir) else {
+        return Err("could not determine Resolutor data directory for control_token".into());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&path, format!("{token}\n")).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("could not set permissions on {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn resolve_or_create_token(data_dir: Option<&std::path::Path>) -> Result<String, String> {
+    if let Some(t) = env_token() {
+        return if is_valid_token(&t) {
+            Ok(t)
+        } else {
+            Err(DisabledWhy::Token.reason())
+        };
+    }
+    if let Some(t) = read_token_file(data_dir) {
+        return Ok(t);
+    }
+    let token = generate_hex_token()?;
+    write_token_file(data_dir, &token)?;
+    Ok(token)
 }
 
 /// Start the server for `--control`. Returns the request queue, a flag the app sets once it can
 /// answer requests (until then they are rejected with a retryable error), and — when the server
 /// is *not* running — why (#3436), for the log and (for a bad token) the status bar.
 pub fn start(port: u16, ctx: egui::Context) -> (Receiver<ControlRequest>, Arc<AtomicBool>, Option<DisabledWhy>) {
-    start_with_token(port, ctx, std::env::var("FILMCRAFT_CONTROL_TOKEN").ok())
+    let token = env_token().or_else(|| read_token_file(None));
+    start_with_token(port, ctx, token)
 }
 
 fn start_with_token(port: u16, ctx: egui::Context, token: Option<String>) -> (Receiver<ControlRequest>, Arc<AtomicBool>, Option<DisabledWhy>) {
     let (tx, rx) = channel::<ControlRequest>();
     // An inherited environment variable shares the credential with the owner's bridge process
     // without exposing it in command-line arguments, logs, or a shared discovery file.
-    let Some(token) = token.filter(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())) else {
+    let Some(token) = token.filter(|t| is_valid_token(t)) else {
         // The reason goes to the log (a desktop launch has no stderr to read; #3436) and back to
         // the app, which shows it in the status bar.
         log::warn!("control server disabled: {}", DisabledWhy::Token.reason());
@@ -86,7 +161,8 @@ fn start_with_token(port: u16, ctx: egui::Context, token: Option<String>) -> (Re
             // client retry would then apply the same mutation twice (#3436).
             let ready = Arc::new(AtomicBool::new(false));
             let loop_ready = Arc::clone(&ready);
-            std::thread::spawn(move || accept_loop(listener, tx, ctx, token, loop_ready));
+            let stop = Arc::new(AtomicBool::new(false));
+            std::thread::spawn(move || accept_loop(listener, tx, ctx, token, loop_ready, stop));
             (rx, ready, None)
         }
         Err(error) => {
@@ -97,9 +173,145 @@ fn start_with_token(port: u16, ctx: egui::Context, token: Option<String>) -> (Re
     }
 }
 
-fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context, token: String, ready: Arc<AtomicBool>) {
+struct ActiveServer {
+    port: u16,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Manages the live AI integration control server so it can be started, stopped, or
+/// reconfigured from Preferences without restarting Resolutor or unloading media from memory.
+pub struct ControlServerManager {
+    ctx: egui::Context,
+    data_dir: Option<std::path::PathBuf>,
+    active: Option<ActiveServer>,
+    status: filmcraft_ui_egui::AiControlStatus,
+}
+
+impl ControlServerManager {
+    pub fn new(ctx: egui::Context, data_dir: Option<std::path::PathBuf>, cli_port: Option<u16>) -> Self {
+        let status = match cli_port {
+            Some(port) => filmcraft_ui_egui::AiControlStatus::Listening { port },
+            None => filmcraft_ui_egui::AiControlStatus::Disabled,
+        };
+        Self { ctx, data_dir, active: None, status }
+    }
+
+    pub fn status(&self) -> filmcraft_ui_egui::AiControlStatus {
+        self.status.clone()
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(mut act) = self.active.take() {
+            act.stop.store(true, Ordering::Relaxed);
+            if let Some(handle) = act.handle.take() {
+                let _ = handle.join();
+            }
+            log::info!("control server stopped (was on 127.0.0.1:{})", act.port);
+        }
+        self.status = filmcraft_ui_egui::AiControlStatus::Disabled;
+    }
+
+    pub fn configure(&mut self, enabled: bool, port: u16) -> (Option<Receiver<ControlRequest>>, filmcraft_ui_egui::AiControlStatus) {
+        if !enabled {
+            self.stop();
+            return (None, self.status.clone());
+        }
+        if let Some(act) = &self.active
+            && act.port == port
+        {
+            return (None, self.status.clone());
+        }
+        self.start_live(port)
+    }
+
+    pub fn regenerate_token(&mut self) -> (Option<Receiver<ControlRequest>>, filmcraft_ui_egui::AiControlStatus) {
+        let token = match generate_hex_token().and_then(|t| write_token_file(self.data_dir.as_deref(), &t).map(|()| t)) {
+            Ok(t) => t,
+            Err(err) => {
+                self.status = filmcraft_ui_egui::AiControlStatus::Error(err);
+                return (None, self.status.clone());
+            }
+        };
+        if let Some(act) = &self.active {
+            let port = act.port;
+            self.stop();
+            return self.start_live_with_token(port, token);
+        }
+        (None, self.status.clone())
+    }
+
+    fn start_live(&mut self, port: u16) -> (Option<Receiver<ControlRequest>>, filmcraft_ui_egui::AiControlStatus) {
+        self.stop();
+        let token = match resolve_or_create_token(self.data_dir.as_deref()) {
+            Ok(t) => t,
+            Err(err) => {
+                log::warn!("control server disabled: {err}");
+                self.status = filmcraft_ui_egui::AiControlStatus::Error(err);
+                return (None, self.status.clone());
+            }
+        };
+        self.start_live_with_token(port, token)
+    }
+
+    fn start_live_with_token(&mut self, port: u16, token: String) -> (Option<Receiver<ControlRequest>>, filmcraft_ui_egui::AiControlStatus) {
+        let listener = match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(l) => l,
+            Err(error) => {
+                let err = DisabledWhy::Bind { port, error: error.to_string() }.reason();
+                log::warn!("control server disabled: {err}");
+                self.status = filmcraft_ui_egui::AiControlStatus::Error(err);
+                return (None, self.status.clone());
+            }
+        };
+        if let Err(error) = listener.set_nonblocking(true) {
+            let err = format!("could not configure non-blocking listener on 127.0.0.1:{port}: {error}");
+            log::warn!("control server disabled: {err}");
+            self.status = filmcraft_ui_egui::AiControlStatus::Error(err);
+            return (None, self.status.clone());
+        }
+        let (tx, rx) = channel::<ControlRequest>();
+        let ready = Arc::new(AtomicBool::new(true));
+        let stop = Arc::new(AtomicBool::new(false));
+        let loop_stop = Arc::clone(&stop);
+        let ctx = self.ctx.clone();
+        let handle = match std::thread::Builder::new()
+            .name("control-accept".into())
+            .spawn(move || accept_loop(listener, tx, ctx, token, ready, loop_stop))
+        {
+            Ok(h) => h,
+            Err(error) => {
+                let err = format!("could not spawn control server thread: {error}");
+                self.status = filmcraft_ui_egui::AiControlStatus::Error(err);
+                return (None, self.status.clone());
+            }
+        };
+        log::info!("control server listening on 127.0.0.1:{port}");
+        self.active = Some(ActiveServer { port, stop, handle: Some(handle) });
+        self.status = filmcraft_ui_egui::AiControlStatus::Listening { port };
+        (Some(rx), self.status.clone())
+    }
+}
+
+fn accept_loop(
+    listener: TcpListener,
+    tx: Sender<ControlRequest>,
+    ctx: egui::Context,
+    token: String,
+    ready: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+) {
     let open = Arc::new(AtomicUsize::new(0));
-    for mut stream in listener.incoming().flatten() {
+    while !stop.load(Ordering::Relaxed) {
+        let mut stream = match listener.accept() {
+            Ok((s, _)) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(_) => break,
+        };
+        let _ = stream.set_nonblocking(false);
         if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
             open.fetch_sub(1, Ordering::SeqCst);
             let _ = writeln!(stream, "{}", json!({"ok": false, "error": "too many control connections"}));

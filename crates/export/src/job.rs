@@ -154,9 +154,62 @@ fn render_batch(pipe: &Pipeline, f: i64, end: i64, sources: &dyn SourceProvider,
     }
     let pending = AtomicBool::new(false);
 
+    if pipe.supports_pipelined_batch() {
+        // Streaming producer-consumer: decode frames sequentially in ascending order (preserving
+        // GopCache locality) in micro-chunks while the GPU immediately pipelines previous chunks.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<(i64, Option<filmcraft_render::plan::FramePlan>)>>(4);
+        let mut all_frames = Vec::with_capacity(count);
+        rayon::in_place_scope(|s| {
+            s.spawn(|_| {
+                let _ = filmcraft_media::pending::take();
+                const MICRO_CHUNK: usize = 4;
+                let mut chunk = Vec::with_capacity(MICRO_CHUNK);
+                for i in 0..count {
+                    let fi = f + i as i64;
+                    let plan = pipe.plan_frame(fi, sources);
+                    if filmcraft_media::pending::take() {
+                        pending.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    chunk.push((fi, plan));
+                    if chunk.len() == MICRO_CHUNK {
+                        let send_chunk = std::mem::replace(&mut chunk, Vec::with_capacity(MICRO_CHUNK));
+                        if tx.send(send_chunk).is_err() {
+                            break;
+                        }
+                    }
+                }
+                if !chunk.is_empty() && !pending.load(Ordering::Relaxed) {
+                    let _ = tx.send(chunk);
+                }
+                drop(tx);
+            });
+            while let Ok(chunk) = rx.recv() {
+                if pending.load(Ordering::Relaxed) {
+                    break;
+                }
+                let rendered = pipe.render_plans_batch(&chunk, sources);
+                if filmcraft_media::pending::take() {
+                    pending.store(true, Ordering::Relaxed);
+                    break;
+                }
+                if let Some(prepare) = prepare {
+                    rendered.par_iter().zip(chunk.par_iter()).for_each(|(frame, (fi, _))| {
+                        let index = u64::try_from(*fi - f0).unwrap_or(u64::MAX);
+                        prepare(&EncoderFrame { width: pipe.w, height: pipe.h, rgba: &frame.0, hdr: pipe.hdr_out.then_some(frame.1.as_slice()), index });
+                    });
+                }
+                all_frames.extend(rendered);
+            }
+        });
+        if pending.load(Ordering::Relaxed) || all_frames.len() != count {
+            return None;
+        }
+        return Some(all_frames);
+    }
+
+    // Fallback path when no pipelined GPU renderer is available:
     // 1. Plan and decode all eligible frames in strict sequential ascending order (0..count).
-    // This eliminates Rayon work-stealing jitter in GopCache, preventing backward seeks and decoder
-    // resets when batches span cuts between clips of the same source file.
     let mut plans = Vec::with_capacity(count);
     for i in 0..count {
         let fi = f + i as i64;
@@ -170,7 +223,7 @@ fn render_batch(pipe: &Pipeline, f: i64, end: i64, sources: &dyn SourceProvider,
         return None;
     }
 
-    // 2. Render all frames in parallel on the GPU / Rayon worker threads.
+    // 2. Render all frames in parallel on the Rayon worker threads.
     let slots: Vec<Mutex<Option<Frame>>> = (0..count).map(|_| Mutex::new(None)).collect();
     plans.into_par_iter().enumerate().for_each(|(i, plan)| {
         if let Some(slot) = slots.get(i) {
@@ -355,7 +408,7 @@ impl Exporter {
             f1,
             next: f0,
             batch: match settings.render_buffer {
-                RenderBuffer::Auto => (rayon::current_num_threads() * 2).clamp(16, 32) as i64,
+                RenderBuffer::Auto => (rayon::current_num_threads() * 2).clamp(16, 64) as i64,
                 RenderBuffer::Low => rayon::current_num_threads().clamp(4, 8) as i64,
                 RenderBuffer::Off => 2,
             },
@@ -599,6 +652,14 @@ impl Exporter {
         note_stage(Stage::Finish, finishing.elapsed());
         let secs = self.t0.elapsed().as_secs_f64();
         let nframes = self.frames();
+        if std::env::var_os("FILMCRAFT_EXPORT_STATS").is_some() {
+            eprintln!(
+                "EXPORT_STATS: frames={nframes} secs={secs:.3} fps={:.1} gpu={:?} stages={:?}",
+                nframes as f64 / secs.max(1e-6),
+                crate::gpu_render_stats(),
+                crate::stage_times(),
+            );
+        }
         if !self.settings.part_of_batch {
             progress.finished.store(true, Ordering::Relaxed);
             progress.set_status(format!("Done in {secs:.1}s"));

@@ -313,6 +313,7 @@ fn preset_texture(app: &mut FilmcraftApp, ctx: &egui::Context, p: &filmcraft_ren
         size: w as u32,
         revision: 0,
         draft: false,
+        bypass: false,
     };
     app.texture_for(ctx, &name, key, &rgba)
 }

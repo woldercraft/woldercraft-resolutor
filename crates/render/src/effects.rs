@@ -1441,7 +1441,7 @@ fn lumetri_advanced(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
 
 /// The HSL Secondary key of one pixel's grading signal (0…1 per channel).
 #[inline]
-fn hsl_key(v: [f32; 3], hc: f32, hr: f32, smin: f32, lmin: f32, lmax: f32, soft: f32) -> f32 {
+pub(crate) fn hsl_key(v: [f32; 3], hc: f32, hr: f32, smin: f32, lmin: f32, lmax: f32, soft: f32) -> f32 {
     let h = rgb_to_hsl(v[0], v[1], v[2]);
     let dh = (h[0] - hc).abs().min(1.0 - (h[0] - hc).abs());
     let mh = 1.0 - ((dh - hr / 2.0) / soft).clamp(0.0, 1.0);
@@ -1529,7 +1529,7 @@ fn hsl_secondary(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
 
 /// Median of the `(2r+1)²` neighbourhood of every sample of a single-channel plane (edges
 /// clamped).
-fn median_filter(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
+pub(crate) fn median_filter(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     let mut out = vec![0f32; src.len()];
     out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         let mut win: Vec<f32> = Vec::with_capacity((2 * r + 1) * (2 * r + 1));
@@ -1924,5 +1924,85 @@ mod lumetri_cpu_parity_tests {
 
         let oval = render(-100.0);
         assert!(red(&oval, 79, 20) > red(&ellipse, 79, 20), "negative values widen the oval");
+    }
+
+    #[test]
+    fn lumetri_curves_and_hsl_match_fn_lumetri_cpu() {
+        let (w, h) = (67usize, 41usize);
+        let cx = FxCtx {
+            t: Tick::ZERO,
+            px_scale: 1.0,
+            seconds: 0.0,
+            timecode: "",
+            clip_name: "",
+            project: None,
+            env: None,
+            frame_rate: 24.0,
+            working: filmcraft_color::WorkingSpace::Rec709,
+        };
+        let curve = |pts: Vec<[f32; 2]>| ParamValue::Curve(pts);
+        let cases: Vec<(&str, Vec<(&str, ParamValue)>)> = vec![
+            (
+                "rgb_and_luma_curves",
+                vec![
+                    ("curve_luma", curve(vec![[0.0, 0.05], [0.5, 0.58], [1.0, 0.95]])),
+                    ("curve_red", curve(vec![[0.0, 0.0], [0.4, 0.5], [1.0, 1.0]])),
+                    ("curve_green", curve(vec![[0.0, 0.02], [0.6, 0.52], [1.0, 0.98]])),
+                    ("curve_blue", curve(vec![[0.0, 0.0], [0.5, 0.42], [1.0, 1.0]])),
+                ],
+            ),
+            (
+                "hsl_curves",
+                vec![
+                    ("hue_vs_hue", curve(vec![[0.1, 0.55], [0.5, 0.4], [0.9, 0.6]])),
+                    ("hue_vs_sat", curve(vec![[0.2, 0.7], [0.7, 0.3]])),
+                    ("luma_vs_sat", curve(vec![[0.2, 0.3], [0.8, 0.75]])),
+                    ("sat_vs_sat", curve(vec![[0.2, 0.65], [0.8, 0.4]])),
+                    ("hue_vs_luma", curve(vec![[0.3, 0.62], [0.7, 0.38]])),
+                ],
+            ),
+            (
+                "hsl_secondary_color",
+                vec![
+                    ("hsl_on", ParamValue::Bool(true)),
+                    ("hsl_hue", fl(120.0)),
+                    ("hsl_hue_range", fl(90.0)),
+                    ("hsl_sat_min", fl(10.0)),
+                    ("hsl_luma_min", fl(5.0)),
+                    ("hsl_luma_max", fl(95.0)),
+                    ("hsl_soft", fl(35.0)),
+                    ("hsl_temp", fl(30.0)),
+                    ("hsl_tint", fl(-20.0)),
+                    ("hsl_sat", fl(140.0)),
+                    ("hsl_hue_shift", fl(45.0)),
+                    ("hsl_denoise", fl(60.0)),
+                    ("hsl_blur", fl(25.0)),
+                ],
+            ),
+            (
+                "hsl_secondary_masks",
+                vec![
+                    ("hsl_on", ParamValue::Bool(true)),
+                    ("hsl_hue", fl(210.0)),
+                    ("hsl_hue_range", fl(100.0)),
+                    ("hsl_show_mask", ch(1)),
+                    ("hsl_blur", fl(15.0)),
+                ],
+            ),
+        ];
+
+        for (name, params) in cases {
+            let e = effect(&params);
+            let mut img_orig = test_picture(w, h);
+            let mut img_copy = img_orig.clone();
+            lumetri(&mut img_orig, &e, &cx);
+            let op = FxOp::eval(&e, &cx, w, h).unwrap_or_else(|| panic!("{name}: eval returned None"));
+            assert!(op.gpu_ok(), "{name}: expected gpu_ok == true");
+            op.apply(&mut img_copy);
+            for (i, (&a, &b)) in img_orig.px.iter().zip(&img_copy.px).enumerate() {
+                let diff = (a - b).abs();
+                assert!(diff <= 1e-6, "{name}: sample {i} differed: {a} vs {b} ({diff:.2e})");
+            }
+        }
     }
 }

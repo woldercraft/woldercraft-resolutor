@@ -109,7 +109,16 @@ fn extra_connections_are_refused() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, _rx) = channel::<ControlRequest>();
-    std::thread::spawn(move || accept_loop(listener, tx, egui::Context::default(), TOKEN.into(), Arc::new(AtomicBool::new(true))));
+    std::thread::spawn(move || {
+        accept_loop(
+            listener,
+            tx,
+            egui::Context::default(),
+            TOKEN.into(),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    });
     // Idle connections are accepted in order and held open.
     let held: Vec<TcpStream> = (0..16).map(|_| TcpStream::connect(addr).unwrap()).collect();
     let mut extra = TcpStream::connect(addr).unwrap();
@@ -370,4 +379,46 @@ fn authenticated_tcp_request_reaches_the_ui_queue() {
     c.read_to_string(&mut reply).unwrap();
     server.join().unwrap();
     assert_eq!(serde_json::from_str::<Value>(&reply).unwrap(), json!({"id": 7, "ok": true}));
+}
+
+#[test]
+fn manager_hot_toggles_and_frees_port_without_restarting() {
+    let dir = std::env::temp_dir().join(format!("resolutor-ai-ctl-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let mut mgr = ControlServerManager::new(egui::Context::default(), Some(dir.clone()), None);
+    assert_eq!(mgr.status(), filmcraft_ui_egui::AiControlStatus::Disabled);
+
+    let (rx, status) = mgr.start_live_with_token(port, TOKEN.into());
+    assert_eq!(status, filmcraft_ui_egui::AiControlStatus::Listening { port });
+    let rx = rx.expect("live server receiver");
+
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    writeln!(c, "{}", json!({"id": 1, "token": TOKEN, "method": "ui.inspect"})).unwrap();
+    let req = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(req.method, "ui.inspect");
+    req.reply.send(json!({"ok": true})).unwrap();
+    let mut line = String::new();
+    BufReader::new(&mut c).read_line(&mut line).unwrap();
+    assert!(line.contains("\"ok\":true"), "{line}");
+    drop(c);
+
+    // Regenerating rotates the token on disk and restarts on the same port.
+    let (rx2, status2) = mgr.regenerate_token();
+    assert_eq!(status2, filmcraft_ui_egui::AiControlStatus::Listening { port });
+    let _rx2 = rx2.expect("restarted receiver");
+    let new_token = std::fs::read_to_string(dir.join("control_token")).unwrap().trim().to_string();
+    assert_eq!(new_token.len(), 64);
+    assert_ne!(new_token, TOKEN);
+
+    // Stopping closes the listener cleanly so the port can be bound again immediately.
+    let (rx_off, status_off) = mgr.configure(false, port);
+    assert!(rx_off.is_none());
+    assert_eq!(status_off, filmcraft_ui_egui::AiControlStatus::Disabled);
+    let _rebound = TcpListener::bind(("127.0.0.1", port)).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -116,7 +116,12 @@ fn shared_state() -> Option<&'static SharedExportState> {
             }
             let adapter = crate::adapter::pick(&adapters, None, power_preference).ok()?;
             log::info!("export rendering on {} ({:?})", adapter.get_info().name, adapter.get_info().backend);
-            let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
+            let features = adapter.features() & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+            let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                required_features: features,
+                ..Default::default()
+            }))
+            .ok()?;
             device.on_uncaptured_error(Arc::new(|e: wgpu::Error| mark_device_failed(&format!("GPU error: {e}"))));
             device.set_device_lost_callback(|reason, msg| mark_device_failed(&format!("GPU device lost ({reason:?}): {msg}")));
             Some(SharedExportState {
@@ -265,6 +270,69 @@ impl ExportRenderer {
                 Some((w, h, nv12))
             }
             _ => None,
+        }
+    }
+
+    /// Composite a batch of pre-built plans, keeping up to `READBACK_RING_LEN` frames in flight
+    /// on the GPU simultaneously so staging readback overlaps with the next frame's rendering.
+    pub fn render_plans_pipelined(&mut self, requests: &[(&FramePlan, crate::ExportReadbackMode)]) -> Vec<Option<crate::ExportOutput>> {
+        use rayon::prelude::*;
+        let mut results: Vec<Option<crate::ExportOutput>> = (0..requests.len()).map(|_| None).collect();
+        if device_failed() || requests.is_empty() {
+            return results;
+        }
+        let preps: Vec<Option<crate::PreparedPlan>> = requests
+            .par_iter()
+            .map(|(plan, _)| match plan {
+                FramePlan::Image(_) => None,
+                _ => Some(prepare(plan)),
+            })
+            .collect();
+        let Some(comp) = self.compositor.as_mut() else {
+            return results;
+        };
+        for (idx, ((plan, mode), prep)) in requests.iter().zip(preps.iter()).enumerate() {
+            if device_failed() {
+                break;
+            }
+            if let FramePlan::Image(img) = *plan {
+                let out = match mode {
+                    crate::ExportReadbackMode::RgbaF32 => {
+                        crate::ExportOutput::RgbaF32(img.w as u32, img.h as u32, img.px.clone())
+                    }
+                    crate::ExportReadbackMode::Rgba8 | crate::ExportReadbackMode::Nv12 => {
+                        crate::ExportOutput::Rgba8(img.w as u32, img.h as u32, img.over_black_rgba8())
+                    }
+                };
+                if let Some(slot) = results.get_mut(idx) {
+                    *slot = Some(out);
+                }
+                continue;
+            }
+            let ticket = match mode {
+                crate::ExportReadbackMode::RgbaF32 => comp.submit_export_prepared(plan, prep.as_ref(), crate::ExportReadbackMode::RgbaF32),
+                crate::ExportReadbackMode::Rgba8 => comp.submit_export_prepared(plan, prep.as_ref(), crate::ExportReadbackMode::Rgba8),
+                crate::ExportReadbackMode::Nv12 => comp
+                    .submit_export_prepared(plan, prep.as_ref(), crate::ExportReadbackMode::Nv12)
+                    .or_else(|| comp.submit_export_prepared(plan, prep.as_ref(), crate::ExportReadbackMode::Rgba8)),
+            };
+            if let Some(ticket) = ticket {
+                Self::finish_ticket(comp, idx, ticket, &mut results);
+            }
+        }
+        results
+    }
+
+    fn finish_ticket(comp: &mut GpuCompositor, idx: usize, ticket: crate::InFlightExport, results: &mut [Option<crate::ExportOutput>]) {
+        let out = comp.collect_export(ticket);
+        if device_failed() {
+            return;
+        }
+        if let Some(out) = out
+            && let Some(slot) = results.get_mut(idx)
+        {
+            timing::add_frame();
+            *slot = Some(out);
         }
     }
 }
@@ -787,5 +855,103 @@ mod tests {
         for v in [0.0f32, 1.0, 0.5, 2.0, 1e-3, 65504.0, -1.0, -0.25] {
             assert!((f16_to_f32(f32_to_f16(v)) - v).abs() <= EPS * v.abs().max(1.0), "f16 {v}");
         }
+    }
+
+    #[test]
+    fn pipelined_ring_matches_single_frame_readback() {
+        let Some(mut r) = ExportRenderer::new() else {
+            eprintln!("SKIPPED (pipelined ring test): no adapter");
+            return;
+        };
+        let (p, seq, m) = project(false);
+        let plans: Vec<FramePlan> = (0..6)
+            .map(|i| plan_frame(&p, seq, Tick::from_seconds_f64(i as f64 / 30.0), RenderOptions::default(), r.caps(), &m))
+            .collect();
+        let reqs_rgba8: Vec<(&FramePlan, crate::ExportReadbackMode)> =
+            plans.iter().map(|pl| (pl, crate::ExportReadbackMode::Rgba8)).collect();
+        let pipelined_rgba8 = r.render_plans_pipelined(&reqs_rgba8);
+        assert_eq!(pipelined_rgba8.len(), plans.len());
+        for (i, (pl, got)) in plans.iter().zip(pipelined_rgba8).enumerate() {
+            let expected = r.render_plan_rgba8(pl).expect("single rgba8");
+            match got.expect("pipelined rgba8") {
+                crate::ExportOutput::Rgba8(w, h, px) => assert_eq!((w, h, px), expected, "rgba8 frame {i}"),
+                _ => panic!("expected Rgba8"),
+            }
+        }
+        let reqs_f32: Vec<(&FramePlan, crate::ExportReadbackMode)> =
+            plans.iter().map(|pl| (pl, crate::ExportReadbackMode::RgbaF32)).collect();
+        let pipelined_f32 = r.render_plans_pipelined(&reqs_f32);
+        assert_eq!(pipelined_f32.len(), plans.len());
+        for (i, (pl, got)) in plans.iter().zip(pipelined_f32).enumerate() {
+            let expected = r.render_plan(pl).expect("single f32");
+            match got.expect("pipelined f32") {
+                crate::ExportOutput::RgbaF32(w, h, px) => {
+                    assert_eq!((w as usize, h as usize), (expected.w, expected.h), "f32 dims {i}");
+                    assert_eq!(px, expected.px, "f32 px {i}");
+                }
+                _ => panic!("expected RgbaF32"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual 1080p GPU throughput benchmark"]
+    fn bench_1080p_nv12_pipelined_vs_single() {
+        let Some(mut r) = ExportRenderer::new() else {
+            eprintln!("SKIPPED: no GPU adapter");
+            return;
+        };
+        let (w, h) = (1920u32, 1080u32);
+        let y_len = (w * h) as usize;
+        let uv_len = ((w / 2) * (h / 2)) as usize;
+        let plans: Vec<FramePlan> = (0..40u8)
+            .map(|i| {
+                let frame = filmcraft_frame::VideoFrame::rgba8(w, h, vec![16u8.wrapping_add(i * 3); (w * h * 4) as usize]);
+                FramePlan::Layers {
+                    width: w as usize,
+                    height: h as usize,
+                    layers: vec![filmcraft_render::plan::PlanLayer::new(
+                        std::sync::Arc::new(frame),
+                        filmcraft_geom::Affine::IDENTITY,
+                        1.0,
+                        filmcraft_render::Blend::Normal,
+                    )],
+                }
+            })
+            .collect();
+
+        // Warmup both paths so shader/buffer allocation doesn't skew either measurement
+        let _ = r.render_plan_nv12(&plans[0]);
+        let warm_reqs: Vec<(&FramePlan, crate::ExportReadbackMode)> =
+            plans[..4].iter().map(|pl| (pl, crate::ExportReadbackMode::Nv12)).collect();
+        let _ = r.render_plans_pipelined(&warm_reqs);
+
+        let t0_pipe = timing::get();
+        let reqs: Vec<(&FramePlan, crate::ExportReadbackMode)> =
+            plans.iter().map(|pl| (pl, crate::ExportReadbackMode::Nv12)).collect();
+        let t_pipe = std::time::Instant::now();
+        let outs = r.render_plans_pipelined(&reqs);
+        let d_pipe = t_pipe.elapsed();
+        let t1_pipe = timing::get();
+        assert_eq!(outs.len(), plans.len());
+
+        let t0_single = timing::get();
+        let t_single = std::time::Instant::now();
+        for pl in &plans {
+            let out = r.render_plan_nv12(pl).expect("single nv12");
+            assert_eq!(out.2.len(), y_len + uv_len * 2);
+        }
+        let d_single = t_single.elapsed();
+        let t1_single = timing::get();
+
+        let n = plans.len() as f64;
+        eprintln!(
+            "1080p NV12 (40 unique frames): single={:.2}ms ({:.1} fps), pipelined={:.2}ms ({:.1} fps), speedup={:.2}x\n  single_t0={t0_single:?} single_t1={t1_single:?}\n  pipe_t0={t0_pipe:?} pipe_t1={t1_pipe:?}",
+            d_single.as_secs_f64() * 1000.0 / n,
+            n / d_single.as_secs_f64(),
+            d_pipe.as_secs_f64() * 1000.0 / n,
+            n / d_pipe.as_secs_f64(),
+            d_single.as_secs_f64() / d_pipe.as_secs_f64(),
+        );
     }
 }

@@ -174,6 +174,25 @@ pub struct Sequence {
     /// Split In/Out points (Markers ▸ Mark Split): per-channel overrides of `mark_in`/`mark_out`.
     #[serde(default, skip_serializing_if = "SplitMarks::is_empty")]
     pub split: SplitMarks,
+    /// Color grading groups in this sequence (DaVinci Resolve-style clip groups).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub color_groups: Vec<ColorGroup>,
+}
+
+/// Identifier of a [`ColorGroup`] within a [`Sequence`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ColorGroupId(pub u64);
+
+/// A named Color Grading group sharing post-clip color effects across its member clips.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ColorGroup {
+    pub id: ColorGroupId,
+    pub name: String,
+    pub color: [u8; 3],
+    #[serde(default)]
+    pub clips: Vec<ClipId>,
+    #[serde(default)]
+    pub effects: Vec<EffectInstance>,
 }
 
 /// Split edit points: separate video and audio In/Out points (Markers ▸ Mark Split). `None` means
@@ -292,6 +311,35 @@ impl Sequence {
             t.check_bounds()?;
         }
         Ok(())
+    }
+
+    pub fn color_group(&self, id: ColorGroupId) -> Option<&ColorGroup> {
+        self.color_groups.iter().find(|g| g.id == id)
+    }
+
+    pub fn color_group_mut(&mut self, id: ColorGroupId) -> Option<&mut ColorGroup> {
+        self.color_groups.iter_mut().find(|g| g.id == id)
+    }
+
+    pub fn color_group_of(&self, clip: ClipId) -> Option<&ColorGroup> {
+        self.color_groups.iter().find(|g| g.clips.contains(&clip))
+    }
+
+    pub fn next_color_group_id(&self) -> ColorGroupId {
+        let max = self.color_groups.iter().map(|g| g.id.0).max().unwrap_or(0);
+        ColorGroupId(max.saturating_add(1))
+    }
+
+    pub fn set_clip_color_group(&mut self, clip: ClipId, group: Option<ColorGroupId>) {
+        for g in &mut self.color_groups {
+            g.clips.retain(|c| *c != clip);
+        }
+        if let Some(gid) = group
+            && let Some(g) = self.color_group_mut(gid)
+            && !g.clips.contains(&clip)
+        {
+            g.clips.push(clip);
+        }
     }
 }
 

@@ -502,6 +502,9 @@ pub struct UiState {
     pub dark: bool,
     /// Color Grading scopes visible in the Program monitor area.
     pub show_scopes: bool,
+    /// Global bypass of all color grading and standard effects (DaVinci Resolve style A/B check).
+    #[serde(default)]
+    pub global_bypass: bool,
     /// Cinema mode: the Program monitor fills the whole window and the cursor is hidden. Only
     /// `view.fullScreenProgram` turns it on, so it is not part of the saved state.
     #[serde(skip)]
@@ -543,6 +546,18 @@ pub struct UiState {
     /// Zoom level for ColorNodes graph canvas (1.0 = 100%).
     #[serde(default = "default_node_zoom")]
     pub color_node_zoom: f32,
+    /// Active Color Group being graded in Color workspace (`None` = grade individual clip).
+    #[serde(default)]
+    pub active_color_group: Option<filmcraft_project::ColorGroupId>,
+    /// Multi-selected clip IDs in the Color workspace Clips panel.
+    #[serde(default)]
+    pub selected_color_clips: Vec<filmcraft_project::ClipId>,
+    /// Filter mode for the Color workspace Clips panel (`""` = All, `"ungrouped"`, `"graded"`, `"bypassed"`).
+    #[serde(default)]
+    pub color_clip_filter: String,
+    /// Source clip ID whose color grade was copied for batch pasting in Clips panel.
+    #[serde(skip)]
+    pub copied_color_clip: Option<filmcraft_project::ClipId>,
     /// Active VFX node index in VfxNodes pipeline graph (0-indexed).
     #[serde(default)]
     pub active_vfx_node: usize,
@@ -1141,6 +1156,7 @@ impl Default for UiState {
             show_status_bar: true,
             dark: true,
             show_scopes: false,
+            global_bypass: false,
             status: String::new(),
             failed_link: None,
             eyedropper: None,
@@ -1151,6 +1167,10 @@ impl Default for UiState {
             color_node_positions: std::collections::HashMap::new(),
             color_node_pan: [0.0, 0.0],
             color_node_zoom: 1.0,
+            active_color_group: None,
+            selected_color_clips: Vec::new(),
+            color_clip_filter: String::new(),
+            copied_color_clip: None,
             active_vfx_node: 0,
             vfx_node_positions: std::collections::HashMap::new(),
             vfx_node_pan: [0.0, 0.0],

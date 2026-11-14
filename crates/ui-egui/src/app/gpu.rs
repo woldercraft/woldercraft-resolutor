@@ -23,7 +23,17 @@ impl FilmcraftApp {
         match made {
             Ok(compositor) if !broken.load(std::sync::atomic::Ordering::Relaxed) => {
                 let max_texture = rs.device.limits().max_texture_dimension_2d;
-                self.gpu = Some(GpuState { render_state: rs, compositor, texture: None, last_key: None, size: (0, 0), last_ms: 0.0, broken, max_texture });
+                self.gpu = Some(GpuState {
+                    render_state: rs,
+                    compositor,
+                    texture: None,
+                    last_key: None,
+                    size: (0, 0),
+                    last_ms: 0.0,
+                    broken,
+                    max_texture,
+                    scope_last_requested: None,
+                });
             }
             _ => log::error!("GPU compositor failed to initialise; compositing on the CPU"),
         }
@@ -50,15 +60,21 @@ impl FilmcraftApp {
         if g.last_key == Some(key)
             && let Some(t) = g.texture
         {
+            let _ = g.compositor.poll_scope_frame();
             return Some((t, g.size));
         }
         if plan_side(&plan.plan) > g.max_texture as usize {
             self.disable_gpu("frame larger than the GPU's maximum texture size");
             return None;
         }
+        let want_scope = g.scope_last_requested.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(500));
+        let scope_tag = want_scope.then(|| match key.target {
+            frames::Target::SequencePlan(seq_id, _) => Some(crate::panels::scopes::gpu_scope_key(seq_id, key.frame, key.revision, key.bypass)),
+            _ => None,
+        }).flatten();
         let t0 = web_time::Instant::now();
         let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let (view, size) = g.compositor.composite_prepared(&plan.plan, Some(&plan.prepared));
+            let (view, size) = g.compositor.composite_prepared_with_scope(&plan.plan, Some(&plan.prepared), scope_tag);
             (view.clone(), size)
         }));
         let Ok((view, size)) = ran else {

@@ -19,6 +19,7 @@ struct U {
 @group(0) @binding(2) var dst: texture_storage_2d<rgba32float, write>;
 // Unsharp Mask: the image before blurring.
 @group(0) @binding(3) var aux: texture_2d<f32>;
+@group(0) @binding(4) var mask_tex: texture_2d<f32>;
 
 const OP_BRIGHTNESS_CONTRAST: u32 = 1u;
 const OP_PROC_AMP: u32 = 2u;
@@ -58,6 +59,11 @@ const OP_THREE_WAY: u32 = 36u;
 const OP_COLOR_WHEELS: u32 = 37u;
 const OP_LUMETRI_LOOK: u32 = 38u;
 const OP_LUT_3D: u32 = 39u;
+const OP_LUMETRI_CURVES: u32 = 40u;
+const OP_HSL_KEY: u32 = 41u;
+const OP_HSL_MEDIAN: u32 = 42u;
+const OP_HSL_APPLY: u32 = 43u;
+const OP_MASK_MIX: u32 = 44u;
 
 fn size() -> vec2<i32> {
     return vec2<i32>(i32(u.i0.y), i32(u.i0.z));
@@ -776,6 +782,166 @@ fn lut_3d_op(c: vec3<f32>) -> vec3<f32> {
     return dec(blended);
 }
 
+const CURVE_LEN: u32 = 1024u;
+
+fn sample_curve(row: i32, ch: u32, x: f32) -> f32 {
+    let p = clamp(x, 0.0, 1.0) * f32(CURVE_LEN - 1u);
+    let i = min(u32(p), CURVE_LEN - 1u);
+    let j = min(i + 1u, CURVE_LEN - 1u);
+    let a = textureLoad(aux, vec2<i32>(i32(i), row), 0)[ch];
+    let b = textureLoad(aux, vec2<i32>(i32(j), row), 0)[ch];
+    return a + (b - a) * (p - f32(i));
+}
+
+fn lumetri_curves_op(c: vec3<f32>) -> vec3<f32> {
+    var v = enc(c);
+    let m = u.i1.x;
+    if (m & 1u) != 0u {
+        v = vec3(sample_curve(0, 0u, v.x), sample_curve(0, 0u, v.y), sample_curve(0, 0u, v.z));
+    }
+    if (m & 2u) != 0u {
+        v.x = sample_curve(0, 1u, v.x);
+    }
+    if (m & 4u) != 0u {
+        v.y = sample_curve(0, 2u, v.y);
+    }
+    if (m & 8u) != 0u {
+        v.z = sample_curve(0, 3u, v.z);
+    }
+    if (m & 0x1F0u) != 0u {
+        let uc = clamp(v, vec3(0.0), vec3(1.0));
+        var h = rgb_to_hsl(uc);
+        let h0 = h.x;
+        let s0 = h.y;
+        let l0 = h.z;
+        if (m & 16u) != 0u {
+            h.x = fract_euclid(h.x + (sample_curve(1, 0u, h0) - 0.5));
+        }
+        var sm = 1.0;
+        if (m & 32u) != 0u {
+            sm *= sample_curve(1, 1u, h0) * 2.0;
+        }
+        if (m & 64u) != 0u {
+            sm *= sample_curve(1, 2u, l0) * 2.0;
+        }
+        if (m & 128u) != 0u {
+            sm *= sample_curve(1, 3u, s0) * 2.0;
+        }
+        h.y = clamp(h.y * sm, 0.0, 1.0);
+        if (m & 256u) != 0u {
+            h.z = clamp(h.z + (sample_curve(2, 0u, h0) - 0.5) * 0.5, 0.0, 1.0);
+        }
+        v = hsl_to_rgb(h.x, h.y, h.z);
+    }
+    return dec(v);
+}
+
+fn hsl_key_px(p: vec2<i32>) -> vec4<f32> {
+    let o = ld(p);
+    if o.a <= 1e-6 {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    let uv = clamp(enc(o.rgb / o.a), vec3(0.0), vec3(1.0));
+    let h = rgb_to_hsl(uv);
+    let hc = u.p0.x;
+    let hr = u.p0.y;
+    let smin = u.p0.z;
+    let lmin = u.p0.w;
+    let lmax = u.p1.x;
+    let soft = u.p1.y;
+    let d0 = abs(h.x - hc);
+    let dh = min(d0, 1.0 - d0);
+    let mh = 1.0 - clamp((dh - hr * 0.5) / soft, 0.0, 1.0);
+    let ms = clamp((h.y - smin) / soft, 0.0, 1.0);
+    let ml = min(clamp((h.z - lmin) / soft, 0.0, 1.0), clamp((lmax - h.z) / soft, 0.0, 1.0));
+    return vec4(mh * ms * ml, 0.0, 0.0, 1.0);
+}
+
+fn hsl_median_px(p: vec2<i32>) -> vec4<f32> {
+    let s = size();
+    let orig_m = ld(p).r;
+    let r = clamp(i32(u.i1.x), 1, 3);
+    let denoise = clamp(u.p0.x, 0.0, 1.0);
+    var win: array<f32, 49>;
+    var count: i32 = 0;
+    let y0 = max(0, p.y - r);
+    let y1 = min(s.y - 1, p.y + r);
+    let x0 = max(0, p.x - r);
+    let x1 = min(s.x - 1, p.x + r);
+    for (var yy = y0; yy <= y1; yy++) {
+        for (var xx = x0; xx <= x1; xx++) {
+            win[count] = ld(vec2(xx, yy)).r;
+            count++;
+        }
+    }
+    if count == 0 {
+        return vec4(orig_m, 0.0, 0.0, 1.0);
+    }
+    let mid_idx = count / 2;
+    for (var i = 0; i <= mid_idx; i++) {
+        var min_j = i;
+        var min_v = win[i];
+        for (var j = i + 1; j < count; j++) {
+            if win[j] < min_v {
+                min_v = win[j];
+                min_j = j;
+            }
+        }
+        if min_j != i {
+            win[min_j] = win[i];
+            win[i] = min_v;
+        }
+    }
+    let med = win[mid_idx];
+    return vec4(orig_m + (med - orig_m) * denoise, 0.0, 0.0, 1.0);
+}
+
+fn hsl_apply_px(p: vec2<i32>) -> vec4<f32> {
+    let o = textureLoad(aux, p, 0);
+    let a = o.a;
+    if a <= 1e-6 {
+        return o;
+    }
+    let m = ld(p).r;
+    let uv = clamp(enc(o.rgb / a), vec3(0.0), vec3(1.0));
+    let show_mask = u.i1.x;
+    var out_c: vec3<f32>;
+    switch show_mask {
+        case 1u: {
+            let g = rgb_to_hsl(uv).z;
+            out_c = vec3(g) + (uv - vec3(g)) * m;
+        }
+        case 2u: {
+            out_c = uv * m;
+        }
+        case 3u: {
+            out_c = vec3(m);
+        }
+        default: {
+            let htemp = u.p0.x;
+            let htint = u.p0.y;
+            let hsat = u.p0.z;
+            let hshift = u.p0.w;
+            var hh = rgb_to_hsl(uv);
+            hh.x = fract_euclid(hh.x + hshift);
+            hh.y = clamp(hh.y * hsat, 0.0, 1.0);
+            var c2 = hsl_to_rgb(hh.x, hh.y, hh.z);
+            c2.x *= 1.0 + 0.25 * htemp;
+            c2.z *= 1.0 - 0.25 * htemp;
+            c2.y *= 1.0 - 0.2 * htint;
+            out_c = uv + (c2 - uv) * m;
+        }
+    }
+    return vec4(dec(out_c) * a, a);
+}
+
+fn mask_mix_px(p: vec2<i32>) -> vec4<f32> {
+    let cur_px = ld(p);
+    let orig_px = textureLoad(aux, p, 0);
+    let c = textureLoad(mask_tex, p, 0).r;
+    return orig_px + (cur_px - orig_px) * c;
+}
+
 // One output pixel of every op but the running-sum box blur.
 fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
     let s = size();
@@ -992,6 +1158,28 @@ fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
             let c = o.rgb / a;
             let res = lut_3d_op(c);
             return vec4(res * a, a);
+        }
+        case OP_LUMETRI_CURVES: {
+            let o = ld(p);
+            let a = o.a;
+            if a <= 1e-6 {
+                return o;
+            }
+            let c = o.rgb / a;
+            let res = lumetri_curves_op(c);
+            return vec4(res * a, a);
+        }
+        case OP_HSL_KEY: {
+            return hsl_key_px(p);
+        }
+        case OP_HSL_MEDIAN: {
+            return hsl_median_px(p);
+        }
+        case OP_HSL_APPLY: {
+            return hsl_apply_px(p);
+        }
+        case OP_MASK_MIX: {
+            return mask_mix_px(p);
         }
         default: {
             let o = ld(p);

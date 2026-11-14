@@ -885,32 +885,34 @@ pub(crate) fn mix_graph_at(
     let mut bus: Vec<Option<Bus>> = (0..ns).map(|_| None).collect();
     let mut meters: Vec<(TrackId, Vec<f32>)> = Vec::new();
     let range = filmcraft_time::TimeRange::from_bounds(Tick::from_units(x0, sr as i64), Tick::from_units(x0 + total as i64, sr as i64));
-    // tracks: independent, in parallel
+    // tracks: independent; mix live/small blocks sequentially so real-time audio never contends
+    // with heavy video decode/render jobs on the global Rayon pool.
     let ntr = plan.strips.iter().take_while(|s| s.kind == Kind::Track).count();
     let (track_states, rest) = st.strips.split_at_mut(ntr);
-    let track_outs: Vec<Option<StripOut>> = track_states
-        .par_iter_mut()
-        .enumerate()
-        .map(|(si, ss)| {
-            let s = &plan.strips[si];
-            if s.silent {
-                ss.delays.iter_mut().for_each(DelayLine::clear);
-                return None;
-            }
-            let has_clips = s.track.items.iter().any(|i| i.enabled && i.range().overlaps(&range));
-            if !has_clips && s.pre.is_empty() && s.post.is_empty() && ss.delays.iter().all(DelayLine::is_empty) {
-                return None;
-            }
-            let input = if has_clips {
-                let mut v = track_input_at(project, &s.track, crate::audio::Window { start: x0, frames: total, sr }, sources, &ovs, depth).channels;
-                v.resize(s.width, vec![0.0; total]);
-                v
-            } else {
-                silent(s.width, total)
-            };
-            Some(run_strip(&plan, si, ss, input, StripRun { x0, skip, sr, ovs: &ovs }))
-        })
-        .collect();
+    let eval_track = |(si, ss): (usize, &mut StripState)| -> Option<StripOut> {
+        let s = &plan.strips[si];
+        if s.silent {
+            ss.delays.iter_mut().for_each(DelayLine::clear);
+            return None;
+        }
+        let has_clips = s.track.items.iter().any(|i| i.enabled && i.range().overlaps(&range));
+        if !has_clips && s.pre.is_empty() && s.post.is_empty() && ss.delays.iter().all(DelayLine::is_empty) {
+            return None;
+        }
+        let input = if has_clips {
+            let mut v = track_input_at(project, &s.track, crate::audio::Window { start: x0, frames: total, sr }, sources, &ovs, depth).channels;
+            v.resize(s.width, vec![0.0; total]);
+            v
+        } else {
+            silent(s.width, total)
+        };
+        Some(run_strip(&plan, si, ss, input, StripRun { x0, skip, sr, ovs: &ovs }))
+    };
+    let track_outs: Vec<Option<StripOut>> = if frames <= 4096 || track_states.len() <= 2 {
+        track_states.iter_mut().enumerate().map(eval_track).collect()
+    } else {
+        track_states.par_iter_mut().enumerate().map(eval_track).collect()
+    };
     let deliver = |o: StripOut, si: usize, bus: &mut Vec<Option<Bus>>, meters: &mut Vec<(TrackId, Vec<f32>)>| {
         meters.push((plan.strips[si].track.id, o.meter));
         for (ri, sig) in o.routes {

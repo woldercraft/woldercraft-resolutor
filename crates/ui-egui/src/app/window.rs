@@ -29,6 +29,56 @@ impl FilmcraftApp {
         if name == "Color" {
             self.ui.show_scopes = false;
         }
+        self.last_saved_dock = Some((self.ui.workspace.clone(), self.ui.dock.clone()));
+        self.dock_dirty_since = None;
+    }
+
+    /// Persist the current dock layout for the active workspace when it differs from disk.
+    pub(crate) fn save_current_workspace(&mut self) {
+        if !self.workspace_restored {
+            return;
+        }
+        if self.last_saved_dock.as_ref().is_some_and(|(name, layout)| name == &self.ui.workspace && layout == &self.ui.dock) {
+            self.dock_dirty_since = None;
+            return;
+        }
+        let Ok(entry) = dock::SavedWorkspace::new(&self.ui.workspace, &self.ui.dock) else {
+            return;
+        };
+        let mut next = self.workspaces.clone();
+        match next.saved.iter_mut().find(|s| s.name == self.ui.workspace) {
+            Some(s) => *s = entry,
+            None => next.saved.push(entry),
+        }
+        next.current = self.ui.workspace.clone();
+        if let Err(e) = self.set_workspaces(next) {
+            self.ui.status = e;
+        } else {
+            self.last_saved_dock = Some((self.ui.workspace.clone(), self.ui.dock.clone()));
+            self.dock_dirty_since = None;
+        }
+    }
+
+    /// Debounced auto-save of layout changes (~1s after the user stops dragging/resizing).
+    pub(crate) fn maybe_persist_workspace(&mut self, ctx: &egui::Context) {
+        if !self.workspace_restored {
+            return;
+        }
+        let same = self.last_saved_dock.as_ref().is_some_and(|(name, layout)| name == &self.ui.workspace && layout == &self.ui.dock);
+        if same {
+            self.dock_dirty_since = None;
+            return;
+        }
+        let pointer_down = ctx.input(|i| i.pointer.any_down());
+        if pointer_down {
+            self.dock_dirty_since = Some(web_time::Instant::now());
+            return;
+        }
+        let now = web_time::Instant::now();
+        let since = *self.dock_dirty_since.get_or_insert(now);
+        if now.duration_since(since) >= std::time::Duration::from_secs(1) {
+            self.save_current_workspace();
+        }
     }
 
     pub fn show_panel(&mut self, p: PanelKind) {
@@ -49,7 +99,12 @@ impl FilmcraftApp {
                     .into_iter()
                     .find(|k| self.ui.dock.contains(k))
                     .unwrap_or(PanelKind::Program),
-                PanelKind::LumetriColor | PanelKind::EssentialGraphics | PanelKind::EssentialSound | PanelKind::Properties => PanelKind::Program,
+                PanelKind::LumetriColor
+                | PanelKind::EssentialGraphics
+                | PanelKind::EssentialSound
+                | PanelKind::InspectorVideo
+                | PanelKind::InspectorAudio
+                | PanelKind::Properties => PanelKind::Program,
                 PanelKind::Source
                 | PanelKind::EffectControls
                 | PanelKind::AudioClipMixer

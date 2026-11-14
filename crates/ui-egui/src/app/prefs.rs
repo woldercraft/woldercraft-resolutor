@@ -130,6 +130,20 @@ impl FilmcraftApp {
         if let Some(note) = self.audio.as_ref().and_then(|a| a.note()) {
             self.ui.status = note;
         }
+        let ai_changed = prev.as_ref().map_or(self.control_rx.is_none() && p.ai_integration.enabled, |q| q.ai_integration != p.ai_integration);
+        if ai_changed && let Some(configure) = self.hooks.configure_ai_control.as_mut() {
+            let (rx, status) = configure(p.ai_integration.enabled, p.ai_integration.port);
+            if p.ai_integration.enabled {
+                if let Some(rx) = rx {
+                    self.control_rx = Some(rx);
+                }
+                if let crate::hooks::AiControlStatus::Error(err) = status {
+                    self.ui.status = err;
+                }
+            } else {
+                self.control_rx = None;
+            }
+        }
         if prev.is_none() && !self.workspace_restored {
             // reopen the workspace in use when the app last closed
             self.workspace_restored = true;

@@ -64,40 +64,40 @@ pub const ALL_TOOLS: [LumetriToolDef; 7] = [
     LumetriToolDef {
         id: "Basic Correction",
         icon: "⬡",
-        label: "Primarias",
-        tooltip: "Ajustes primarios y perillas",
+        label: "Primaries",
+        tooltip: "Color wheels (Lift, Gamma, Gain, Offset) and primary exposure/color",
         param: "basic_on",
         sec: "basic",
     },
     LumetriToolDef {
         id: "Color Wheels & Match",
         icon: "◎",
-        label: "Ruedas & Match",
-        tooltip: "Ruedas de color Lift/Gamma/Gain y Color Match",
+        label: "Wheels & Match",
+        tooltip: "Color wheels and automatic Shot Match",
         param: "wheels_on",
         sec: "wheels",
     },
     LumetriToolDef {
         id: "Curves",
         icon: "∿",
-        label: "Curvas",
-        tooltip: "Curvas RGB y curvas de matiz/saturación",
+        label: "Curves",
+        tooltip: "Custom RGB and Hue/Sat/Lum curves",
         param: "curves_on",
         sec: "curves",
     },
     LumetriToolDef {
         id: "Power Windows / Máscara",
         icon: "⬚",
-        label: "Máscara",
-        tooltip: "Power Windows y máscaras",
+        label: "Power Windows",
+        tooltip: "Geometric and Bezier shape masks",
         param: "masks_on",
         sec: "masks",
     },
     LumetriToolDef {
         id: "HSL Secondary",
         icon: "✑",
-        label: "Cualificador",
-        tooltip: "Cualificador HSL secundario",
+        label: "Qualifier",
+        tooltip: "HSL secondary color isolator",
         param: "hsl_on",
         sec: "hsl",
     },
@@ -105,15 +105,15 @@ pub const ALL_TOOLS: [LumetriToolDef; 7] = [
         id: "Creative",
         icon: "🎞",
         label: "Creative & LUTs",
-        tooltip: "Looks, LUTs creativos e intensidad",
+        tooltip: "Film looks, LUTs and intensity",
         param: "creative_on",
         sec: "creative",
     },
     LumetriToolDef {
         id: "Vignette",
         icon: "◐",
-        label: "Viñeta",
-        tooltip: "Ajustes de viñeta",
+        label: "Vignette",
+        tooltip: "Edge vignette adjustments",
         param: "vignette_on",
         sec: "vignette",
     },
@@ -210,115 +210,231 @@ pub fn get_tool_def(id: &str) -> Option<LumetriToolDef> {
 
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, current_panel: crate::dock::PanelKind) {
     let t = app.tokens;
-    let Some((clip, it)) = active_color_clip(app) else {
+
+    // Resolve active Color Group if one is selected and still exists in the sequence
+    let active_group_info = app.ui.active_color_group.and_then(|gid| {
+        let seq = app.session.active_sequence()?;
+        let g = seq.color_group(gid)?;
+        Some((gid, g.name.clone(), g.color, g.effects.clone()))
+    });
+    if app.ui.active_color_group.is_some() && active_group_info.is_none() {
+        app.ui.active_color_group = None;
+    }
+
+    let clip_info = active_color_clip(app);
+    let clip_group = clip_info.as_ref().and_then(|(cid, _)| {
+        app.session
+            .active_sequence()
+            .and_then(|s| s.color_group_of(*cid))
+            .map(|g| (g.id, g.name.clone(), g.color))
+    });
+
+    if active_group_info.is_none() && clip_info.is_none() {
         crate::dock::placeholder(ui, rect, &t, tl!("(no clip selected)"));
         return;
-    };
-    let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(12.0, 6.0))).id_salt(("lumetri2", current_panel)));
-    let lumetri_effects: Vec<(usize, &EffectInstance)> = it.effects.iter().enumerate().filter(|(_, e)| e.effect == "lumetri").collect();
-    if lumetri_effects.is_empty() {
-        bui.add_space(8.0);
-        bui.label(egui::RichText::new(tlf!("Master · {name}", name = it.name)).color(t.text_dim));
-        bui.add_space(8.0);
-        if bui.button(tl!("Add Color Grading to clip")).clicked() {
-            let _ = app.session.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"}));
-            app.ui.active_color_node = 0;
-        }
-        return;
     }
-    let active_node = app.ui.active_color_node.min(lumetri_effects.len().saturating_sub(1));
-    app.ui.active_color_node = active_node;
-    let (idx, e_ref) = lumetri_effects[active_node];
-    let e = e_ref.clone();
+
+    let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(10.0, 4.0))).id_salt(("lumetri2", current_panel)));
+    bui.set_clip_rect(rect.intersect(ui.clip_rect()));
+
+    let (clip, it_name, mt, idx, e, is_group_mode, group_hdr, lumetri_effects_len, node_list_meta, needs_apply_clip) =
+        if let Some((gid, gname, gcol, geffects)) = active_group_info {
+            let inst = geffects
+                .iter()
+                .find(|fx| fx.effect == "lumetri")
+                .cloned()
+                .or_else(|| filmcraft_project::find_effect("lumetri").map(|d| d.instance()));
+            let Some(inst) = inst else {
+                crate::dock::placeholder(ui, rect, &t, tl!("(color grading effect unavailable)"));
+                return;
+            };
+            let dummy_clip = clip_info.as_ref().map(|(c, _)| *c).unwrap_or(ClipId(0));
+            (dummy_clip, gname.clone(), Tick(0), 0usize, inst, true, Some((gid, gname, gcol)), 1usize, vec![(0usize, true)], false)
+        } else {
+            let Some((clip, it)) = clip_info else {
+                return;
+            };
+            let lumetri_effects: Vec<(usize, &EffectInstance)> = it.effects.iter().enumerate().filter(|(_, e)| e.effect == "lumetri").collect();
+            let ph = app.session.playhead();
+            let mt = it.effect_time_at(ph.clamp(it.start, (it.end() - Tick(1)).max(it.start)));
+            if lumetri_effects.is_empty() {
+                let Some(default_inst) = filmcraft_project::find_effect("lumetri").map(|d| d.instance()) else {
+                    crate::dock::placeholder(ui, rect, &t, tl!("(color grading effect unavailable)"));
+                    return;
+                };
+                app.ui.active_color_node = 0;
+                (clip, it.name, mt, 0usize, default_inst, false, None, 1usize, vec![(0usize, true)], true)
+            } else {
+                let active_node = app.ui.active_color_node.min(lumetri_effects.len().saturating_sub(1));
+                app.ui.active_color_node = active_node;
+                let (idx, e_ref) = lumetri_effects[active_node];
+                let meta = lumetri_effects.iter().map(|&(i, fx)| (i, fx.enabled)).collect();
+                let len = lumetri_effects.len();
+                let cloned = e_ref.clone();
+                (clip, it.name, mt, idx, cloned, false, None, len, meta, false)
+            }
+        };
+    let active_node = if is_group_mode { 0 } else { app.ui.active_color_node };
+
     // HDR mode: the sequence's working space is Rec. 2100 PQ or HLG
     let hdr = app.session.active_sequence().is_some_and(|q| q.settings.color.working.is_hdr());
     let mut auto_rows: Vec<(String, Rect, &'static str)> = Vec::new();
-    let ph = app.session.playhead();
-    let mt = it.effect_time_at(ph.clamp(it.start, it.end() - Tick(1)));
     let mut actions: Actions = Vec::new();
-    // header: clip context + fx toggle
-    // the fx toggle is laid out first so a long clip name is truncated instead of widening the panel
+    // header: clip/group context + Clip|Group toggle + reset + fx toggle
     bui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let fx = ui.add(egui::Button::new(egui::RichText::new("fx").italics().color(if e.enabled { t.text } else { t.text_faint })).frame(false));
+            let fx = ui
+                .add(egui::Button::new(egui::RichText::new("fx").italics().color(if e.enabled { t.accent } else { t.text_faint })).frame(false))
+                .on_hover_text(tl!("Bypass Color Grading (on/off)"));
             if fx.clicked() {
-                let _ = app.session.execute("effects.toggleEnabled", json!({"clip": clip.0, "index": idx}));
+                if let Some((gid, _, _)) = &group_hdr {
+                    let _ = app.session.execute("color.groupToggleBypass", json!({"group": gid.0}));
+                } else if !needs_apply_clip {
+                    let _ = app.session.execute("effects.toggleEnabled", json!({"clip": clip.0, "index": idx}));
+                }
+            }
+            let rst = paint_reset_icon_button(ui, t.text_dim, tl!("Reset all color adjustments"));
+            if rst.clicked() {
+                if let Some((gid, _, _)) = &group_hdr {
+                    let _ = app.session.execute("color.groupReset", json!({"group": gid.0}));
+                } else if !needs_apply_clip {
+                    let _ = app.session.execute("effects.reset", json!({"clip": clip.0, "index": idx}));
+                }
+            }
+            if let Some((gid, gname, gcol)) = group_hdr.as_ref().or(clip_group.as_ref()) {
+                let grp_col = Color32::from_rgb(gcol[0], gcol[1], gcol[2]);
+                let g_btn = egui::Button::new(egui::RichText::new(tlf!("Group: {name}", name = gname)).small().color(if is_group_mode { Color32::BLACK } else { grp_col }))
+                    .fill(if is_group_mode { grp_col } else { Color32::TRANSPARENT })
+                    .stroke(egui::Stroke::new(1.0, grp_col));
+                if ui.add(g_btn).clicked() {
+                    app.ui.active_color_group = Some(*gid);
+                    app.ui.active_color_node = 0;
+                }
+                let c_btn = egui::Button::new(egui::RichText::new(tl!("Clip")).small().color(if !is_group_mode { Color32::WHITE } else { t.text_dim }))
+                    .fill(if !is_group_mode { t.accent.gamma_multiply(0.35) } else { Color32::TRANSPARENT });
+                if ui.add(c_btn).clicked() {
+                    app.ui.active_color_group = None;
+                    app.ui.active_color_node = 0;
+                }
             }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.add(egui::Label::new(egui::RichText::new(tlf!("Master · {name}", name = it.name)).color(t.text_dim)).truncate());
+                let hdr_lbl = if let Some((_, gname, _)) = &group_hdr {
+                    tlf!("Group · {name}", name = gname)
+                } else {
+                    tlf!("Clip · {name}", name = it_name)
+                };
+                ui.add(egui::Label::new(egui::RichText::new(hdr_lbl).strong().color(t.text_dim)).truncate());
             });
         });
     });
 
-    // DaVinci Resolve-style Node switcher bar: [ Node: ] [ + ] | [ Node 01 ✓ ] [ Node 02 ] ...
-    bui.horizontal(|ui| {
-        ui.label(egui::RichText::new(tl!("Node:")).color(t.text_dim).small());
-        let add_btn = ui.button(egui::RichText::new("+").small()).on_hover_text(tl!("Add Serial Node (Alt+S)"));
-        app.auto.add("lumetri.node.add", add_btn.rect, "Add Serial Node");
-        if add_btn.clicked() {
-            let _ = app.session.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"}));
-            app.ui.active_color_node = lumetri_effects.len();
-        }
-        egui::ScrollArea::horizontal().auto_shrink([false, true]).max_height(26.0).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                for (n_idx, &(_fx_i, fx_inst)) in lumetri_effects.iter().enumerate() {
-                    let is_curr = n_idx == active_node;
-                    let node_num = format!("{:02}", n_idx + 1);
-                    let custom_name = app.ui.color_node_labels.get(&format!("{}:{n_idx}", clip.0)).cloned();
-                    let label = custom_name.unwrap_or_else(|| format!("Node {node_num}"));
-                    let text = if fx_inst.enabled {
-                        format!("{label} ✓")
-                    } else {
-                        format!("{label} ✗")
-                    };
-                    let mut btn = egui::Button::new(egui::RichText::new(text).small());
-                    if is_curr {
-                        btn = btn.fill(t.accent.gamma_multiply(0.25)).stroke(egui::Stroke::new(1.0, t.accent));
+    // DaVinci Resolve-style Node switcher bar (hidden or single-node in Group mode)
+    if !is_group_mode {
+        bui.horizontal(|ui| {
+            ui.label(egui::RichText::new(tl!("Node:")).color(t.text_dim).small());
+            let add_btn = ui.button(egui::RichText::new("+").small()).on_hover_text(tl!("Add Serial Node (Alt+S)"));
+            app.auto.add("lumetri.node.add", add_btn.rect, "Add Serial Node");
+            if add_btn.clicked() {
+                let _ = app.session.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"}));
+                app.ui.active_color_node = lumetri_effects_len;
+            }
+            let nodes_max_w = ui.available_width().max(40.0);
+            egui::ScrollArea::horizontal()
+                .auto_shrink([false, true])
+                .max_width(nodes_max_w)
+                .max_height(26.0)
+                .id_salt(("lumetri_nodes_scroll", current_panel))
+                .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (n_idx, &(_fx_i, enabled)) in node_list_meta.iter().enumerate() {
+                        let is_curr = n_idx == active_node;
+                        let node_num = format!("{:02}", n_idx + 1);
+                        let custom_name = app.ui.color_node_labels.get(&format!("{}:{n_idx}", clip.0)).cloned();
+                        let label = custom_name.unwrap_or_else(|| format!("Node {node_num}"));
+                        let text = if enabled {
+                            format!("{label} ✓")
+                        } else {
+                            format!("{label} ✗")
+                        };
+                        let mut btn = egui::Button::new(egui::RichText::new(text).small());
+                        if is_curr {
+                            btn = btn.fill(t.accent.gamma_multiply(0.25)).stroke(egui::Stroke::new(1.0, t.accent));
+                        }
+                        let resp = ui.add(btn);
+                        app.auto.add(&format!("lumetri.node.{n_idx}"), resp.rect, &label);
+                        if resp.clicked() {
+                            app.ui.active_color_node = n_idx;
+                        }
                     }
-                    let resp = ui.add(btn);
-                    app.auto.add(&format!("lumetri.node.{n_idx}"), resp.rect, &label);
-                    if resp.clicked() {
-                        app.ui.active_color_node = n_idx;
-                    }
-                }
+                });
             });
         });
-    });
+    }
 
     let mut sections: Vec<&'static str> = Vec::new();
     let mut lut_actions: Vec<(&'static str, Value)> = Vec::new();
     let mut mask_actions: Vec<(String, Value)> = Vec::new();
 
     let bar_pos = app.ui.lumetri_bar_pos.clone();
+    let panel_w = bui.available_width().max(120.0);
+    bui.set_max_width(panel_w);
     match bar_pos.as_str() {
         "bottom" => {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt(("lumetri_scroll", current_panel)).show(&mut bui, |ui| {
-                render_palette_content(ui, app, &e, current_panel, clip, idx, mt, hdr, &mut actions, &mut lut_actions, &mut mask_actions, &mut auto_rows, &mut sections);
-                ui.add_space(20.0);
-            });
+            let content_h = (bui.available_height() - 36.0).max(60.0);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .hscroll(false)
+                .max_width(panel_w)
+                .max_height(content_h)
+                .id_salt(("lumetri_scroll", current_panel))
+                .show(&mut bui, |ui| {
+                    let inner_w = ui.available_width().min(panel_w).max(100.0);
+                    ui.set_max_width(inner_w);
+                    render_palette_content(ui, app, &e, current_panel, clip, idx, mt, hdr, &mut actions, &mut lut_actions, &mut mask_actions, &mut auto_rows, &mut sections);
+                    ui.add_space(12.0);
+                });
             bui.add_space(4.0);
             render_palette_toolbar(&mut bui, app, &e, current_panel, false, &mut sections);
         }
         "left" => {
             bui.horizontal(|ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt(("lumetri_side_scroll", current_panel)).show(ui, |ui| {
-                    render_palette_toolbar(ui, app, &e, current_panel, true, &mut sections);
+                let side_w = 160.0_f32.min((panel_w * 0.35).max(110.0));
+                ui.allocate_ui_with_layout(vec2(side_w, ui.available_height()), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    ui.set_max_width(side_w);
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).hscroll(false).max_width(side_w).id_salt(("lumetri_side_scroll", current_panel)).show(ui, |ui| {
+                        render_palette_toolbar(ui, app, &e, current_panel, true, &mut sections);
+                    });
                 });
                 ui.separator();
-                egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt(("lumetri_scroll", current_panel)).show(ui, |ui| {
-                    render_palette_content(ui, app, &e, current_panel, clip, idx, mt, hdr, &mut actions, &mut lut_actions, &mut mask_actions, &mut auto_rows, &mut sections);
-                    ui.add_space(20.0);
-                });
+                let main_w = (ui.available_width()).max(120.0);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .hscroll(false)
+                    .max_width(main_w)
+                    .id_salt(("lumetri_scroll", current_panel))
+                    .show(ui, |ui| {
+                        let inner_w = ui.available_width().min(main_w).max(100.0);
+                        ui.set_max_width(inner_w);
+                        render_palette_content(ui, app, &e, current_panel, clip, idx, mt, hdr, &mut actions, &mut lut_actions, &mut mask_actions, &mut auto_rows, &mut sections);
+                        ui.add_space(12.0);
+                    });
             });
         }
         _ => {
             // default: "top"
             render_palette_toolbar(&mut bui, app, &e, current_panel, false, &mut sections);
             bui.add_space(4.0);
-            egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt(("lumetri_scroll", current_panel)).show(&mut bui, |ui| {
-                render_palette_content(ui, app, &e, current_panel, clip, idx, mt, hdr, &mut actions, &mut lut_actions, &mut mask_actions, &mut auto_rows, &mut sections);
-                ui.add_space(20.0);
-            });
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .hscroll(false)
+                .max_width(panel_w)
+                .id_salt(("lumetri_scroll", current_panel))
+                .show(&mut bui, |ui| {
+                    let inner_w = ui.available_width().min(panel_w).max(100.0);
+                    ui.set_max_width(inner_w);
+                    render_palette_content(ui, app, &e, current_panel, clip, idx, mt, hdr, &mut actions, &mut lut_actions, &mut mask_actions, &mut auto_rows, &mut sections);
+                    ui.add_space(12.0);
+                });
         }
     }
     for (id, r, label) in auto_rows {
@@ -326,11 +442,55 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, current_panel
             app.auto.add(&id, r, label);
         }
     }
+    let has_clip_edit = !actions.is_empty()
+        || !sections.is_empty()
+        || !mask_actions.is_empty()
+        || lut_actions.iter().any(|(cmd, p)| *cmd != "view.display" && p.get("browse").is_none());
+
+    if group_hdr.is_none()
+        && needs_apply_clip
+        && has_clip_edit
+        && let Ok(applied) = app.session.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"}))
+    {
+        if let Some(new_idx) = applied
+            .get("applied")
+            .and_then(|a| a.get(0))
+            .and_then(|o| o.get("index"))
+            .and_then(|v| v.as_u64())
+        {
+            for a in &mut actions {
+                a["effect"] = json!(new_idx);
+            }
+            for (_, val) in &mut mask_actions {
+                val["effect"] = json!(new_idx);
+            }
+        }
+        app.ui.active_color_node = 0;
+    }
+
     // a dragged value is one undo step, as in Effect Controls
-    crate::panels::effect_controls::run(app, ui.ctx(), actions.into_iter().map(|a| ("effects.setParam".to_string(), a)).collect());
-    for sec in sections {
-        if let Err(err) = app.session.execute("lumetri.setSection", json!({"clip": clip.0, "section": sec})) {
-            app.ui.status = err.to_string();
+    if let Some((gid, _, _)) = group_hdr {
+        let mapped = actions
+            .into_iter()
+            .map(|a| {
+                (
+                    "color.groupSetParam".to_string(),
+                    json!({
+                        "group": gid.0,
+                        "param": a["param"],
+                        "value": a["value"],
+                        "merge": a.get("merge").and_then(|v| v.as_bool()).unwrap_or(false),
+                    }),
+                )
+            })
+            .collect();
+        crate::panels::effect_controls::run(app, ui.ctx(), mapped);
+    } else {
+        crate::panels::effect_controls::run(app, ui.ctx(), actions.into_iter().map(|a| ("effects.setParam".to_string(), a)).collect());
+        for sec in sections {
+            if let Err(err) = app.session.execute("lumetri.setSection", json!({"clip": clip.0, "section": sec})) {
+                app.ui.status = err.to_string();
+            }
         }
     }
     for (cmd, mut p) in lut_actions {
@@ -382,19 +542,22 @@ fn render_tool_buttons(
         let tool_id = app.ui.lumetri_tool_order[i].clone();
         let Some(def) = get_tool_def(&tool_id) else { continue };
 
-        let key = format!("lumetri2:{}", def.id);
-        let is_open = !app.ui.collapsed_fx.contains(&key) && (def.id == "Basic Correction" || app.ui.expanded_fx.contains(&key));
-        let is_primary = if current_panel == crate::dock::PanelKind::LumetriColor {
-            is_open || def.id == current_tool_id
-        } else {
-            def.id == current_tool_id
-        };
-        let is_secondary = app.ui.lumetri_dual_view && app.ui.lumetri_secondary_tool == def.id;
+        let is_primary = def.id == current_tool_id;
+        let is_secondary = current_panel == crate::dock::PanelKind::LumetriColor
+            && app.ui.lumetri_dual_view
+            && app.ui.lumetri_secondary_tool == def.id
+            && def.id != current_tool_id;
         let is_docked_elsewhere = def.panel_kind() != current_panel
             && (app.ui.dock.contains(&def.panel_kind()) || app.ui.dock.floating.iter().any(|g| g.contains(&def.panel_kind())));
         let is_on = e.param(def.param).and_then(|p| p.value.as_bool()).unwrap_or(def.param != "hsl_on");
 
-        let btn_size = if vertical { vec2(148.0, 26.0) } else { vec2(132.0, 26.0) };
+        let label_text = crate::i18n::t(def.label);
+        let btn_w = if vertical {
+            148.0
+        } else {
+            (label_text.chars().count() as f32 * 6.4 + 48.0).clamp(84.0, 140.0)
+        };
+        let btn_size = vec2(btn_w, 26.0);
         let (r, resp) = ui.allocate_exact_size(btn_size, Sense::click_and_drag());
 
         // Drag to dock / float window anywhere across screen
@@ -482,17 +645,17 @@ fn render_tool_buttons(
             sections.push(def.sec);
         }
 
-        // 5. Click button to switch this window to the selected tool
+        // 5. Click button to switch this panel exclusively to the selected tool (drag tab to detach/open alongside)
         if resp.clicked() && !sw_resp.clicked() {
             if current_panel == crate::dock::PanelKind::LumetriColor {
-                if is_open {
-                    app.ui.collapsed_fx.push(key.clone());
-                    app.ui.expanded_fx.retain(|k| k != &key);
+                let shift = ui.ctx().input(|inp| inp.modifiers.shift);
+                if app.ui.lumetri_dual_view && shift && def.id != app.ui.lumetri_active_tool {
+                    app.ui.lumetri_secondary_tool = def.id.to_string();
                 } else {
-                    app.ui.collapsed_fx.retain(|k| k != &key);
-                    app.ui.expanded_fx.push(key.clone());
+                    app.ui.lumetri_active_tool = def.id.to_string();
+                    app.ui.expanded_fx.retain(|k| !k.starts_with("lumetri2:"));
+                    app.ui.collapsed_fx.retain(|k| !k.starts_with("lumetri2:"));
                 }
-                app.ui.lumetri_active_tool = def.id.to_string();
             } else {
                 app.switch_color_window(current_panel, def.panel_kind(), def.id);
             }
@@ -539,47 +702,73 @@ fn render_palette_toolbar(
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let cur_pos = app.ui.lumetri_bar_pos.clone();
-                if ui.selectable_label(cur_pos == "top", "Top").on_hover_text(tl!("Barra Arriba")).clicked() {
+                let r_top = ui.selectable_label(cur_pos == "top", "Top").on_hover_text(tl!("Barra Arriba"));
+                app.auto.add("lumetri.bar.top", r_top.rect, "Top");
+                if r_top.clicked() {
                     app.ui.lumetri_bar_pos = "top".into();
                 }
-                if ui.selectable_label(cur_pos == "bottom", "Bottom").on_hover_text(tl!("Barra Abajo")).clicked() {
+                let r_bot = ui.selectable_label(cur_pos == "bottom", "Bottom").on_hover_text(tl!("Barra Abajo"));
+                app.auto.add("lumetri.bar.bottom", r_bot.rect, "Bottom");
+                if r_bot.clicked() {
                     app.ui.lumetri_bar_pos = "bottom".into();
                 }
-                if ui.selectable_label(cur_pos == "left", "Left").on_hover_text(tl!("Barra Lateral Izquierda")).clicked() {
+                let r_left = ui.selectable_label(cur_pos == "left", "Left").on_hover_text(tl!("Barra Lateral Izquierda"));
+                app.auto.add("lumetri.bar.left", r_left.rect, "Left");
+                if r_left.clicked() {
                     app.ui.lumetri_bar_pos = "left".into();
                 }
                 let dual_text = if app.ui.lumetri_dual_view { "Dual ✓" } else { "Dual" };
-                if ui.selectable_label(app.ui.lumetri_dual_view, dual_text).on_hover_text(tl!("Vista dual (dos herramientas)")).clicked() {
+                let r_dual = ui.selectable_label(app.ui.lumetri_dual_view, dual_text).on_hover_text(tl!("Vista dual (dos herramientas)"));
+                app.auto.add("lumetri.bar.dual", r_dual.rect, "Dual");
+                if r_dual.clicked() {
                     app.ui.lumetri_dual_view = !app.ui.lumetri_dual_view;
                 }
             });
         });
     } else {
-        ui.horizontal(|ui| {
-            egui::ScrollArea::horizontal().auto_shrink([false, false]).id_salt(("tool_strip", current_panel)).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    render_tool_buttons(ui, app, e, current_panel, false, sections);
-                });
-            });
-            ui.add_space(6.0);
-            ui.separator();
-            ui.add_space(4.0);
-            let cur_pos = app.ui.lumetri_bar_pos.clone();
-            if ui.selectable_label(cur_pos == "top", "Top").on_hover_text(tl!("Barra Arriba")).clicked() {
-                app.ui.lumetri_bar_pos = "top".into();
-            }
-            if ui.selectable_label(cur_pos == "bottom", "Bottom").on_hover_text(tl!("Barra Abajo")).clicked() {
-                app.ui.lumetri_bar_pos = "bottom".into();
-            }
-            if ui.selectable_label(cur_pos == "left", "Left").on_hover_text(tl!("Barra Lateral Izquierda")).clicked() {
-                app.ui.lumetri_bar_pos = "left".into();
-            }
+        let avail_w = ui.available_width().max(120.0);
+        ui.allocate_ui_with_layout(vec2(avail_w, 30.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.set_max_width(avail_w);
             let dual_text = if app.ui.lumetri_dual_view { "Dual ✓" } else { "Dual" };
-            if ui.selectable_label(app.ui.lumetri_dual_view, dual_text).on_hover_text(tl!("Vista dual (dos herramientas)")).clicked() {
+            let r_dual = ui.selectable_label(app.ui.lumetri_dual_view, dual_text).on_hover_text(tl!("Vista dual (dos herramientas)"));
+            app.auto.add("lumetri.bar.dual", r_dual.rect, "Dual");
+            if r_dual.clicked() {
                 app.ui.lumetri_dual_view = !app.ui.lumetri_dual_view;
             }
+            let mut cur_pos = app.ui.lumetri_bar_pos.clone();
+            let r_left = ui.selectable_label(cur_pos == "left", "Left").on_hover_text(tl!("Barra Lateral Izquierda"));
+            app.auto.add("lumetri.bar.left", r_left.rect, "Left");
+            if r_left.clicked() {
+                cur_pos = "left".into();
+            }
+            let r_bot = ui.selectable_label(cur_pos == "bottom", "Bottom").on_hover_text(tl!("Barra Abajo"));
+            app.auto.add("lumetri.bar.bottom", r_bot.rect, "Bottom");
+            if r_bot.clicked() {
+                cur_pos = "bottom".into();
+            }
+            let r_top = ui.selectable_label(cur_pos == "top", "Top").on_hover_text(tl!("Barra Arriba"));
+            app.auto.add("lumetri.bar.top", r_top.rect, "Top");
+            if r_top.clicked() {
+                cur_pos = "top".into();
+            }
+            app.ui.lumetri_bar_pos = cur_pos;
+            ui.separator();
+            let strip_w = ui.available_width().max(40.0);
+            ui.allocate_ui_with_layout(vec2(strip_w, 28.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_max_width(strip_w);
+                egui::ScrollArea::horizontal()
+                    .auto_shrink([false, true])
+                    .max_width(strip_w)
+                    .max_height(28.0)
+                    .id_salt(("tool_strip", current_panel))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            render_tool_buttons(ui, app, e, current_panel, false, sections);
+                        });
+                    });
+            });
         });
     }
 }
@@ -600,47 +789,41 @@ fn render_palette_content(
     auto_rows: &mut Vec<(String, Rect, &'static str)>,
     sections: &mut Vec<&'static str>,
 ) {
-    let tools_to_render = if let Some(forced) = tool_for_panel(current_panel) {
-        vec![forced.to_string()]
+    let active = if get_tool_def(&app.ui.lumetri_active_tool).is_some() {
+        app.ui.lumetri_active_tool.clone()
     } else {
-        let open_tools: Vec<String> = app.ui.lumetri_tool_order.iter()
-            .filter(|id| {
-                let key = format!("lumetri2:{id}");
-                !app.ui.collapsed_fx.contains(&key) && (*id == "Basic Correction" || app.ui.expanded_fx.contains(&key))
-            })
-            .cloned()
-            .collect();
-        if open_tools.is_empty() {
-            vec![app.ui.lumetri_active_tool.clone()]
-        } else {
-            open_tools
-        }
+        "Basic Correction".to_string()
     };
 
-    if app.ui.lumetri_dual_view && tools_to_render.len() >= 2 {
+    if let Some(forced) = tool_for_panel(current_panel) {
+        render_single_palette(forced, ui, app, e, clip, idx, mt, hdr, actions, lut_actions, mask_actions, auto_rows, sections);
+        return;
+    }
+
+    if app.ui.lumetri_dual_view {
+        let secondary = if app.ui.lumetri_secondary_tool != active && get_tool_def(&app.ui.lumetri_secondary_tool).is_some() {
+            app.ui.lumetri_secondary_tool.clone()
+        } else if active == "Curves" {
+            "Color Wheels & Match".to_string()
+        } else {
+            "Curves".to_string()
+        };
         ui.columns(2, |cols| {
+            let col0_w = cols[0].available_width().max(100.0);
+            cols[0].set_max_width(col0_w);
             cols[0].vertical(|ui| {
-                render_single_palette(&tools_to_render[0], ui, app, e, clip, idx, mt, hdr, actions, lut_actions, mask_actions, auto_rows, sections);
+                ui.set_max_width(col0_w);
+                render_single_palette(&active, ui, app, e, clip, idx, mt, hdr, actions, lut_actions, mask_actions, auto_rows, sections);
             });
+            let col1_w = cols[1].available_width().max(100.0);
+            cols[1].set_max_width(col1_w);
             cols[1].vertical(|ui| {
-                render_single_palette(&tools_to_render[1], ui, app, e, clip, idx, mt, hdr, actions, lut_actions, mask_actions, auto_rows, sections);
+                ui.set_max_width(col1_w);
+                render_single_palette(&secondary, ui, app, e, clip, idx, mt, hdr, actions, lut_actions, mask_actions, auto_rows, sections);
             });
         });
-        for tool_id in &tools_to_render[2..] {
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(4.0);
-            render_single_palette(tool_id, ui, app, e, clip, idx, mt, hdr, actions, lut_actions, mask_actions, auto_rows, sections);
-        }
     } else {
-        for (idx_t, tool_id) in tools_to_render.iter().enumerate() {
-            if idx_t > 0 {
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(4.0);
-            }
-            render_single_palette(tool_id, ui, app, e, clip, idx, mt, hdr, actions, lut_actions, mask_actions, auto_rows, sections);
-        }
+        render_single_palette(&active, ui, app, e, clip, idx, mt, hdr, actions, lut_actions, mask_actions, auto_rows, sections);
     }
 }
 
@@ -664,98 +847,130 @@ fn render_single_palette(
     let Some(def) = get_tool_def(tool_id) else { return };
     let set = |actions: &mut Actions, param: &str, v: Value| actions.push(json!({"clip": clip.0, "effect": idx, "param": param, "value": v}));
 
-    // Sleek Tool Header: [ Icon Tool Name ] [ Switch Bypass ]
+    // Sleek Tool Header: [ Icon Tool Name ] [ Optional inline controls ] [ Switch Bypass ]
     let on = e.param(def.param).and_then(|p| p.value.as_bool()).unwrap_or(def.param != "hsl_on");
-    ui.horizontal(|ui| {
-        let (icon_r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-        draw_tool_icon(ui.painter(), icon_r.center(), def.id, t.text);
-        ui.label(egui::RichText::new(crate::i18n::t(def.id)).strong().size(13.0).color(t.text));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (sw, sw_resp) = ui.allocate_exact_size(vec2(26.0, 14.0), Sense::click());
-            ui.painter().rect_filled(sw, 7.0, if on { t.accent } else { Color32::from_rgb(0x55, 0x55, 0x55) });
-            ui.painter().circle_filled(pos2(if on { sw.max.x - 7.0 } else { sw.min.x + 7.0 }, sw.center().y), 5.0, Color32::WHITE);
-            if sw_resp.clicked() {
-                sections.push(def.sec);
-            }
-            app.auto.add(&format!("lumetri.switch.{}", def.id), sw.expand(3.0), &format!("{} on/off", def.id));
-            if def.id.contains("Power Windows") {
-                app.auto.add("lumetri.switch.Power Windows", sw.expand(3.0), "Power Windows on/off");
-                app.auto.add("lumetri.switch.Masks", sw.expand(3.0), "Masks on/off");
+    let primaries_mode_id = egui::Id::unique("lumetri_primaries_view_mode");
+    let hdr_avail_w = ui.available_width().max(120.0);
+    let inline_modes = def.id == "Basic Correction" && hdr_avail_w >= 540.0;
+    let inline_lut = def.id == "Basic Correction" && hdr_avail_w >= 840.0;
+    let mut mode = if def.id == "Basic Correction" {
+        ui.data(|d| d.get_temp::<u8>(primaries_mode_id).unwrap_or(0))
+    } else {
+        0
+    };
+    let mut draw_modes = |ui: &mut egui::Ui| {
+        let r_sl = ui.selectable_label(mode == 2, tl!("Sliders")).on_hover_text(tl!("Sliders de Color y Luz"));
+        auto_rows.push(("lumetri.mode.sliders".to_string(), r_sl.rect, "Sliders"));
+        if r_sl.clicked() {
+            mode = 2;
+        }
+        let r_kn = ui.selectable_label(mode == 1, tl!("Perillas")).on_hover_text(tl!("Vista completa de perillas"));
+        auto_rows.push(("lumetri.mode.knobs".to_string(), r_kn.rect, "Perillas"));
+        if r_kn.clicked() {
+            mode = 1;
+        }
+        let r_wh = ui.selectable_label(mode == 0, tl!("Color Wheels")).on_hover_text(tl!("Ruedas Lift / Gamma / Gain / Offset + Primarias (DaVinci Resolve)"));
+        auto_rows.push(("lumetri.mode.wheels".to_string(), r_wh.rect, "Color Wheels"));
+        if r_wh.clicked() {
+            mode = 0;
+        }
+    };
+    ui.allocate_ui_with_layout(vec2(hdr_avail_w, 22.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.set_max_width(hdr_avail_w);
+        let (sw, sw_resp) = ui.allocate_exact_size(vec2(26.0, 14.0), Sense::click());
+        ui.painter().rect_filled(sw, 7.0, if on { t.accent } else { Color32::from_rgb(0x55, 0x55, 0x55) });
+        ui.painter().circle_filled(pos2(if on { sw.max.x - 7.0 } else { sw.min.x + 7.0 }, sw.center().y), 5.0, Color32::WHITE);
+        if sw_resp.clicked() {
+            sections.push(def.sec);
+        }
+        app.auto.add(&format!("lumetri.switch.{}", def.id), sw.expand(3.0), &format!("{} on/off", def.id));
+        if def.id.contains("Power Windows") {
+            app.auto.add("lumetri.switch.Power Windows", sw.expand(3.0), "Power Windows on/off");
+            app.auto.add("lumetri.switch.Masks", sw.expand(3.0), "Masks on/off");
+        }
+        if inline_modes {
+            draw_modes(ui);
+        }
+        let left_w = ui.available_width().max(40.0);
+        ui.allocate_ui_with_layout(vec2(left_w, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.set_max_width(left_w);
+            let (icon_r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+            draw_tool_icon(ui.painter(), icon_r.center(), def.id, t.text);
+            ui.add(egui::Label::new(egui::RichText::new(crate::i18n::t(def.id)).strong().size(12.5).color(t.text)).truncate());
+            if inline_lut {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(tl!("Input LUT")).color(t.text_dim).small());
+                let cur = match e.param("input_lut").map(|p| &p.value) {
+                    Some(ParamValue::Text(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                let lut_w = 160.0_f32.min((ui.available_width() - 8.0).max(60.0));
+                let (r, pick) = lut_menu(ui, app, ("lumetri-lut", "input_lut"), &cur, true, lut_w, "lumetri.input_lut");
+                match pick {
+                    Some(LutPick::Lut(r)) => lut_actions.push(("lumetri.setInputLut", json!({"lut": r}))),
+                    Some(LutPick::Browse) => lut_actions.push(("lumetri.setInputLut", json!({"browse": true}))),
+                    None => {}
+                }
+                app.auto.add("lumetri.input_lut", r, tl!("Input LUT"));
             }
         });
     });
-    ui.add_space(4.0);
+    if def.id == "Basic Correction" {
+        if !inline_modes {
+            ui.horizontal_wrapped(|ui| {
+                draw_modes(ui);
+            });
+        }
+        ui.data_mut(|d| d.insert_temp(primaries_mode_id, mode));
+    }
+    ui.add_space(1.0);
 
     match def.id {
         "Basic Correction" => {
-            lut_combo(ui, app, e, "input_lut", tl!("Input LUT"), true, lut_actions);
-            let primaries_mode_id = egui::Id::unique("lumetri_primaries_mode");
-            let show_sliders = ui.data(|d| d.get_temp::<bool>(primaries_mode_id).unwrap_or(false));
+            // 0 = DaVinci Resolve Color Wheels + Primary Strip (default), 1 = Knobs, 2 = Sliders/Bars
+            let mode = ui.data(|d| d.get_temp::<u8>(primaries_mode_id).unwrap_or(0));
+            if !inline_lut {
+                lut_combo(ui, app, e, "input_lut", tl!("Input LUT"), true, lut_actions);
+                ui.add_space(2.0);
+            }
 
-            ui.horizontal(|ui| {
-                sub(ui, &t, tl!("Ajustes Primarios"));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.selectable_label(show_sliders, tl!("Sliders")).clicked() {
-                        ui.data_mut(|d| d.insert_temp(primaries_mode_id, true));
-                    }
-                    if ui.selectable_label(!show_sliders, tl!("Perillas")).clicked() {
-                        ui.data_mut(|d| d.insert_temp(primaries_mode_id, false));
-                    }
-                });
-            });
-
-            if !show_sliders {
-                egui::ScrollArea::horizontal().auto_shrink([false, true]).max_height(78.0).id_salt("primary_knobs").show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let r = rotary_knob(ui, e, mt, "temperature", tl!("Temperature"), "TEMP", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(255, 140, 50)), &t, actions, clip, idx);
-                        auto_rows.push(("lumetri.knob.temperature".into(), r, "Temperature"));
-
-                        let r = rotary_knob(ui, e, mt, "tint", tl!("Tint"), "TINT", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(220, 80, 200)), &t, actions, clip, idx);
-                        auto_rows.push(("lumetri.knob.tint".into(), r, "Tint"));
-
-                        let r = rotary_knob(ui, e, mt, "exposure", tl!("Exposure"), "EXP", (-5.0, 5.0), 0.0, 0.02, 1, " EV", Some(Color32::from_rgb(240, 220, 100)), &t, actions, clip, idx);
-                        auto_rows.push(("lumetri.knob.exposure".into(), r, "Exposure"));
-
-                        let r = rotary_knob(ui, e, mt, "contrast", tl!("Contrast"), "CONT", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(180, 190, 210)), &t, actions, clip, idx);
-                        auto_rows.push(("lumetri.knob.contrast".into(), r, "Contrast"));
-
-                        let r = rotary_knob(ui, e, mt, "highlights", tl!("Highlights"), "HI", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(245, 245, 245)), &t, actions, clip, idx);
-                        auto_rows.push(("lumetri.knob.highlights".into(), r, "Highlights"));
-
-                        let r = rotary_knob(ui, e, mt, "shadows", tl!("Shadows"), "SHAD", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(90, 100, 120)), &t, actions, clip, idx);
-                        auto_rows.push(("lumetri.knob.shadows".into(), r, "Shadows"));
-
-                        let r = rotary_knob(ui, e, mt, "whites", tl!("Whites"), "WHITE", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(255, 255, 255)), &t, actions, clip, idx);
-                        auto_rows.push(("lumetri.knob.whites".into(), r, "Whites"));
-
-                        let r = rotary_knob(ui, e, mt, "blacks", tl!("Blacks"), "BLACK", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(70, 75, 85)), &t, actions, clip, idx);
-                        auto_rows.push(("lumetri.knob.blacks".into(), r, "Blacks"));
-
-                        let r = rotary_knob(ui, e, mt, "saturation", tl!("Saturation"), "SAT", (0.0, 200.0), 100.0, 0.4, 0, "%", Some(Color32::from_rgb(80, 200, 120)), &t, actions, clip, idx);
-                        auto_rows.push(("lumetri.knob.saturation".into(), r, "Saturation"));
-
-                        let r = rotary_knob(ui, e, mt, "vibrance", tl!("Vibrance"), "VIB", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(100, 170, 240)), &t, actions, clip, idx);
-                        auto_rows.push(("lumetri.knob.vibrance".into(), r, "Vibrance"));
-
-                        let r = rotary_knob(ui, e, mt, "sharpen", tl!("Sharpen"), "SHRP", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(220, 180, 100)), &t, actions, clip, idx);
-                        auto_rows.push(("lumetri.knob.sharpen".into(), r, "Sharpen"));
+            match mode {
+                0 => {
+                    // DaVinci Resolve Primary Color Wheels (Lift, Gamma, Gain, Offset) + Primary Knobs Strip
+                    resolve_wheels_grid(ui, e, mt, &t, actions, auto_rows, clip, idx);
+                    ui.add_space(2.0);
+                    ui.separator();
+                    ui.add_space(2.0);
+                    draw_primary_knobs_strip(ui, e, mt, true, &t, actions, auto_rows, clip, idx);
+                }
+                1 => {
+                    sub(ui, &t, tl!("Ajustes Primarios"));
+                    draw_primary_knobs_strip(ui, e, mt, true, &t, actions, auto_rows, clip, idx);
+                }
+                _ => {
+                    ui.columns(2, |cols| {
+                        cols[0].vertical(|ui| {
+                            sub(ui, &t, tl!("Color"));
+                            slider(ui, e, mt, "temperature", tl!("Temperature"), Some(Gradient::Temp), &t, actions, clip, idx);
+                            slider(ui, e, mt, "tint", tl!("Tint"), Some(Gradient::Tint), &t, actions, clip, idx);
+                            slider(ui, e, mt, "saturation", tl!("Saturation"), None, &t, actions, clip, idx);
+                            slider(ui, e, mt, "vibrance", tl!("Vibrance"), None, &t, actions, clip, idx);
+                            slider(ui, e, mt, "sharpen", tl!("Sharpen"), None, &t, actions, clip, idx);
+                        });
+                        cols[1].vertical(|ui| {
+                            sub(ui, &t, tl!("Light"));
+                            for (id, label) in [
+                                ("exposure", tl!("Exposure")),
+                                ("contrast", tl!("Contrast")),
+                                ("highlights", tl!("Highlights")),
+                                ("shadows", tl!("Shadows")),
+                                ("whites", tl!("Whites")),
+                                ("blacks", tl!("Blacks")),
+                            ] {
+                                slider(ui, e, mt, id, label, None, &t, actions, clip, idx);
+                            }
+                        });
                     });
-                });
-            } else {
-                sub(ui, &t, tl!("Color"));
-                slider(ui, e, mt, "temperature", tl!("Temperature"), Some(Gradient::Temp), &t, actions, clip, idx);
-                slider(ui, e, mt, "tint", tl!("Tint"), Some(Gradient::Tint), &t, actions, clip, idx);
-                slider(ui, e, mt, "saturation", tl!("Saturation"), None, &t, actions, clip, idx);
-                sub(ui, &t, tl!("Light"));
-                for (id, label) in [
-                    ("exposure", tl!("Exposure")),
-                    ("contrast", tl!("Contrast")),
-                    ("highlights", tl!("Highlights")),
-                    ("shadows", tl!("Shadows")),
-                    ("whites", tl!("Whites")),
-                    ("blacks", tl!("Blacks")),
-                ] {
-                    slider(ui, e, mt, id, label, None, &t, actions, clip, idx);
                 }
             }
 
@@ -800,69 +1015,95 @@ fn render_single_palette(
             }
         }
         "Curves" => {
-            sub(ui, &t, tl!("RGB Curves"));
+            let tab_key = egui::Id::unique("lumetri-curve-tab");
+            let mut curve_tab: usize = ui.data(|d| d.get_temp(tab_key)).unwrap_or(0);
+            let curve_tabs = [
+                ("Custom RGB", false, ""),
+                ("Hue vs Hue", true, "hue_vs_hue"),
+                ("Hue vs Sat", true, "hue_vs_sat"),
+                ("Hue vs Lum", true, "hue_vs_luma"),
+                ("Lum vs Sat", true, "luma_vs_sat"),
+                ("Sat vs Sat", true, "sat_vs_sat"),
+            ];
             let key = egui::Id::unique("lumetri-curve-channel");
             let mut ch: usize = ui.data(|d| d.get_temp(key)).unwrap_or(0);
-            ui.horizontal(|ui| {
-                for (i, c) in
-                    [Color32::WHITE, Color32::from_rgb(230, 70, 70), Color32::from_rgb(80, 200, 90), Color32::from_rgb(80, 130, 250)].iter().enumerate()
-                {
-                    let (r, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
-                    ui.painter().circle_filled(r.center(), 6.0, *c);
-                    if ch == i {
-                        ui.painter().circle_stroke(r.center(), 8.5, Stroke::new(1.5, t.hot_text));
-                    }
-                    if resp.clicked() {
-                        ch = i;
-                    }
-                }
-            });
-            ui.data_mut(|d| d.insert_temp(key, ch));
             let (id, col) = [
                 ("curve_luma", Color32::WHITE),
                 ("curve_red", Color32::from_rgb(230, 70, 70)),
                 ("curve_green", Color32::from_rgb(80, 200, 90)),
                 ("curve_blue", Color32::from_rgb(80, 130, 250)),
             ][ch];
-            let r = curve_editor(ui, e, id, false, col, &t, actions, clip, idx);
-            auto_rows.push((format!("lumetri.curve.{id}"), r, "Curve"));
-            if hdr {
-                let r = slider(ui, e, mt, "curves_hdr_range", tl!("HDR Range"), None, &t, actions, clip, idx);
-                auto_rows.push(("lumetri.param.curves_hdr_range".into(), r, "HDR Range"));
-            }
-            sub(ui, &t, tl!("Hue Saturation Curves"));
-            for (id, label) in [
-                ("hue_vs_sat", tl!("Hue vs Sat")),
-                ("hue_vs_hue", tl!("Hue vs Hue")),
-                ("hue_vs_luma", tl!("Hue vs Luma")),
-                ("luma_vs_sat", tl!("Luma vs Sat")),
-                ("sat_vs_sat", tl!("Sat vs Sat")),
-            ] {
-                ui.label(egui::RichText::new(label).color(t.text_dim));
-                let r = curve_editor(ui, e, id, true, Color32::WHITE, &t, actions, clip, idx);
-                auto_rows.push((format!("lumetri.curve.{id}"), r, label));
+
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (ti, (lbl, _, _)) in curve_tabs.iter().enumerate() {
+                    if ui.selectable_label(curve_tab == ti, egui::RichText::new(crate::i18n::t(lbl)).small()).clicked() {
+                        curve_tab = ti;
+                    }
+                }
+                if curve_tab == 0 {
+                    ui.separator();
+                    for (i, (c, cname)) in [
+                        (Color32::WHITE, "Y"),
+                        (Color32::from_rgb(230, 70, 70), "R"),
+                        (Color32::from_rgb(80, 200, 90), "G"),
+                        (Color32::from_rgb(80, 130, 250), "B"),
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        let (r, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+                        ui.painter().circle_filled(r.center(), 5.0, *c);
+                        if ch == i {
+                            ui.painter().circle_stroke(r.center(), 7.0, Stroke::new(1.5, t.hot_text));
+                        }
+                        if resp.on_hover_text(*cname).clicked() {
+                            ch = i;
+                        }
+                    }
+                    if paint_reset_icon_button(ui, t.text_dim, tl!("Reset curve")).clicked() {
+                        set(actions, id, json!([[0.0, 0.0], [1.0, 1.0]]));
+                    }
+                } else {
+                    let (_, _, cid) = curve_tabs[curve_tab.min(curve_tabs.len() - 1)];
+                    if paint_reset_icon_button(ui, t.text_dim, tl!("Reset curve")).clicked() {
+                        set(actions, cid, json!([]));
+                    }
+                }
+            });
+            ui.data_mut(|d| d.insert_temp(tab_key, curve_tab));
+            ui.data_mut(|d| d.insert_temp(key, ch));
+
+            if curve_tab == 0 {
+                let r = curve_editor(ui, e, id, false, col, &t, actions, clip, idx);
+                auto_rows.push((format!("lumetri.curve.{id}"), r, "Curve"));
+                if hdr {
+                    let r = slider(ui, e, mt, "curves_hdr_range", tl!("HDR Range"), None, &t, actions, clip, idx);
+                    auto_rows.push(("lumetri.param.curves_hdr_range".into(), r, "HDR Range"));
+                }
+            } else {
+                let (lbl, _, cid) = curve_tabs[curve_tab.min(curve_tabs.len() - 1)];
+                let r = curve_editor(ui, e, cid, true, Color32::WHITE, &t, actions, clip, idx);
+                auto_rows.push((format!("lumetri.curve.{cid}"), r, lbl));
             }
         }
         "Color Wheels & Match" => {
-            let w = ((ui.available_width() - 320.0) / 3.0).clamp(80.0, 110.0);
-            ui.horizontal(|ui| {
-                for (id, lid, label) in [
-                    ("wheel_shadows", "wheel_shadows_l", tl!("Shadows")),
-                    ("wheel_midtones", "wheel_midtones_l", tl!("Midtones")),
-                    ("wheel_highlights", "wheel_highlights_l", tl!("Highlights")),
-                ] {
-                    ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(label).color(t.text_dim).small());
-                        color_wheel(ui, e, mt, id, lid, w, &t, actions, clip, idx);
+            if ui.available_width() >= 920.0 {
+                ui.columns(2, |cols| {
+                    cols[0].vertical(|ui| {
+                        resolve_wheels_grid(ui, e, mt, &t, actions, auto_rows, clip, idx);
                     });
-                }
-                ui.add_space(12.0);
-                ui.separator();
-                ui.add_space(8.0);
-                ui.vertical(|ui| {
-                    match_controls(ui, app, lut_actions);
+                    cols[1].vertical(|ui| {
+                        match_controls(ui, app, lut_actions);
+                    });
                 });
-            });
+            } else {
+                resolve_wheels_grid(ui, e, mt, &t, actions, auto_rows, clip, idx);
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(4.0);
+                match_controls(ui, app, lut_actions);
+            }
         }
         "Power Windows / Máscara" => {
             ui.horizontal(|ui| {
@@ -1141,7 +1382,7 @@ fn rotary_knob(
     idx: usize,
 ) -> Rect {
     let cur_val = e.param(id).map(|p| p.f64_at(mt)).unwrap_or(default);
-    let (item_r, resp) = ui.allocate_exact_size(vec2(54.0, 70.0), Sense::click_and_drag());
+    let (item_r, resp) = ui.allocate_exact_size(vec2(50.0, 42.0), Sense::click_and_drag());
     let p = ui.painter();
 
     // Drag interaction
@@ -1232,24 +1473,24 @@ fn rotary_knob(
     };
 
     // Top Label in small caps
-    let label_pos = pos2(item_r.center().x, item_r.min.y + 7.0);
+    let label_pos = pos2(item_r.center().x, item_r.min.y + 5.5);
     p.text(
         label_pos,
         Align2::CENTER_CENTER,
         short_label,
-        Tokens::semibold(9.5),
+        Tokens::semibold(9.0),
         if resp.hovered() { Color32::from_rgb(255, 185, 60) } else { t.text_dim },
     );
 
     // Draw intuitive guide dots for Temperature and Tint
     if id == "temperature" || id == "tint" {
-        p.circle_filled(pos2(item_r.center().x - 17.0, item_r.min.y + 7.0), 2.5, track_col_neg);
-        p.circle_filled(pos2(item_r.center().x + 17.0, item_r.min.y + 7.0), 2.5, track_col_pos);
+        p.circle_filled(pos2(item_r.center().x - 16.0, item_r.min.y + 5.5), 2.2, track_col_neg);
+        p.circle_filled(pos2(item_r.center().x + 16.0, item_r.min.y + 5.5), 2.2, track_col_pos);
     }
 
     // Dial Center & Radius
-    let kc = pos2(item_r.center().x, item_r.min.y + 32.0);
-    let radius = 15.5;
+    let kc = pos2(item_r.center().x, item_r.min.y + 19.5);
+    let radius = 9.5;
 
     // Outer Dial Ring & Background
     let is_active = resp.hovered() || resp.dragged();
@@ -1330,7 +1571,7 @@ fn rotary_knob(
     } else {
         format!("{:.1}{unit}", cur_val)
     };
-    let val_pos = pos2(item_r.center().x, item_r.max.y - 8.0);
+    let val_pos = pos2(item_r.center().x, item_r.max.y - 6.0);
     let val_color = if is_modified {
         active_color
     } else {
@@ -1584,66 +1825,418 @@ fn without_point(pts: &[[f32; 2]], i: usize, hue: bool) -> Option<Vec<[f32; 2]>>
     Some(rest)
 }
 
-/// Colour wheel: hue ring, draggable puck (offset), lightness slider on the left.
+/// DaVinci Resolve-style primary knob bar (full 11 knobs or 8 adjustment knobs under the 4 color wheels).
 #[allow(clippy::too_many_arguments)]
-fn color_wheel(ui: &mut egui::Ui, e: &EffectInstance, mt: Tick, id: &str, lid: &str, size: f32, t: &Tokens, actions: &mut Actions, clip: ClipId, idx: usize) {
-    let v = e.param(id).map(|p| p.vec2_at(mt)).unwrap_or_default();
-    let (area, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click_and_drag());
-    let c = area.center() + vec2(6.0, 0.0);
-    let r_out = size / 2.0 - 4.0;
-    let r_in = r_out - 10.0;
-    let p = ui.painter();
-    let n = 72;
-    let mut mesh = egui::Mesh::default();
-    for i in 0..n {
-        let a0 = i as f32 / n as f32 * std::f32::consts::TAU;
-        let a1 = (i + 1) as f32 / n as f32 * std::f32::consts::TAU;
-        let rgb = filmcraft_color::hsl_to_rgb(1.0 - (i as f32 / n as f32), 0.75, 0.5);
-        let col = Color32::from_rgb((rgb[0] * 255.0) as u8, (rgb[1] * 255.0) as u8, (rgb[2] * 255.0) as u8);
-        let base = mesh.vertices.len() as u32;
-        for (a, r) in [(a0, r_in), (a0, r_out), (a1, r_out), (a1, r_in)] {
-            mesh.colored_vertex(c + vec2(a.cos(), -a.sin()) * r, col);
+fn draw_primary_knobs_strip(
+    ui: &mut egui::Ui,
+    e: &EffectInstance,
+    mt: Tick,
+    include_wb_exp: bool,
+    t: &Tokens,
+    actions: &mut Actions,
+    auto_rows: &mut Vec<(String, Rect, &'static str)>,
+    clip: ClipId,
+    idx: usize,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        if include_wb_exp {
+            let r = rotary_knob(ui, e, mt, "temperature", tl!("Temperature"), "TEMP", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(255, 140, 50)), t, actions, clip, idx);
+            auto_rows.push(("lumetri.knob.temperature".into(), r, "Temperature"));
+
+            let r = rotary_knob(ui, e, mt, "tint", tl!("Tint"), "TINT", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(220, 80, 200)), t, actions, clip, idx);
+            auto_rows.push(("lumetri.knob.tint".into(), r, "Tint"));
+
+            let r = rotary_knob(ui, e, mt, "exposure", tl!("Exposure"), "EXP", (-5.0, 5.0), 0.0, 0.02, 1, " EV", Some(Color32::from_rgb(240, 220, 100)), t, actions, clip, idx);
+            auto_rows.push(("lumetri.knob.exposure".into(), r, "Exposure"));
         }
-        mesh.add_triangle(base, base + 1, base + 2);
-        mesh.add_triangle(base, base + 2, base + 3);
-    }
-    p.add(mesh);
-    p.circle_filled(c, r_in - 1.0, Color32::from_rgb(0x16, 0x16, 0x16));
-    p.line_segment([c - vec2(6.0, 0.0), c + vec2(6.0, 0.0)], Stroke::new(1.0, t.text_faint));
-    p.line_segment([c - vec2(0.0, 6.0), c + vec2(0.0, 6.0)], Stroke::new(1.0, t.text_faint));
-    let puck = c + vec2(v.x as f32, -v.y as f32) * (r_in - 4.0);
-    p.circle_stroke(puck, 5.0, Stroke::new(1.5, Color32::WHITE));
-    if (resp.dragged() || resp.clicked())
-        && let Some(pos) = resp.interact_pointer_pos()
-    {
-        let d = (pos - c) / (r_in - 4.0);
-        let len = d.length().min(1.0);
-        let dir = if d.length() > 1e-6 { d / d.length() } else { d };
-        let nx = dir.x * len;
-        let ny = -dir.y * len;
-        if (nx - v.x as f32).abs() > 1e-4 || (ny - v.y as f32).abs() > 1e-4 {
-            actions.push(json!({"clip": clip.0, "effect": idx, "param": id, "value": [nx, ny]}));
+
+        let r = rotary_knob(ui, e, mt, "contrast", tl!("Contrast"), "CONT", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(180, 190, 210)), t, actions, clip, idx);
+        auto_rows.push(("lumetri.knob.contrast".into(), r, "Contrast"));
+
+        let r = rotary_knob(ui, e, mt, "highlights", tl!("Highlights"), "HI", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(245, 245, 245)), t, actions, clip, idx);
+        auto_rows.push(("lumetri.knob.highlights".into(), r, "Highlights"));
+
+        let r = rotary_knob(ui, e, mt, "shadows", tl!("Shadows"), "SHAD", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(90, 100, 120)), t, actions, clip, idx);
+        auto_rows.push(("lumetri.knob.shadows".into(), r, "Shadows"));
+
+        let r = rotary_knob(ui, e, mt, "whites", tl!("Whites"), "WHITE", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(255, 255, 255)), t, actions, clip, idx);
+        auto_rows.push(("lumetri.knob.whites".into(), r, "Whites"));
+
+        let r = rotary_knob(ui, e, mt, "blacks", tl!("Blacks"), "BLACK", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(70, 75, 85)), t, actions, clip, idx);
+        auto_rows.push(("lumetri.knob.blacks".into(), r, "Blacks"));
+
+        let r = rotary_knob(ui, e, mt, "saturation", tl!("Saturation"), "SAT", (0.0, 200.0), 100.0, 0.4, 0, "%", Some(Color32::from_rgb(80, 200, 120)), t, actions, clip, idx);
+        auto_rows.push(("lumetri.knob.saturation".into(), r, "Saturation"));
+
+        let r = rotary_knob(ui, e, mt, "vibrance", tl!("Vibrance"), "VIB", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(100, 170, 240)), t, actions, clip, idx);
+        auto_rows.push(("lumetri.knob.vibrance".into(), r, "Vibrance"));
+
+        let r = rotary_knob(ui, e, mt, "sharpen", tl!("Sharpen"), "SHRP", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(220, 180, 100)), t, actions, clip, idx);
+        auto_rows.push(("lumetri.knob.sharpen".into(), r, "Sharpen"));
+    });
+}
+
+#[derive(Clone, Copy)]
+enum WheelKind {
+    Lift,
+    Gamma,
+    Gain,
+    Offset,
+}
+
+/// DaVinci Resolve 4-Wheel layout: Lift (Shadows), Gamma (Midtones), Gain (Highlights), Offset (Temp/Tint/Exp).
+#[allow(clippy::too_many_arguments)]
+fn resolve_wheels_grid(
+    ui: &mut egui::Ui,
+    e: &EffectInstance,
+    mt: Tick,
+    t: &Tokens,
+    actions: &mut Actions,
+    auto_rows: &mut Vec<(String, Rect, &'static str)>,
+    clip: ClipId,
+    idx: usize,
+) {
+    let cards = [
+        (WheelKind::Lift, "Lift", tl!("Shadows")),
+        (WheelKind::Gamma, "Gamma", tl!("Midtones")),
+        (WheelKind::Gain, "Gain", tl!("Highlights")),
+        (WheelKind::Offset, "Offset", tl!("Global")),
+    ];
+    let avail = ui.available_width().max(140.0);
+    let gap = ui.spacing().item_spacing.x;
+    if avail >= 640.0 {
+        let col_w = ((avail - gap * 3.0) / 4.0).floor().max(80.0);
+        ui.horizontal_top(|ui| {
+            for (kind, title, sub) in cards {
+                ui.allocate_ui_with_layout(vec2(col_w, 0.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    ui.set_max_width(col_w);
+                    resolve_wheel_card(ui, e, mt, kind, title, sub, t, actions, auto_rows, clip, idx);
+                });
+            }
+        });
+    } else if avail >= 320.0 {
+        let col_w = ((avail - gap) / 2.0).floor().max(80.0);
+        for pair in cards.chunks(2) {
+            ui.horizontal_top(|ui| {
+                for &(kind, title, sub) in pair {
+                    ui.allocate_ui_with_layout(vec2(col_w, 0.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                        ui.set_max_width(col_w);
+                        resolve_wheel_card(ui, e, mt, kind, title, sub, t, actions, auto_rows, clip, idx);
+                    });
+                }
+            });
+            ui.add_space(3.0);
+        }
+    } else {
+        for (kind, title, sub) in cards {
+            ui.allocate_ui_with_layout(vec2(avail, 0.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                ui.set_max_width(avail);
+                resolve_wheel_card(ui, e, mt, kind, title, sub, t, actions, auto_rows, clip, idx);
+            });
+            ui.add_space(3.0);
         }
     }
-    if resp.double_clicked() {
-        actions.push(json!({"clip": clip.0, "effect": idx, "param": id, "value": [0.0, 0.0]}));
-    }
-    // lightness slider (vertical) at the wheel's left edge
-    let l = e.param(lid).map(|p| p.f64_at(mt)).unwrap_or(0.0) as f32;
-    let track = Rect::from_min_max(pos2(area.min.x, area.min.y + 8.0), pos2(area.min.x + 4.0, area.max.y - 8.0));
-    p.rect_filled(track, 2.0, Color32::from_rgb(0x4b, 0x4b, 0x4b));
-    let ky = track.center().y - l / 100.0 * track.height() / 2.0;
-    p.circle_stroke(pos2(track.center().x, ky), 4.0, Stroke::new(1.5, Color32::from_rgb(0xb0, 0xb0, 0xb0)));
-    let lr = ui.interact(track.expand2(vec2(6.0, 0.0)), egui::Id::unique(("wl", clip.0, lid)), Sense::click_and_drag());
-    if (lr.dragged() || lr.clicked())
-        && let Some(pos) = lr.interact_pointer_pos()
-    {
-        let nv = ((track.center().y - pos.y) / (track.height() / 2.0) * 100.0).clamp(-100.0, 100.0);
-        if (nv - l).abs() > 1e-3 {
-            actions.push(json!({"clip": clip.0, "effect": idx, "param": lid, "value": nv}));
+}
+
+/// Vector-drawn circular reset arrow button (avoids selectable text glyph / I-beam cursor).
+fn paint_reset_icon_button(ui: &mut egui::Ui, color: Color32, tooltip: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tooltip);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tooltip));
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        let c = rect.center();
+        if resp.hovered() {
+            p.circle_filled(c, 7.5, Color32::from_white_alpha(22));
         }
+        let col = if resp.hovered() { Color32::WHITE } else { color };
+        let r = 4.3_f32;
+        let start = -2.35_f32;
+        let end = 2.15_f32;
+        let steps = 14;
+        let pts: Vec<egui::Pos2> = (0..=steps)
+            .map(|i| {
+                let a = start + (end - start) * (i as f32 / steps as f32);
+                pos2(c.x + r * a.cos(), c.y + r * a.sin())
+            })
+            .collect();
+        p.add(egui::Shape::line(pts, Stroke::new(1.35, col)));
+        // Arrowhead at the counter-clockwise leading end (`start`).
+        let tip = pos2(c.x + r * start.cos(), c.y + r * start.sin());
+        p.line_segment([tip, tip + vec2(3.2, -0.4)], Stroke::new(1.35, col));
+        p.line_segment([tip, tip + vec2(0.4, 3.2)], Stroke::new(1.35, col));
     }
-    let _ = StrokeKind::Inside;
+    resp
+}
+
+/// Single DaVinci Resolve color wheel card: Header + Reset, Hue Trackball, Horizontal Knurled Master Wheel, and Live Readout.
+#[allow(clippy::too_many_arguments)]
+fn resolve_wheel_card(
+    ui: &mut egui::Ui,
+    e: &EffectInstance,
+    mt: Tick,
+    kind: WheelKind,
+    title: &'static str,
+    subtitle: &str,
+    t: &Tokens,
+    actions: &mut Actions,
+    auto_rows: &mut Vec<(String, Rect, &'static str)>,
+    clip: ClipId,
+    idx: usize,
+) {
+    let (vx, vy, lum, lum_max, id_tag) = match kind {
+        WheelKind::Lift => {
+            let v = e.param("wheel_shadows").map(|p| p.vec2_at(mt)).unwrap_or_default();
+            let l = e.param("wheel_shadows_l").map(|p| p.f64_at(mt)).unwrap_or(0.0) as f32;
+            (v.x as f32, v.y as f32, l, 100.0_f32, "lift")
+        }
+        WheelKind::Gamma => {
+            let v = e.param("wheel_midtones").map(|p| p.vec2_at(mt)).unwrap_or_default();
+            let l = e.param("wheel_midtones_l").map(|p| p.f64_at(mt)).unwrap_or(0.0) as f32;
+            (v.x as f32, v.y as f32, l, 100.0_f32, "gamma")
+        }
+        WheelKind::Gain => {
+            let v = e.param("wheel_highlights").map(|p| p.vec2_at(mt)).unwrap_or_default();
+            let l = e.param("wheel_highlights_l").map(|p| p.f64_at(mt)).unwrap_or(0.0) as f32;
+            (v.x as f32, v.y as f32, l, 100.0_f32, "gain")
+        }
+        WheelKind::Offset => {
+            let temp = e.param("temperature").map(|p| p.f64_at(mt)).unwrap_or(0.0) as f32;
+            let tint = e.param("tint").map(|p| p.f64_at(mt)).unwrap_or(0.0) as f32;
+            let exp = e.param("exposure").map(|p| p.f64_at(mt)).unwrap_or(0.0) as f32;
+            ((temp / 100.0).clamp(-1.0, 1.0), (tint / 100.0).clamp(-1.0, 1.0), exp, 5.0_f32, "offset")
+        }
+    };
+
+    let modified = vx.abs() > 1e-3 || vy.abs() > 1e-3 || lum.abs() > 1e-3;
+
+    let frame = egui::Frame::new()
+        .fill(Color32::from_rgb(23, 26, 32))
+        .stroke(Stroke::new(1.0, if modified { Color32::from_rgb(65, 85, 118) } else { Color32::from_rgb(38, 43, 52) }))
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::symmetric(4, 2));
+
+    let inner_max = (ui.available_width() - 10.0).max(60.0);
+    let frame_resp = frame.show(ui, |ui| {
+        ui.set_max_width(inner_max);
+        ui.spacing_mut().item_spacing.y = 1.0;
+        // Card Header: Reset anchored right, Title (Subtitle) truncated to fit strictly inside inner_max
+        ui.allocate_ui_with_layout(vec2(inner_max, 16.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.set_max_width(inner_max);
+            let rst_col = if modified { t.accent } else { t.text_faint };
+            let rst = paint_reset_icon_button(ui, rst_col, tl!("Reset this wheel (or double-click)"));
+            if rst.clicked() {
+                match kind {
+                    WheelKind::Lift => {
+                        actions.push(json!({"clip": clip.0, "effect": idx, "param": "wheel_shadows", "value": [0.0, 0.0]}));
+                        actions.push(json!({"clip": clip.0, "effect": idx, "param": "wheel_shadows_l", "value": 0.0}));
+                    }
+                    WheelKind::Gamma => {
+                        actions.push(json!({"clip": clip.0, "effect": idx, "param": "wheel_midtones", "value": [0.0, 0.0]}));
+                        actions.push(json!({"clip": clip.0, "effect": idx, "param": "wheel_midtones_l", "value": 0.0}));
+                    }
+                    WheelKind::Gain => {
+                        actions.push(json!({"clip": clip.0, "effect": idx, "param": "wheel_highlights", "value": [0.0, 0.0]}));
+                        actions.push(json!({"clip": clip.0, "effect": idx, "param": "wheel_highlights_l", "value": 0.0}));
+                    }
+                    WheelKind::Offset => {
+                        actions.push(json!({"clip": clip.0, "effect": idx, "param": "temperature", "value": 0.0}));
+                        actions.push(json!({"clip": clip.0, "effect": idx, "param": "tint", "value": 0.0}));
+                        actions.push(json!({"clip": clip.0, "effect": idx, "param": "exposure", "value": 0.0}));
+                    }
+                }
+            }
+            let title_w = ui.available_width().max(24.0);
+            ui.allocate_ui_with_layout(vec2(title_w, 16.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_max_width(title_w);
+                ui.label(egui::RichText::new(title).strong().size(11.0).color(if modified { Color32::WHITE } else { t.text }));
+                ui.add(egui::Label::new(egui::RichText::new(format!("({subtitle})")).size(9.0).color(t.text_dim)).truncate());
+            });
+        });
+
+        ui.add_space(1.0);
+
+        // Centered Circular Hue Trackball
+        let wheel_size = ui.available_width().clamp(48.0, 56.0);
+        let row_w = ui.available_width();
+        let (area, resp) = ui.allocate_exact_size(vec2(row_w, wheel_size), Sense::click_and_drag());
+        let c = area.center();
+        let r_out = wheel_size / 2.0 - 2.0;
+        let r_in = r_out - 9.0;
+        let p = ui.painter();
+
+        // Dark outer bezel
+        p.circle_stroke(c, r_out + 1.0, Stroke::new(1.5, Color32::from_rgb(14, 16, 20)));
+
+        let n = 72;
+        let mut mesh = egui::Mesh::default();
+        for i in 0..n {
+            let a0 = i as f32 / n as f32 * std::f32::consts::TAU;
+            let a1 = (i + 1) as f32 / n as f32 * std::f32::consts::TAU;
+            let rgb = filmcraft_color::hsl_to_rgb(1.0 - (i as f32 / n as f32), 0.78, 0.52);
+            let col = Color32::from_rgb((rgb[0] * 255.0) as u8, (rgb[1] * 255.0) as u8, (rgb[2] * 255.0) as u8);
+            let base = mesh.vertices.len() as u32;
+            for (a, r) in [(a0, r_in), (a0, r_out), (a1, r_out), (a1, r_in)] {
+                mesh.colored_vertex(c + vec2(a.cos(), -a.sin()) * r, col);
+            }
+            mesh.add_triangle(base, base + 1, base + 2);
+            mesh.add_triangle(base, base + 2, base + 3);
+        }
+        p.add(mesh);
+
+        // Inner dark trackball well + subtle crosshair + concentric guide circle
+        p.circle_filled(c, r_in - 1.0, Color32::from_rgb(16, 18, 22));
+        p.circle_stroke(c, (r_in - 2.0) * 0.5, Stroke::new(0.8, Color32::from_rgb(32, 36, 44)));
+        let ch_r = r_in - 5.0;
+        p.line_segment([c - vec2(ch_r, 0.0), c + vec2(ch_r, 0.0)], Stroke::new(0.8, Color32::from_rgb(42, 47, 56)));
+        p.line_segment([c - vec2(0.0, ch_r), c + vec2(0.0, ch_r)], Stroke::new(0.8, Color32::from_rgb(42, 47, 56)));
+        p.circle_filled(c, 1.5, Color32::from_rgb(75, 82, 95));
+
+        let dish_r = (r_in - 5.0).max(12.0);
+        let puck = c + vec2(vx, -vy) * dish_r;
+        if vx.abs() > 1e-3 || vy.abs() > 1e-3 {
+            p.line_segment([c, puck], Stroke::new(1.0, Color32::from_rgba_unmultiplied(220, 225, 235, 110)));
+        }
+
+        // Tinted puck color reflecting hue direction
+        let puck_mag = (vx * vx + vy * vy).sqrt().clamp(0.0, 1.0);
+        let puck_hue = ((-vy).atan2(vx).rem_euclid(std::f32::consts::TAU)) / std::f32::consts::TAU;
+        let prgb = filmcraft_color::hsl_to_rgb(1.0 - puck_hue, puck_mag * 0.85, 0.55);
+        let puck_fill = if puck_mag > 0.02 {
+            Color32::from_rgb((prgb[0] * 255.0) as u8, (prgb[1] * 255.0) as u8, (prgb[2] * 255.0) as u8)
+        } else {
+            Color32::from_rgb(55, 60, 70)
+        };
+        p.circle_filled(puck, 4.5, puck_fill);
+        p.circle_stroke(puck, 5.0, Stroke::new(1.5, Color32::WHITE));
+
+        // Trackball drag/click interaction (Shift = precision 0.25x delta)
+        let emit_2d = |actions: &mut Actions, nx: f32, ny: f32| match kind {
+            WheelKind::Lift => actions.push(json!({"clip": clip.0, "effect": idx, "param": "wheel_shadows", "value": [nx, ny], "merge": true})),
+            WheelKind::Gamma => actions.push(json!({"clip": clip.0, "effect": idx, "param": "wheel_midtones", "value": [nx, ny], "merge": true})),
+            WheelKind::Gain => actions.push(json!({"clip": clip.0, "effect": idx, "param": "wheel_highlights", "value": [nx, ny], "merge": true})),
+            WheelKind::Offset => {
+                actions.push(json!({"clip": clip.0, "effect": idx, "param": "temperature", "value": (nx * 100.0).clamp(-100.0, 100.0), "merge": true}));
+                actions.push(json!({"clip": clip.0, "effect": idx, "param": "tint", "value": (ny * 100.0).clamp(-100.0, 100.0), "merge": true}));
+            }
+        };
+
+        if resp.double_clicked() {
+            emit_2d(actions, 0.0, 0.0);
+        } else if resp.dragged() {
+            let shift = ui.ctx().input(|i| i.modifiers.shift);
+            if shift {
+                let d = resp.drag_delta() * 0.25 / dish_r;
+                let mut cur = vec2(vx + d.x, vy - d.y);
+                if cur.length() > 1.0 {
+                    cur = cur.normalized();
+                }
+                if (cur.x - vx).abs() > 1e-4 || (cur.y - vy).abs() > 1e-4 {
+                    emit_2d(actions, cur.x, cur.y);
+                }
+            } else if let Some(pos) = resp.interact_pointer_pos() {
+                let mut d = (pos - c) / dish_r;
+                if d.length() > 1.0 {
+                    d = d.normalized();
+                }
+                let nx = d.x;
+                let ny = -d.y;
+                if (nx - vx).abs() > 1e-4 || (ny - vy).abs() > 1e-4 {
+                    emit_2d(actions, nx, ny);
+                }
+            }
+        } else if resp.clicked()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            let mut d = (pos - c) / dish_r;
+            if d.length() > 1.0 {
+                d = d.normalized();
+            }
+            emit_2d(actions, d.x, -d.y);
+        }
+
+        ui.add_space(1.0);
+
+        // Horizontal Knurled Master Wheel directly under the trackball (DaVinci Resolve style)
+        let (track, lr) = ui.allocate_exact_size(vec2(row_w, 11.0), Sense::click_and_drag());
+        let lp = ui.painter();
+        lp.rect_filled(track, 3.0, Color32::from_rgb(15, 17, 21));
+        lp.rect_stroke(track, 3.0, Stroke::new(1.0, Color32::from_rgb(44, 50, 62)), StrokeKind::Inside);
+
+        // Subtle knurled vertical ticks across the master wheel
+        let ticks = 16;
+        for i in 1..ticks {
+            let tx = track.min.x + track.width() * (i as f32 / ticks as f32);
+            let is_mid = i == ticks / 2;
+            lp.line_segment(
+                [pos2(tx, track.min.y + if is_mid { 2.0 } else { 4.0 }), pos2(tx, track.max.y - if is_mid { 2.0 } else { 4.0 })],
+                Stroke::new(1.0, if is_mid { Color32::from_rgb(90, 98, 114) } else { Color32::from_rgb(36, 40, 50) }),
+            );
+        }
+
+        // Bipolar fill + vertical needle thumb
+        let frac = (lum / lum_max).clamp(-1.0, 1.0);
+        let cx = track.center().x;
+        let kx = cx + frac * (track.width() * 0.5 - 4.0);
+        if frac.abs() > 0.005 {
+            let fill_r = Rect::from_min_max(
+                pos2(cx.min(kx), track.min.y + 3.0),
+                pos2(cx.max(kx), track.max.y - 3.0),
+            );
+            let fill_col = if frac >= 0.0 {
+                Color32::from_rgba_unmultiplied(235, 185, 70, 120)
+            } else {
+                Color32::from_rgba_unmultiplied(80, 150, 235, 120)
+            };
+            lp.rect_filled(fill_r, 1.5, fill_col);
+        }
+        lp.rect_filled(
+            Rect::from_center_size(pos2(kx, track.center().y), vec2(4.0, track.height() - 4.0)),
+            1.5,
+            Color32::from_rgb(235, 240, 248),
+        );
+
+        let emit_lum = |actions: &mut Actions, nv: f32| match kind {
+            WheelKind::Lift => actions.push(json!({"clip": clip.0, "effect": idx, "param": "wheel_shadows_l", "value": nv, "merge": true})),
+            WheelKind::Gamma => actions.push(json!({"clip": clip.0, "effect": idx, "param": "wheel_midtones_l", "value": nv, "merge": true})),
+            WheelKind::Gain => actions.push(json!({"clip": clip.0, "effect": idx, "param": "wheel_highlights_l", "value": nv, "merge": true})),
+            WheelKind::Offset => actions.push(json!({"clip": clip.0, "effect": idx, "param": "exposure", "value": nv, "merge": true})),
+        };
+
+        if lr.double_clicked() {
+            emit_lum(actions, 0.0);
+        } else if lr.dragged() {
+            let shift = ui.ctx().input(|i| i.modifiers.shift);
+            let mult = if shift { 0.25 } else { 1.0 };
+            let step = (lr.drag_delta().x / (track.width() * 0.5).max(1.0)) * lum_max * mult;
+            let nv = (lum + step).clamp(-lum_max, lum_max);
+            if (nv - lum).abs() > 1e-3 {
+                emit_lum(actions, nv);
+            }
+        } else if lr.clicked()
+            && let Some(pos) = lr.interact_pointer_pos()
+        {
+            let nv = ((pos.x - cx) / (track.width() * 0.5 - 4.0).max(1.0) * lum_max).clamp(-lum_max, lum_max);
+            emit_lum(actions, nv);
+        }
+        lr.on_hover_text(tl!("Drag horizontally to adjust luminance (Shift = fine, Double-click = reset)"));
+
+        // Numeric Readout below Master Wheel
+        let readout = match kind {
+            WheelKind::Offset => format!("T:{:+.0} Ti:{:+.0} · {:+.1}EV", vx * 100.0, vy * 100.0, lum),
+            _ => format!("X:{:+.2} Y:{:+.2} · L:{:+.0}", vx, vy, lum),
+        };
+        let (ro_r, _) = ui.allocate_exact_size(vec2(row_w, 11.0), Sense::hover());
+        ui.painter().text(
+            ro_r.center(),
+            Align2::CENTER_CENTER,
+            readout,
+            FontId::monospace(9.0),
+            if modified { t.accent } else { t.text_dim },
+        );
+    });
+    auto_rows.push((format!("lumetri.wheel.{id_tag}"), frame_resp.response.rect, title));
 }
 
 /// Color Match: reference frame (sequence timecode), Face Detection (skin-tone protection),

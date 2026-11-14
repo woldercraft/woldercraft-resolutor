@@ -419,3 +419,28 @@ fn fs_full(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
     return vec4(select(hi, lo, c <= vec3(0.0031308)), 1.0);
 }
+
+struct ScopeOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_scope(@builtin(vertex_index) vi: u32) -> ScopeOut {
+    let x = f32((vi << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(vi & 2u) * 2.0 - 1.0;
+    var out: ScopeOut;
+    out.pos = vec4(x, y, 0.0, 1.0);
+    out.uv = vec2((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+@fragment
+fn fs_scope(in: ScopeOut) -> @location(0) vec4<f32> {
+    let dims = vec2<i32>(textureDimensions(accum));
+    let p = clamp(vec2<i32>(floor(in.uv * vec2<f32>(dims))), vec2(0), max(dims - 1, vec2(0)));
+    let c = clamp(textureLoad(accum, p, 0).rgb, vec3(0.0), vec3(1.0));
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+    return vec4(select(hi, lo, c <= vec3(0.0031308)), 1.0);
+}

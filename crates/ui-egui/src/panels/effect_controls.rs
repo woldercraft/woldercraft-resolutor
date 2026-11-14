@@ -1094,7 +1094,6 @@ pub fn lumetri_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum InspectorTab {
     #[default]
-    All,
     Video,
     Audio,
     ClipProps,
@@ -1114,6 +1113,162 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+/// Preset quick-toggle effects shown in Video -> Effects and Audio -> Effects.
+const PRESET_VIDEO_EFFECTS: [&str; 4] = ["gaussian_blur", "sharpen", "vignette", "drop_shadow"];
+const PRESET_AUDIO_EFFECTS: [&str; 4] = ["parametric_eq", "compressor", "denoiser", "reverb"];
+
+#[derive(Clone, Default)]
+struct EffectPickerState {
+    open: bool,
+    is_audio: bool,
+    clip: u64,
+    query: String,
+    category: Option<String>,
+    just_opened: bool,
+}
+
+/// Render a preset effect row when the effect is not yet added to the clip (toggle OFF -> applies).
+fn inspector_preset_effect_row(bui: &mut egui::Ui, clip: ClipId, eid: &str, t: Tokens, actions: &mut Vec<(String, Value)>) {
+    let Some(def) = filmcraft_project::find_effect(eid) else { return };
+    let (hr, _) = bui.allocate_exact_size(vec2(bui.available_width(), 26.0), Sense::hover());
+    bui.painter().rect_filled(hr, 4.0, t.tl_header_bg);
+    let en_r = Rect::from_center_size(pos2(hr.min.x + 32.0, hr.center().y), vec2(26.0, 14.0));
+    let en_resp = bui.interact(en_r, egui::Id::unique(("props-preset-en", clip.0, eid)), Sense::click()).on_hover_text(tl!("Enable effect"));
+    paint_toggle_switch(bui, en_r, false, &t);
+    if en_resp.clicked() {
+        actions.push(("effects.apply".into(), json!({"clips": [clip.0], "effect": eid})));
+    }
+    bui.painter().text(pos2(hr.min.x + 52.0, hr.center().y), Align2::LEFT_CENTER, crate::i18n::t(def.name), Tokens::ui(12.0), t.text_dim);
+    bui.add_space(3.0);
+}
+
+/// Floating searchable effect picker window opened by `+ Add Effect`.
+fn inspector_effect_picker_window(ctx: &egui::Context, t: Tokens, actions: &mut Vec<(String, Value)>) {
+    let id = egui::Id::unique("inspector-effect-picker");
+    let mut st = ctx.data(|d| d.get_temp::<EffectPickerState>(id)).unwrap_or_default();
+    if !st.open {
+        return;
+    }
+    let kind = if st.is_audio { filmcraft_project::EffectKind::Audio } else { filmcraft_project::EffectKind::Video };
+    let title = if st.is_audio { tl!("Add Audio Effect") } else { tl!("Add Video Effect") };
+    let mut open = st.open;
+    let mut close_now = false;
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        close_now = true;
+    }
+
+    egui::Window::new(title)
+        .id(egui::Id::unique("inspector-effect-picker-win"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_size(vec2(340.0, 420.0))
+        .min_size(vec2(260.0, 240.0))
+        .show(ctx, |ui| {
+            let search_resp = ui.add(
+                egui::TextEdit::singleline(&mut st.query)
+                    .hint_text(tl!("Search effects…"))
+                    .desired_width(f32::INFINITY),
+            );
+            if st.just_opened {
+                search_resp.request_focus();
+                st.just_opened = false;
+            }
+            ui.add_space(6.0);
+
+            // Category filter chips
+            let mut categories: Vec<&'static str> = Vec::new();
+            for def in filmcraft_project::effect_defs() {
+                if def.kind == kind
+                    && !def.intrinsic
+                    && def.id != "lumetri"
+                    && !filmcraft_project::graphic::is_layer_id(def.id)
+                    && let Some(&cat) = def.category.last()
+                    && !categories.contains(&cat)
+                {
+                    categories.push(cat);
+                }
+            }
+            ui.horizontal_wrapped(|cui| {
+                if cui.selectable_label(st.category.is_none(), tl!("All")).clicked() {
+                    st.category = None;
+                }
+                for cat in &categories {
+                    let sel = st.category.as_deref() == Some(*cat);
+                    if cui.selectable_label(sel, crate::i18n::t(cat)).clicked() {
+                        st.category = Some((*cat).to_string());
+                    }
+                }
+            });
+            ui.separator();
+
+            let q = st.query.trim().to_ascii_lowercase();
+            let shift = ctx.input(|i| i.modifiers.shift || i.modifiers.command);
+            egui::ScrollArea::vertical().id_salt("picker-fx-list").auto_shrink([false, false]).show(ui, |sui| {
+                let mut any = false;
+                for def in filmcraft_project::effect_defs() {
+                    if def.kind != kind || def.intrinsic || def.id == "lumetri" || filmcraft_project::graphic::is_layer_id(def.id) {
+                        continue;
+                    }
+                    let cat_name = def.category.last().copied().unwrap_or("");
+                    if let Some(cat) = &st.category
+                        && cat_name != cat
+                    {
+                        continue;
+                    }
+                    let label = crate::i18n::t(def.name);
+                    if !q.is_empty() {
+                        let matches = label.to_ascii_lowercase().contains(&q)
+                            || def.name.to_ascii_lowercase().contains(&q)
+                            || def.id.to_ascii_lowercase().contains(&q)
+                            || filmcraft_project::search_aliases(def).iter().any(|a| a.to_ascii_lowercase().contains(&q));
+                        if !matches {
+                            continue;
+                        }
+                    }
+                    any = true;
+                    let (rr, rresp) = sui.allocate_exact_size(vec2(sui.available_width(), 28.0), Sense::click());
+                    if rresp.hovered() {
+                        sui.painter().rect_filled(rr, 4.0, t.hover);
+                    }
+                    sui.painter().text(pos2(rr.min.x + 8.0, rr.center().y), Align2::LEFT_CENTER, label, Tokens::ui(12.0), t.text);
+                    sui.painter().text(
+                        pos2(rr.max.x - 8.0, rr.center().y),
+                        Align2::RIGHT_CENTER,
+                        crate::i18n::t(cat_name),
+                        Tokens::ui(10.5),
+                        t.text_dim,
+                    );
+                    if rresp.clicked() {
+                        actions.push(("effects.apply".into(), json!({"clips": [st.clip], "effect": def.id})));
+                        if !shift {
+                            close_now = true;
+                        }
+                    }
+                }
+                if !any {
+                    sui.add_space(12.0);
+                    sui.label(egui::RichText::new(tl!("No matching effects.")).size(11.5).color(t.text_dim));
+                }
+            });
+        });
+
+    if !open || close_now {
+        st.open = false;
+    }
+    ctx.data_mut(|d| d.insert_temp(id, st));
+}
+
+/// Paint a compact DaVinci Resolve-style pill toggle switch.
+fn paint_toggle_switch(ui: &egui::Ui, rect: Rect, on: bool, t: &Tokens) {
+    let r = rect.height() * 0.5;
+    let bg = if on { t.accent } else { Color32::from_rgba_unmultiplied(255, 255, 255, 28) };
+    ui.painter().rect_filled(rect, r, bg);
+    let knob_r = (r - 2.0).max(2.0);
+    let knob_x = if on { rect.max.x - r } else { rect.min.x + r };
+    ui.painter().circle_filled(pos2(knob_x, rect.center().y), knob_r, Color32::WHITE);
 }
 
 /// Render inline editable parameters for a non-intrinsic effect instance inside the Inspector.
@@ -1144,20 +1299,16 @@ fn inspector_added_effect_card(
         t.text_dim,
     );
 
-    // Enable / Bypass pill
-    let en_r = Rect::from_center_size(pos2(hr.min.x + 26.0, hr.center().y), vec2(14.0, 14.0));
+    // DaVinci Resolve-style On/Off pill switch
+    let en_r = Rect::from_center_size(pos2(hr.min.x + 32.0, hr.center().y), vec2(26.0, 14.0));
     let en_resp = bui.interact(en_r, egui::Id::unique(("props-fx-en", clip.0, idx)), Sense::click()).on_hover_text(tl!("Toggle effect"));
-    bui.painter().rect_filled(en_r, 3.0, if e.enabled { t.accent } else { t.panel_bg });
-    bui.painter().rect_stroke(en_r, 3.0, Stroke::new(1.0, if e.enabled { t.accent } else { t.separator }), egui::StrokeKind::Inside);
-    if e.enabled {
-        bui.painter().text(en_r.center(), Align2::CENTER_CENTER, "✓", Tokens::ui(10.0), Color32::WHITE);
-    }
+    paint_toggle_switch(bui, en_r, e.enabled, &t);
     if en_resp.clicked() {
         actions.push(("effects.toggleEnabled".into(), json!({"clip": clip.0, "index": idx})));
     }
 
     let name_col = if e.enabled { t.text } else { t.text_faint };
-    bui.painter().text(pos2(hr.min.x + 40.0, hr.center().y), Align2::LEFT_CENTER, crate::i18n::t(def.name), Tokens::semibold(12.0), name_col);
+    bui.painter().text(pos2(hr.min.x + 52.0, hr.center().y), Align2::LEFT_CENTER, crate::i18n::t(def.name), Tokens::semibold(12.0), name_col);
 
     // Remove button
     let rm_r = Rect::from_center_size(pos2(hr.max.x - 14.0, hr.center().y), vec2(16.0, 16.0));
@@ -1209,10 +1360,27 @@ fn inspector_added_effect_card(
     bui.add_space(4.0);
 }
 
-/// Properties panel (DaVinci Resolve-style Inspector): segmented tabs for Video, Audio, and
-/// Clip Properties (metadata: codecs, duration, file size, location), with inline editing for
-/// applied basic effects.
+/// Video Inspector dock tab: Transform, Crop, Speed, and inline Video Effects manager.
+pub fn inspector_video_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    inspector_panel(app, ui, rect, InspectorTab::Video);
+}
+
+/// Audio Inspector dock tab: Volume, Pan, and inline Audio Effects manager.
+pub fn inspector_audio_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    inspector_panel(app, ui, rect, InspectorTab::Audio);
+}
+
+/// Properties Inspector dock tab: clip timing, media codecs, resolution, file size, and location.
+pub fn inspector_properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    inspector_panel(app, ui, rect, InspectorTab::ClipProps);
+}
+
+/// Legacy alias for the Properties Inspector tab.
 pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    inspector_properties_panel(app, ui, rect);
+}
+
+fn inspector_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, active_tab: InspectorTab) {
     let t = app.tokens;
     let clips = selected_clips(app);
     let Some((clip, it, kind)) = clips.first().cloned() else {
@@ -1224,69 +1392,32 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let mut actions: Vec<(String, Value)> = Vec::new();
     let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(12.0, 8.0))).id_salt("props"));
 
-    // Header: clip colour swatch + name + quick speed pill
-    let mut open_speed = false;
-    let (hr, _) = bui.allocate_exact_size(vec2(bui.available_width(), 28.0), Sense::hover());
+    // Clean DaVinci Resolve-style clip header: colour swatch + clip name
+    let (hr, _) = bui.allocate_exact_size(vec2(bui.available_width(), 26.0), Sense::hover());
     let sw = Rect::from_center_size(pos2(hr.min.x + 8.0, hr.center().y), vec2(12.0, 12.0));
     let lc = app.session.prefs.labels.rgb(it.label);
     bui.painter().rect_filled(sw, 2.0, Color32::from_rgb(lc[0], lc[1], lc[2]));
-
-    let speed_w = 96.0;
-    let speed_r = Rect::from_min_size(pos2((hr.max.x - speed_w).max(hr.min.x + 120.0), hr.center().y - 11.0), vec2(speed_w, 22.0));
-    let speed_resp = bui.interact(speed_r, egui::Id::unique(("props-speed-hdr", clip.0)), Sense::click());
-    bui.painter().rect_filled(speed_r, 4.0, if speed_resp.hovered() { t.hover } else { t.tl_header_bg });
-    bui.painter().rect_stroke(speed_r, 4.0, Stroke::new(1.0, t.separator), egui::StrokeKind::Inside);
-    bui.painter().text(speed_r.center(), Align2::CENTER_CENTER, tlf!("Speed {n}%", n = format!("{:.0}", it.speed * 100.0)), Tokens::ui(11.0), t.text);
-    app.auto.add("properties.speed", speed_r, "Speed");
-    open_speed |= speed_resp.clicked();
-
-    let name_max_x = (speed_r.min.x - 8.0).max(hr.min.x + 40.0);
     let mut name_job = egui::text::LayoutJob::simple_singleline(it.name.clone(), Tokens::semibold(12.5), t.text);
-    name_job.wrap.max_width = name_max_x - (hr.min.x + 22.0);
+    name_job.wrap.max_width = (hr.width() - 28.0).max(40.0);
     name_job.wrap.max_rows = 1;
     let name_g = bui.painter().layout_job(name_job);
     bui.painter()
-        .with_clip_rect(Rect::from_min_max(pos2(hr.min.x + 22.0, hr.min.y), pos2(name_max_x, hr.max.y)))
+        .with_clip_rect(Rect::from_min_max(pos2(hr.min.x + 22.0, hr.min.y), hr.max))
         .galley(pos2(hr.min.x + 22.0, hr.center().y - name_g.size().y * 0.5), name_g, t.text);
-
-    // DaVinci Resolve-style segmented Inspector tabs
-    let tab_id = egui::Id::unique("inspector-active-tab");
-    let mut active_tab = ui.ctx().data(|d| d.get_temp::<InspectorTab>(tab_id)).unwrap_or(InspectorTab::All);
-    bui.add_space(2.0);
-    let (tr, _) = bui.allocate_exact_size(vec2(bui.available_width(), 26.0), Sense::hover());
-    bui.painter().rect_filled(tr, 5.0, t.tl_header_bg);
-    bui.painter().rect_stroke(tr, 5.0, Stroke::new(1.0, t.separator), egui::StrokeKind::Inside);
-    let tabs = [
-        (InspectorTab::All, tl!("All")),
-        (InspectorTab::Video, tl!("Video")),
-        (InspectorTab::Audio, tl!("Audio")),
-        (InspectorTab::ClipProps, tl!("Properties")),
-    ];
-    let tab_w = (tr.width() / tabs.len() as f32).max(1.0);
-    for (i, (tab_kind, tab_label)) in tabs.iter().enumerate() {
-        let r = Rect::from_min_size(pos2(tr.min.x + i as f32 * tab_w, tr.min.y), vec2(tab_w, tr.height())).shrink(2.0);
-        let resp = bui.interact(r, egui::Id::unique(("inspector-tab", i)), Sense::click());
-        let selected = active_tab == *tab_kind;
-        if selected {
-            bui.painter().rect_filled(r, 4.0, t.accent.gamma_multiply(0.28));
-            bui.painter().rect_stroke(r, 4.0, Stroke::new(1.0, t.accent.gamma_multiply(0.7)), egui::StrokeKind::Inside);
-        } else if resp.hovered() {
-            bui.painter().rect_filled(r, 4.0, t.hover);
-        }
-        bui.painter().text(r.center(), Align2::CENTER_CENTER, *tab_label, Tokens::semibold(11.0), if selected { t.text } else { t.text_dim });
-        if resp.clicked() {
-            active_tab = *tab_kind;
-            ui.ctx().data_mut(|d| d.insert_temp(tab_id, active_tab));
-        }
-    }
-    bui.add_space(6.0);
+    bui.add_space(4.0);
 
     let row = |ui: &mut egui::Ui, label: &str| -> Rect {
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
         ui.painter().text(pos2(r.min.x + 16.0, r.center().y), Align2::LEFT_CENTER, label, Tokens::ui(11.5), t.text_dim);
         r
     };
-    let section = |ui: &mut egui::Ui, app: &mut FilmcraftApp, name: &str, reset: Option<(usize, u64)>, actions: &mut Vec<(String, Value)>| -> bool {
+    let section = |ui: &mut egui::Ui,
+                   app: &mut FilmcraftApp,
+                   name: &str,
+                   toggle: Option<bool>,
+                   reset: Option<(usize, u64)>,
+                   actions: &mut Vec<(String, Value)>|
+     -> (bool, bool) {
         ui.add_space(4.0);
         let key = format!("props:{name}");
         let open = !app.ui.collapsed_fx.contains(&key);
@@ -1299,27 +1430,41 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             if open { Icon::ChevronDown } else { Icon::ChevronRight },
             t.text_dim,
         );
-        ui.painter().text(pos2(r.min.x + 20.0, r.center().y), Align2::LEFT_CENTER, crate::i18n::t(name), Tokens::semibold(12.5), t.text);
+        let mut title_x = r.min.x + 20.0;
+        let mut toggle_hovered = false;
+        let mut toggle_clicked = false;
+        if let Some(enabled) = toggle {
+            let sw_r = Rect::from_center_size(pos2(title_x + 13.0, r.center().y), vec2(26.0, 14.0));
+            let sw_resp = ui.interact(sw_r, egui::Id::unique(("props-sec-en", name, clip.0)), Sense::click()).on_hover_text(tl!("Toggle section"));
+            toggle_hovered = sw_resp.hovered();
+            toggle_clicked = sw_resp.clicked();
+            paint_toggle_switch(ui, sw_r, enabled, &t);
+            title_x += 34.0;
+        }
+        ui.painter().text(pos2(title_x, r.center().y), Align2::LEFT_CENTER, crate::i18n::t(name), Tokens::semibold(12.5), t.text);
+        let mut reset_hovered = false;
         if let Some((idx, c)) = reset {
             let rr = Rect::from_center_size(pos2(r.max.x - PROPS_NAV_X, r.center().y), vec2(14.0, 14.0));
             icons::paint(ui.painter(), rr, Icon::Reset, t.text_dim);
-            if ui.interact(rr, egui::Id::unique(("props-reset", name, c)), Sense::click()).clicked() {
+            let r_resp = ui.interact(rr, egui::Id::unique(("props-reset", name, c)), Sense::click()).on_hover_text(tl!("Reset effect"));
+            reset_hovered = r_resp.hovered();
+            if r_resp.clicked() {
                 actions.push(("effects.reset".into(), json!({"clip": c, "index": idx})));
             }
         }
-        if resp.clicked() {
+        if resp.clicked() && !toggle_hovered && !reset_hovered {
             if open {
                 app.ui.collapsed_fx.push(key);
             } else {
                 app.ui.collapsed_fx.retain(|k| *k != key);
             }
         }
-        open
+        (open, toggle_clicked)
     };
 
-    let show_video = matches!(active_tab, InspectorTab::All | InspectorTab::Video);
-    let show_audio = matches!(active_tab, InspectorTab::All | InspectorTab::Audio);
-    let show_meta = matches!(active_tab, InspectorTab::All | InspectorTab::ClipProps);
+    let show_video = active_tab == InspectorTab::Video;
+    let show_audio = active_tab == InspectorTab::Audio;
+    let show_meta = active_tab == InspectorTab::ClipProps;
 
     egui::ScrollArea::vertical().id_salt("props-scroll").auto_shrink([false, false]).show(&mut bui, |bui| {
         bui.set_max_width((bui.available_width() - 12.0).max(1.0));
@@ -1329,7 +1474,13 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         // ---- VIDEO INSPECTOR ----
         if show_video {
             if kind == TrackKind::Video {
-                if section(bui, app, "Transform", eff_idx("motion").map(|i| (i, clip.0)), &mut actions) {
+                let motion_idx = eff_idx("motion");
+                let motion_on = motion_idx.and_then(|i| it.effects.get(i)).is_some_and(|e| e.enabled);
+                let (motion_open, motion_toggled) = section(bui, app, "Transform", Some(motion_on), motion_idx.map(|i| (i, clip.0)), &mut actions);
+                if motion_toggled && let Some(i) = motion_idx {
+                    actions.push(("effects.toggleEnabled".into(), json!({"clip": clip.0, "index": i})));
+                }
+                if motion_open {
                     for (label, p, unit, speed, range) in [
                         (tl!("Position"), "position", "", 1.0, (-100_000.0, 100_000.0)),
                         (tl!("Anchor point"), "anchor", "", 1.0, (-100_000.0, 100_000.0)),
@@ -1404,7 +1555,16 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
 
                 let crop = eff_idx("crop");
-                if section(bui, app, "Crop", crop.map(|i| (i, clip.0)), &mut actions) {
+                let crop_on = crop.and_then(|i| it.effects.get(i)).is_some_and(|e| e.enabled);
+                let (crop_open, crop_toggled) = section(bui, app, "Crop", Some(crop_on), crop.map(|i| (i, clip.0)), &mut actions);
+                if crop_toggled {
+                    if let Some(i) = crop {
+                        actions.push(("effects.toggleEnabled".into(), json!({"clip": clip.0, "index": i})));
+                    } else {
+                        actions.push(("effects.apply".into(), json!({"clips": [clip.0], "effect": "crop"})));
+                    }
+                }
+                if crop_open {
                     for (label, p) in [(tl!("Left"), "left"), (tl!("Top"), "top"), (tl!("Right"), "right"), (tl!("Bottom"), "bottom")] {
                         let r = row(bui, label);
                         let mut vui = bui.new_child(
@@ -1430,25 +1590,140 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     }
                 }
 
-                // Applied basic & VFX video effects
-                let has_video_fx = it.effects.iter().any(|e| {
-                    e.effect != "crop"
-                        && filmcraft_project::find_effect(&e.effect)
-                            .is_some_and(|d| !d.intrinsic && !filmcraft_project::graphic::is_layer_id(d.id))
-                });
-                if (has_video_fx || active_tab == InspectorTab::Video) && section(bui, app, "Video Effects", None, &mut actions) {
-                    if !has_video_fx {
-                        bui.add_space(4.0);
-                        bui.label(egui::RichText::new(tl!("No video effects added. Drag an effect from Effects to edit it here.")).size(11.0).color(t.text_dim));
-                        bui.add_space(4.0);
+                // Speed (Velocidad) — basic video effect inside Video Inspector
+                let speed_saved_id = egui::Id::unique(("pp-speed-saved", clip.0));
+                let speed_active = (it.speed - 1.0).abs() > 0.001 || it.reverse;
+                let (speed_open, speed_toggled) = section(bui, app, "Speed", Some(speed_active), None, &mut actions);
+                if speed_toggled {
+                    if speed_active {
+                        bui.ctx().data_mut(|d| d.insert_temp(speed_saved_id, (it.speed * 100.0, it.reverse)));
+                        actions.push((
+                            "clip.speedDuration".into(),
+                            json!({"clips": [clip.0], "speed": 100.0, "reverse": false, "ripple": false, "maintainPitch": it.maintain_pitch}),
+                        ));
                     } else {
-                        for (idx, e) in it.effects.iter().enumerate() {
-                            if e.effect == "crop" {
-                                continue;
-                            }
+                        let (saved_pct, saved_rev) = bui.ctx().data(|d| d.get_temp::<(f64, bool)>(speed_saved_id)).unwrap_or((100.0, false));
+                        let target_pct = if (saved_pct - 100.0).abs() > 0.1 || saved_rev { saved_pct } else { 150.0 };
+                        actions.push((
+                            "clip.speedDuration".into(),
+                            json!({"clips": [clip.0], "speed": target_pct, "reverse": saved_rev, "ripple": false, "maintainPitch": it.maintain_pitch}),
+                        ));
+                    }
+                }
+                if speed_open {
+                    let r = row(bui, tl!("Speed"));
+                    let mut vui = bui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(Rect::from_min_max(pos2(r.min.x + 146.0, r.min.y + 3.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 3.0)))
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+                    let speed_pct = it.speed * 100.0;
+                    let (_, ns) = crate::widgets::hot_number(
+                        &mut vui,
+                        tl!("Speed"),
+                        egui::Id::unique(("pp-speed", clip.0)),
+                        speed_pct,
+                        HotNumberOptions::new(1.0, (10.0, 1000.0), 0, " %", &t),
+                    );
+                    if let Some(ns) = ns {
+                        actions.push((
+                            "clip.speedDuration".into(),
+                            json!({"clips": [clip.0], "speed": ns, "reverse": it.reverse, "ripple": false, "maintainPitch": it.maintain_pitch}),
+                        ));
+                    }
+                    let rr = Rect::from_center_size(pos2(r.max.x - PROPS_NAV_X, r.center().y), vec2(14.0, 14.0));
+                    let r_resp = bui.interact(rr, egui::Id::unique(("pp-speed-reset", clip.0)), Sense::click()).on_hover_text(tl!("Reset Speed"));
+                    icons::paint(bui.painter(), rr, Icon::Reset, if r_resp.hovered() { t.text } else { t.text_dim });
+                    if r_resp.clicked() {
+                        actions.push((
+                            "clip.speedDuration".into(),
+                            json!({"clips": [clip.0], "speed": 100.0, "reverse": false, "ripple": false, "maintainPitch": true}),
+                        ));
+                    }
+
+                    // DaVinci Resolve-style checkbox-first rows: [✓] Label
+                    let mut rev = it.reverse;
+                    let (rr_rev, _) = bui.allocate_exact_size(vec2(bui.available_width(), 24.0), Sense::hover());
+                    let mut cui_rev = bui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(Rect::from_min_max(pos2(rr_rev.min.x + 16.0, rr_rev.min.y), rr_rev.max))
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+                    if cui_rev.checkbox(&mut rev, tl!("Reverse Speed")).changed() {
+                        actions.push((
+                            "clip.speedDuration".into(),
+                            json!({"clips": [clip.0], "speed": speed_pct, "reverse": rev, "ripple": false, "maintainPitch": it.maintain_pitch}),
+                        ));
+                    }
+
+                    let mut pitch = it.maintain_pitch;
+                    let (rr_pitch, _) = bui.allocate_exact_size(vec2(bui.available_width(), 24.0), Sense::hover());
+                    let mut cui_pitch = bui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(Rect::from_min_max(pos2(rr_pitch.min.x + 16.0, rr_pitch.min.y), rr_pitch.max))
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+                    if cui_pitch.checkbox(&mut pitch, tl!("Maintain Audio Pitch")).changed() {
+                        actions.push((
+                            "clip.speedDuration".into(),
+                            json!({"clips": [clip.0], "speed": speed_pct, "reverse": it.reverse, "ripple": false, "maintainPitch": pitch}),
+                        ));
+                    }
+                }
+
+                // Applied & preset Video Effects inside Video Inspector
+                let vfx_indices: Vec<usize> = it
+                    .effects
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| {
+                        e.effect != "crop"
+                            && e.effect != "lumetri"
+                            && filmcraft_project::find_effect(&e.effect)
+                                .is_some_and(|d| !d.intrinsic && !filmcraft_project::graphic::is_layer_id(d.id))
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                let vfx_any_enabled = vfx_indices.iter().any(|&i| it.effects.get(i).is_some_and(|e| e.enabled));
+                let (vfx_open, vfx_toggled) = section(bui, app, "Effects", Some(vfx_any_enabled), None, &mut actions);
+                if vfx_toggled {
+                    for &i in &vfx_indices {
+                        if let Some(e) = it.effects.get(i)
+                            && e.enabled == vfx_any_enabled
+                        {
+                            actions.push(("effects.toggleEnabled".into(), json!({"clip": clip.0, "index": i})));
+                        }
+                    }
+                }
+                if vfx_open {
+                    bui.add_space(4.0);
+                    for eid in PRESET_VIDEO_EFFECTS {
+                        if let Some(idx) = it.effects.iter().position(|e| e.effect == eid)
+                            && let Some(e) = it.effects.get(idx)
+                        {
+                            inspector_added_effect_card(app, bui, clip, &it, mt, idx, e, t, &mut actions);
+                        } else {
+                            inspector_preset_effect_row(bui, clip, eid, t, &mut actions);
+                        }
+                    }
+                    for &idx in &vfx_indices {
+                        if let Some(e) = it.effects.get(idx)
+                            && !PRESET_VIDEO_EFFECTS.contains(&e.effect.as_str())
+                        {
                             inspector_added_effect_card(app, bui, clip, &it, mt, idx, e, t, &mut actions);
                         }
                     }
+                    bui.add_space(2.0);
+                    if bui.button(tl!("+ Add Effect")).clicked() {
+                        let pid = egui::Id::unique("inspector-effect-picker");
+                        bui.ctx().data_mut(|d| {
+                            d.insert_temp(
+                                pid,
+                                EffectPickerState { open: true, is_audio: false, clip: clip.0, query: String::new(), category: None, just_opened: true },
+                            );
+                        });
+                    }
+                    bui.add_space(4.0);
                 }
             } else if active_tab == InspectorTab::Video {
                 bui.add_space(8.0);
@@ -1462,7 +1737,13 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 let aclip = *aclip;
                 let amt = ait.effect_time_at(ph.clamp(ait.start, (ait.end() - Tick(1)).max(ait.start)));
                 let aval = |eid: &str, p: &str| ait.effect(eid).and_then(|e| e.param(p)).map(|p| p.value_at(amt));
-                if section(bui, app, "Audio", ait.effects.iter().position(|e| e.effect == "volume").map(|i| (i, aclip.0)), &mut actions) {
+                let vol_idx = ait.effects.iter().position(|e| e.effect == "volume");
+                let vol_on = vol_idx.and_then(|i| ait.effects.get(i)).is_some_and(|e| e.enabled);
+                let (audio_open, audio_toggled) = section(bui, app, "Audio", Some(vol_on), vol_idx.map(|i| (i, aclip.0)), &mut actions);
+                if audio_toggled && let Some(i) = vol_idx {
+                    actions.push(("effects.toggleEnabled".into(), json!({"clip": aclip.0, "index": i})));
+                }
+                if audio_open {
                     let r = row(bui, tl!("Level"));
                     let mut vui = bui.new_child(
                         egui::UiBuilder::new()
@@ -1499,15 +1780,54 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         actions.push(("effects.setParam".into(), json!({"clip": aclip.0, "effect": "panner", "param": "balance", "value": nv})));
                     }
 
-                    // Applied audio effects
-                    let has_audio_fx = ait.effects.iter().any(|e| {
-                        filmcraft_project::find_effect(&e.effect).is_some_and(|d| !d.intrinsic)
-                    });
-                    if has_audio_fx {
-                        bui.add_space(4.0);
-                        for (idx, e) in ait.effects.iter().enumerate() {
-                            inspector_added_effect_card(app, bui, aclip, ait, amt, idx, e, t, &mut actions);
+                    // Applied & preset Audio Effects
+                    let afx_indices: Vec<usize> = ait
+                        .effects
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| filmcraft_project::find_effect(&e.effect).is_some_and(|d| !d.intrinsic))
+                        .map(|(i, _)| i)
+                        .collect();
+                    let afx_any_enabled = afx_indices.iter().any(|&i| ait.effects.get(i).is_some_and(|e| e.enabled));
+                    let (afx_open, afx_toggled) = section(bui, app, "Effects", Some(afx_any_enabled), None, &mut actions);
+                    if afx_toggled {
+                        for &i in &afx_indices {
+                            if let Some(e) = ait.effects.get(i)
+                                && e.enabled == afx_any_enabled
+                            {
+                                actions.push(("effects.toggleEnabled".into(), json!({"clip": aclip.0, "index": i})));
+                            }
                         }
+                    }
+                    if afx_open {
+                        bui.add_space(4.0);
+                        for eid in PRESET_AUDIO_EFFECTS {
+                            if let Some(idx) = ait.effects.iter().position(|e| e.effect == eid)
+                                && let Some(e) = ait.effects.get(idx)
+                            {
+                                inspector_added_effect_card(app, bui, aclip, ait, amt, idx, e, t, &mut actions);
+                            } else {
+                                inspector_preset_effect_row(bui, aclip, eid, t, &mut actions);
+                            }
+                        }
+                        for &idx in &afx_indices {
+                            if let Some(e) = ait.effects.get(idx)
+                                && !PRESET_AUDIO_EFFECTS.contains(&e.effect.as_str())
+                            {
+                                inspector_added_effect_card(app, bui, aclip, ait, amt, idx, e, t, &mut actions);
+                            }
+                        }
+                        bui.add_space(2.0);
+                        if bui.button(tl!("+ Add Effect")).clicked() {
+                            let pid = egui::Id::unique("inspector-effect-picker");
+                            bui.ctx().data_mut(|d| {
+                                d.insert_temp(
+                                    pid,
+                                    EffectPickerState { open: true, is_audio: true, clip: aclip.0, query: String::new(), category: None, just_opened: true },
+                                );
+                            });
+                        }
+                        bui.add_space(4.0);
                     }
                 }
             } else if active_tab == InspectorTab::Audio {
@@ -1517,7 +1837,7 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
 
         // ---- CLIP PROPERTIES (METADATA: CODECS, DURATION, SIZE, LOCATION) ----
-        if show_meta && section(bui, app, "Clip Properties", None, &mut actions) {
+        if show_meta && section(bui, app, "Clip Properties", None, None, &mut actions).0 {
             let seq_fps = app.session.active_sequence().map(|s| s.settings.frame_rate).unwrap_or_default();
             let seq_drop = app.session.active_sequence().is_some_and(|s| s.settings.drop_frame);
             let seq_rate = app.session.active_sequence().map_or(48000, |s| s.settings.sample_rate as i64);
@@ -1603,10 +1923,8 @@ pub fn properties_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         }
     });
+    inspector_effect_picker_window(ui.ctx(), t, &mut actions);
     run(app, ui.ctx(), actions);
-    if open_speed && let Err(e) = crate::menus::invoke(app, ui.ctx(), "clip.speedDuration", json!({})) {
-        app.ui.status = e;
-    }
 }
 
 /// Where a row's highlight (hover, selection) is painted: the row less its first point, which is

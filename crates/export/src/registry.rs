@@ -109,6 +109,21 @@ pub fn encoder_registered(f: EncoderFactory) -> bool {
     video_factories().read().unwrap_or_else(PoisonError::into_inner).iter().any(|x| std::ptr::fn_addr_eq(*x, f))
 }
 
+/// Output format requested for a plan in [`FrameRenderer::render_plans_pipelined`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanRenderMode {
+    RgbaF32,
+    Rgba8,
+    Nv12,
+}
+
+/// Output produced by [`FrameRenderer::render_plans_pipelined`].
+pub enum PlanRenderOutput {
+    RgbaF32(filmcraft_render::Image),
+    Rgba8(u32, u32, Vec<u8>),
+    Nv12(u32, u32, Vec<u8>),
+}
+
 /// Renders one export frame on something other than the CPU reference renderer — today the GPU
 /// compositor (`filmcraft-gpu`), registered by the app or CLI at startup. `render` returns the
 /// frame exactly as [`filmcraft_render::render_sequence`] would (same size, premultiplied
@@ -150,6 +165,19 @@ pub trait FrameRenderer: Send {
     /// this renderer or frame cannot (the caller then asks for RGBA8).
     fn render_plan_nv12(&mut self, _plan: &filmcraft_render::plan::FramePlan) -> Option<(u32, u32, Vec<u8>)> {
         None
+    }
+
+    /// Composite a slice of `(FramePlan, PlanRenderMode)` items, overlapping GPU submission and
+    /// readback where supported. Default falls back to sequential `render_plan_*` calls.
+    fn render_plans_pipelined(&mut self, requests: &[(&filmcraft_render::plan::FramePlan, PlanRenderMode)]) -> Vec<Option<PlanRenderOutput>> {
+        requests
+            .iter()
+            .map(|(plan, mode)| match mode {
+                PlanRenderMode::RgbaF32 => self.render_plan(plan).map(PlanRenderOutput::RgbaF32),
+                PlanRenderMode::Rgba8 => self.render_plan_rgba8(plan).map(|(w, h, px)| PlanRenderOutput::Rgba8(w, h, px)),
+                PlanRenderMode::Nv12 => self.render_plan_nv12(plan).map(|(w, h, px)| PlanRenderOutput::Nv12(w, h, px)),
+            })
+            .collect()
     }
 
     /// Free any cached textures, buffers, or uploads held by this renderer.

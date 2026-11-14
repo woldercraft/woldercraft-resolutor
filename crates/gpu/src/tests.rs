@@ -766,7 +766,7 @@ fn many_threads_create_use_and_drop_devices_at_once() {
 fn retained_readback_compositor() -> GpuCompositor {
     let (dev, q) = device().expect("GPU adapter required for explicit readback regression");
     let mut compositor = GpuCompositor::new(&dev, &q);
-    compositor.accum_readback_buf = Some((
+    compositor.readback_slots[0] = Some((
         dev.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback-cleanup-regression"),
             size: 256,
@@ -780,11 +780,11 @@ fn retained_readback_compositor() -> GpuCompositor {
 
 /// Failed buffers must leave the cache; a new copy must recreate usable staging storage.
 fn assert_readback_retired_and_rendering_recovers(compositor: &mut GpuCompositor) {
-    assert!(compositor.accum_readback_buf.is_none(), "failed staging buffer remained cached");
+    assert!(compositor.readback_slots[0].is_none(), "failed staging buffer remained cached");
     let plan = FramePlan::Layers { width: 1, height: 1, layers: vec![] };
     let (width, height, rgba) = compositor.render_export_prepared(&plan, None).expect("readback recovers with new staging storage");
     assert_eq!((width, height, rgba.len()), (1, 1, 4));
-    assert!(compositor.accum_readback_buf.is_some(), "successful readback must retain its cache");
+    assert!(compositor.readback_slots.iter().any(Option::is_some), "successful readback must retain its cache");
     let again = compositor.read_accumulator().expect("successful staging storage remains reusable");
     assert_eq!(again, (width, height, rgba));
 }
@@ -833,7 +833,7 @@ fn accumulator_readback_retires_rejected_native_map() {
     compositor.device.on_uncaptured_error(Arc::new(move |error| {
         observed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(format!("{error}"));
     }));
-    compositor.accum_readback_buf.as_ref().unwrap().0.destroy();
+    compositor.readback_slots[0].as_ref().unwrap().0.destroy();
     assert!(
         compositor
             .map_accumulator_with_wait((1, 1, 256), |device, rx| {
@@ -848,4 +848,47 @@ fn accumulator_readback_retires_rejected_native_map() {
         !errors.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|error| error.contains("Buffer is not mapped")),
         "cleanup attempted to unmap an already rejected mapping"
     );
+}
+
+#[test]
+fn scope_downsample_readback_captures_composited_frame() {
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut c = GpuCompositor::new(&dev, &q);
+    let (w, h) = (320u32, 180u32);
+    let px: Vec<f32> = (0..w * h).flat_map(|_| [0.5, 0.25, 0.1, 1.0]).collect();
+    let frame = Arc::new(VideoFrame::rgba_f32(w, h, px));
+    let plan = FramePlan::Layers { width: w as usize, height: h as usize, layers: vec![PlanLayer::new(frame, Affine::IDENTITY, 1.0, Blend::Normal)] };
+    c.composite_prepared_with_scope(&plan, None, Some(42));
+    let mut res = None;
+    for _ in 0..100 {
+        res = c.poll_scope_frame();
+        if res.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let (tag, sw, sh, data) = res.expect("scope readback completed");
+    assert_eq!(tag, 42);
+    assert_eq!((sw, sh), (240, 135));
+    assert_eq!(data.len(), (240 * 135 * 4) as usize);
+    // Linear 0.5 -> sRGB ~188, 0.25 -> ~137, 0.1 -> ~89
+    assert!((data[0] as i32 - 188).abs() <= 2 && (data[1] as i32 - 137).abs() <= 2 && (data[2] as i32 - 89).abs() <= 2, "{:?}", &data[..4]);
+
+    // Paused capture_scope_now captures a fresh tag from the retained accumulator.
+    c.capture_scope_now(43);
+    let mut res2 = None;
+    for _ in 0..100 {
+        if let Some(r) = c.poll_scope_frame()
+            && r.0 == 43
+        {
+            res2 = Some(r);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let (tag2, sw2, sh2, _) = res2.expect("paused scope capture completed");
+    assert_eq!((tag2, sw2, sh2), (43, 240, 135));
 }

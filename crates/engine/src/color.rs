@@ -81,6 +81,94 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             has_seq,
             set_section,
         ),
+        spec(
+            "color.groupCreate",
+            "Create Color Group",
+            &[],
+            r#"{"clips":[id]?,"name":str?,"color":[r,g,b]?}"#,
+            has_seq,
+            group_create,
+        ),
+        spec(
+            "color.groupAssign",
+            "Assign Clips to Color Group",
+            &[],
+            r#"{"clips":[id],"group":id}"#,
+            has_seq,
+            group_assign,
+        ),
+        spec(
+            "color.groupUnassign",
+            "Remove Clips from Color Group",
+            &[],
+            r#"{"clips":[id]}"#,
+            has_seq,
+            group_unassign,
+        ),
+        spec(
+            "color.groupRename",
+            "Rename Color Group",
+            &[],
+            r#"{"group":id,"name":str}"#,
+            has_seq,
+            group_rename,
+        ),
+        spec(
+            "color.groupDelete",
+            "Delete Color Group",
+            &[],
+            r#"{"group":id}"#,
+            has_seq,
+            group_delete,
+        ),
+        spec(
+            "color.groupSetParam",
+            "Set Color Group Parameter",
+            &[],
+            r#"{"group":id,"param":str,"value":val,"merge":bool?}"#,
+            has_seq,
+            group_set_param,
+        ),
+        spec(
+            "color.groupToggleBypass",
+            "Toggle Color Group Bypass",
+            &[],
+            r#"{"group":id}"#,
+            has_seq,
+            group_toggle_bypass,
+        ),
+        spec(
+            "color.groupReset",
+            "Reset Color Group",
+            &[],
+            r#"{"group":id}"#,
+            has_seq,
+            group_reset,
+        ),
+        spec(
+            "color.batchPasteGrade",
+            "Paste Color Grade to Clips",
+            &[],
+            r#"{"from":id,"clips":[id]}"#,
+            has_seq,
+            batch_paste_grade,
+        ),
+        spec(
+            "color.batchToggleBypass",
+            "Toggle Color Grade Bypass on Clips",
+            &[],
+            r#"{"clips":[id]}"#,
+            has_seq,
+            batch_toggle_bypass,
+        ),
+        spec(
+            "color.batchResetGrade",
+            "Reset Color Grade on Clips",
+            &[],
+            r#"{"clips":[id]}"#,
+            has_seq,
+            batch_reset_grade,
+        ),
     ]
 }
 
@@ -536,4 +624,201 @@ fn apply_match(s: &mut Session, p: &Value) -> Result<Value> {
         "lightness": m.lightness, "saturation": m.saturation,
         "distanceBefore": m.before, "distanceAfter": m.after,
     }))
+}
+
+const GROUP_PALETTE: [[u8; 3]; 8] = [
+    [72, 152, 235],
+    [235, 165, 52],
+    [92, 196, 118],
+    [186, 108, 228],
+    [228, 98, 128],
+    [76, 198, 198],
+    [220, 200, 72],
+    [156, 168, 232],
+];
+
+fn clip_ids_p(p: &Value, key: &str) -> Vec<ClipId> {
+    p.get(key).and_then(|v| v.as_array()).map(|arr| arr.iter().filter_map(|x| x.as_u64().map(ClipId)).collect()).unwrap_or_default()
+}
+
+fn group_id_p(p: &Value, cmd: &str) -> Result<filmcraft_project::ColorGroupId> {
+    p.get("group").and_then(|v| v.as_u64()).map(filmcraft_project::ColorGroupId).ok_or_else(|| bad(cmd, "need `group`"))
+}
+
+fn group_create(s: &mut Session, p: &Value) -> Result<Value> {
+    let clips = clip_ids_p(p, "clips");
+    let custom_name = str_p(p, "name").map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    let mut created_id = filmcraft_project::ColorGroupId(0);
+    s.edit_sequence("Create Color Group", |q, _, _| {
+        let gid = q.next_color_group_id();
+        created_id = gid;
+        let idx = q.color_groups.len();
+        let name = custom_name.clone().unwrap_or_else(|| format!("Grupo {}", idx + 1));
+        let color = p
+            .get("color")
+            .and_then(|v| v.as_array())
+            .and_then(|a| Some([a.first()?.as_u64()? as u8, a.get(1)?.as_u64()? as u8, a.get(2)?.as_u64()? as u8]))
+            .unwrap_or(GROUP_PALETTE[idx % GROUP_PALETTE.len()]);
+        q.color_groups.push(filmcraft_project::ColorGroup { id: gid, name, color, clips: Vec::new(), effects: Vec::new() });
+        for c in &clips {
+            if q.find_item(*c).is_some() {
+                q.set_clip_color_group(*c, Some(gid));
+            }
+        }
+        Ok(())
+    })?;
+    Ok(json!({"group": created_id.0}))
+}
+
+fn group_assign(s: &mut Session, p: &Value) -> Result<Value> {
+    let gid = group_id_p(p, "color.groupAssign")?;
+    let clips = clip_ids_p(p, "clips");
+    s.edit_sequence("Assign Color Group", |q, _, _| {
+        if q.color_group(gid).is_none() {
+            return Err(bad("color.groupAssign", "unknown color group"));
+        }
+        for c in &clips {
+            if q.find_item(*c).is_some() {
+                q.set_clip_color_group(*c, Some(gid));
+            }
+        }
+        Ok(())
+    })?;
+    Ok(json!({"group": gid.0, "count": clips.len()}))
+}
+
+fn group_unassign(s: &mut Session, p: &Value) -> Result<Value> {
+    let clips = clip_ids_p(p, "clips");
+    s.edit_sequence("Remove from Color Group", |q, _, _| {
+        for c in &clips {
+            q.set_clip_color_group(*c, None);
+        }
+        Ok(())
+    })?;
+    Ok(json!({"count": clips.len()}))
+}
+
+fn group_rename(s: &mut Session, p: &Value) -> Result<Value> {
+    let gid = group_id_p(p, "color.groupRename")?;
+    let name = str_p(p, "name").map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).ok_or_else(|| bad("color.groupRename", "need `name`"))?;
+    s.edit_sequence("Rename Color Group", |q, _, _| {
+        let g = q.color_group_mut(gid).ok_or_else(|| bad("color.groupRename", "unknown color group"))?;
+        g.name = name.clone();
+        Ok(())
+    })?;
+    Ok(json!({"group": gid.0}))
+}
+
+fn group_delete(s: &mut Session, p: &Value) -> Result<Value> {
+    let gid = group_id_p(p, "color.groupDelete")?;
+    s.edit_sequence("Delete Color Group", |q, _, _| {
+        q.color_groups.retain(|g| g.id != gid);
+        Ok(())
+    })?;
+    Ok(json!({"group": gid.0}))
+}
+
+fn group_set_param(s: &mut Session, p: &Value) -> Result<Value> {
+    let gid = group_id_p(p, "color.groupSetParam")?;
+    let param = str_p(p, "param").ok_or_else(|| bad("color.groupSetParam", "need `param`"))?.to_string();
+    let val = p.get("value").cloned().ok_or_else(|| bad("color.groupSetParam", "need `value`"))?;
+    let def = filmcraft_project::find_effect("lumetri").ok_or_else(|| bad("color.groupSetParam", "lumetri effect missing"))?;
+    let pd = def.param(&param).ok_or_else(|| bad("color.groupSetParam", format!("unknown param `{param}`")))?;
+    let pv = crate::commands::json_to_param(&pd.default, &val).ok_or_else(|| bad("color.groupSetParam", format!("invalid value for `{param}`")))?;
+    let merge = bool_p(p, "merge").unwrap_or(false);
+    let merge_key = merge.then(|| format!("groupSetParam:{}:{param}", gid.0));
+    s.edit_sequence_as("Color Group", merge_key.as_deref(), |q, _, _| {
+        let g = q.color_group_mut(gid).ok_or_else(|| bad("color.groupSetParam", "unknown color group"))?;
+        let idx = match g.effects.iter().position(|e| e.effect == "lumetri") {
+            Some(i) => i,
+            None => {
+                g.effects.push(def.instance());
+                g.effects.len() - 1
+            }
+        };
+        if let Some(e) = g.effects.get_mut(idx) {
+            e.params.entry(param.clone()).or_insert_with(|| filmcraft_project::Param::new(pv.clone())).value = pv.clone();
+        }
+        Ok(())
+    })?;
+    Ok(json!({"group": gid.0, "param": param}))
+}
+
+fn group_toggle_bypass(s: &mut Session, p: &Value) -> Result<Value> {
+    let gid = group_id_p(p, "color.groupToggleBypass")?;
+    let mut now_enabled = false;
+    s.edit_sequence("Toggle Color Group", |q, _, _| {
+        let g = q.color_group_mut(gid).ok_or_else(|| bad("color.groupToggleBypass", "unknown color group"))?;
+        let any_on = g.effects.iter().any(|e| e.enabled);
+        now_enabled = !any_on;
+        for e in &mut g.effects {
+            e.enabled = now_enabled;
+        }
+        Ok(())
+    })?;
+    Ok(json!({"group": gid.0, "enabled": now_enabled}))
+}
+
+fn group_reset(s: &mut Session, p: &Value) -> Result<Value> {
+    let gid = group_id_p(p, "color.groupReset")?;
+    s.edit_sequence("Reset Color Group", |q, _, _| {
+        let g = q.color_group_mut(gid).ok_or_else(|| bad("color.groupReset", "unknown color group"))?;
+        g.effects.clear();
+        Ok(())
+    })?;
+    Ok(json!({"group": gid.0}))
+}
+
+fn batch_paste_grade(s: &mut Session, p: &Value) -> Result<Value> {
+    let from = clip_p(p, "from").ok_or_else(|| bad("color.batchPasteGrade", "need `from`"))?;
+    let clips = clip_ids_p(p, "clips");
+    s.edit_sequence("Paste Color Grade", |q, _, _| {
+        let grade: Vec<filmcraft_project::EffectInstance> = q
+            .find_item(from)
+            .map(|(_, it)| it.effects.iter().filter(|e| e.effect == "lumetri").cloned().collect())
+            .unwrap_or_default();
+        for c in &clips {
+            if *c == from {
+                continue;
+            }
+            if let Some((_, it)) = q.find_item_mut(*c) {
+                it.effects.retain(|e| e.effect != "lumetri");
+                it.effects.extend(grade.iter().cloned());
+            }
+        }
+        Ok(())
+    })?;
+    Ok(json!({"count": clips.len()}))
+}
+
+fn batch_toggle_bypass(s: &mut Session, p: &Value) -> Result<Value> {
+    let clips = clip_ids_p(p, "clips");
+    s.edit_sequence("Toggle Color Bypass", |q, _, _| {
+        let any_on = clips.iter().any(|c| q.find_item(*c).is_some_and(|(_, it)| it.effects.iter().any(|e| e.effect == "lumetri" && e.enabled)));
+        let target = !any_on;
+        for c in &clips {
+            if let Some((_, it)) = q.find_item_mut(*c) {
+                for e in &mut it.effects {
+                    if e.effect == "lumetri" {
+                        e.enabled = target;
+                    }
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(json!({"count": clips.len()}))
+}
+
+fn batch_reset_grade(s: &mut Session, p: &Value) -> Result<Value> {
+    let clips = clip_ids_p(p, "clips");
+    s.edit_sequence("Reset Color Grade", |q, _, _| {
+        for c in &clips {
+            if let Some((_, it)) = q.find_item_mut(*c) {
+                it.effects.retain(|e| e.effect != "lumetri");
+            }
+        }
+        Ok(())
+    })?;
+    Ok(json!({"count": clips.len()}))
 }

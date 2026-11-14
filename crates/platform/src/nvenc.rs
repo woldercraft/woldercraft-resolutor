@@ -384,6 +384,23 @@ impl Nvenc {
         self.submit_picture(index, |l| fill_rgba(l, rgba, w, h))
     }
 
+    /// Encode picture `index` from packed 8-bit NV12 (`w * h` luma bytes followed by
+    /// `w * (h / 2)` interleaved UV bytes). An error for a Main 10 or RGBA-input encoder.
+    pub fn encode_nv12(&mut self, nv12: &[u8], index: u64) -> Result<Vec<Packet>, String> {
+        if self.ten_bit {
+            return Err("an 8-bit picture for a Main 10 encoder".into());
+        }
+        if self.rgba_input {
+            return Err("an NV12 picture for an RGBA-input encoder".into());
+        }
+        let (w, h) = (self.size.0 as usize, self.size.1 as usize);
+        let needed = w.saturating_mul(h).saturating_mul(3) / 2;
+        if nv12.len() < needed {
+            return Err("the picture is smaller than the encoder's size".into());
+        }
+        self.submit_picture(index, |l| fill_nv12_packed(l, nv12, w, h))
+    }
+
     /// Encode picture `index` from planar 8-bit 4:2:0 (`u`, `v` at half size, rows `w` and `w / 2` bytes).
     /// Returns the pictures that came out (usually the oldest; none while the ring fills). An error
     /// for a Main 10 encoder.
@@ -468,6 +485,29 @@ impl Nvenc {
         self.emitted = self.emitted.saturating_add(1);
         let pts = i64::try_from(o.pts).unwrap_or(i64::MAX);
         Ok(Packet { data, key: o.pic_type == ffi::NV_ENC_PIC_TYPE_IDR, pts, dts: k.saturating_sub(i64::from(self.delay)) })
+    }
+}
+
+/// Copy packed NV12 (`w * h` luma + `w * (h / 2)` interleaved UV) into a pitched NV12 input buffer.
+fn fill_nv12_packed(l: Locked<'_>, nv12: &[u8], w: usize, h: usize) {
+    let pitch = l.pitch;
+    if w == 0 || pitch == 0 {
+        return;
+    }
+    let luma_bytes = w.saturating_mul(h);
+    let Some((src_y, src_uv)) = nv12.split_at_checked(luma_bytes) else {
+        return;
+    };
+    let (luma, chroma) = l.data.split_at_mut((pitch * h).min(l.data.len()));
+    for (row, dst) in src_y.chunks_exact(w).zip(luma.chunks_exact_mut(pitch)).take(h) {
+        if let Some(d) = dst.get_mut(..w) {
+            d.copy_from_slice(row);
+        }
+    }
+    for (row, dst) in src_uv.chunks_exact(w).zip(chroma.chunks_exact_mut(pitch)).take(h / 2) {
+        if let Some(d) = dst.get_mut(..w) {
+            d.copy_from_slice(row);
+        }
     }
 }
 

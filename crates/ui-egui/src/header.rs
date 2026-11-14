@@ -108,9 +108,42 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let wresp = ui.interact(wr, egui::Id::unique("hdr-ws-name"), Sense::click());
     app.auto.add("header.workspaceName", wr, &ws);
     p.galley_with_override_text_color(pos2(wr.min.x + 4.0, rect.center().y - wg.size().y / 2.0), wg, if wresp.hovered() { t.text } else { t.text_dim });
+    // Inspector toggle button (DaVinci Resolve-style)
+    let insp_open = crate::dock::LayoutExt::is_inspector_open(&app.ui.dock);
+    let insp_label = tl!("Inspector");
+    let insp_g = p.layout_no_wrap(insp_label.to_string(), Tokens::semibold(11.0), if insp_open { Color32::WHITE } else { t.text_dim });
+    let insp_w = insp_g.size().x + 20.0;
+    let insp_r = Rect::from_min_size(pos2(wr.min.x - insp_w - 10.0, rect.center().y - 11.0), vec2(insp_w, 22.0));
+    let insp_resp = ui
+        .interact(insp_r, egui::Id::unique("hdr-inspector"), Sense::click())
+        .on_hover_text(tl!("Show or hide the Inspector (Video / Audio / Properties)"));
+    app.auto.add("header.inspector", insp_r, insp_label);
+    let insp_bg = if insp_open {
+        if insp_resp.hovered() { t.accent_hover } else { t.accent.gamma_multiply(0.85) }
+    } else if insp_resp.hovered() {
+        t.hover
+    } else {
+        t.tl_header_bg
+    };
+    ui.painter().rect_filled(insp_r, 4.0, insp_bg);
+    ui.painter().rect_stroke(
+        insp_r,
+        4.0,
+        Stroke::new(1.0, if insp_open { t.accent } else { t.separator }),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().galley(
+        pos2(insp_r.center().x - insp_g.size().x * 0.5, insp_r.center().y - insp_g.size().y * 0.5),
+        insp_g,
+        if insp_open { Color32::WHITE } else { t.text_dim },
+    );
+    if insp_resp.clicked() {
+        crate::dock::LayoutExt::toggle_inspector(&mut app.ui.dock);
+    }
+
     // Localized menus and user titles can be wider than English. Use the actual gap.
     let left = left_end + 12.0;
-    let right = wr.min.x - 12.0;
+    let right = insp_r.min.x - 12.0;
         if right > left + 40.0 {
             let mut job = egui::text::LayoutJob::simple_singleline(title, Tokens::ui(14.0), t.tab_text_active);
             job.wrap.max_width = right - left;

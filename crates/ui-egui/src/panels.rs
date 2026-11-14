@@ -7,6 +7,7 @@ pub mod clip_dialogs;
 pub mod clip_mismatch;
 pub mod color_clips;
 pub mod color_dialogs;
+pub mod color_groups;
 pub mod color_nodes;
 pub mod dialogs;
 pub mod effect_controls;
@@ -159,9 +160,13 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect)
         | PanelKind::ColorQualifier
         | PanelKind::ColorCreative
         | PanelKind::ColorVignette => lumetri::show(app, ui, rect, p),
+        PanelKind::InspectorVideo if graphics::graphic_selected(app) => graphics::properties(app, ui, rect),
+        PanelKind::InspectorVideo if text::caption_selected(app) => text::caption_properties(app, ui, rect),
+        PanelKind::InspectorVideo => effect_controls::inspector_video_panel(app, ui, rect),
+        PanelKind::InspectorAudio => effect_controls::inspector_audio_panel(app, ui, rect),
         PanelKind::Properties if graphics::graphic_selected(app) => graphics::properties(app, ui, rect),
         PanelKind::Properties if text::caption_selected(app) => text::caption_properties(app, ui, rect),
-        PanelKind::Properties => effect_controls::properties_panel(app, ui, rect),
+        PanelKind::Properties => effect_controls::inspector_properties_panel(app, ui, rect),
         PanelKind::EssentialGraphics => graphics_templates::essential_graphics(app, ui, rect),
         PanelKind::History => misc::history(app, ui, rect),
         PanelKind::Markers => misc::markers(app, ui, rect),
@@ -183,6 +188,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect)
         PanelKind::ColorNodes => color_nodes::show(app, ui, rect),
         PanelKind::VfxNodes => vfx_nodes::show(app, ui, rect),
         PanelKind::ColorClips => color_clips::show(app, ui, rect),
+        PanelKind::ColorGroups => color_groups::show(app, ui, rect),
         other => crate::dock::placeholder(ui, rect, &app.tokens, &tlf!("{panel} — coming in a later milestone", panel = crate::i18n::t(other.title()))),
     }
 }

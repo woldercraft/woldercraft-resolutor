@@ -115,12 +115,22 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Outer frame with dark background
     ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(20, 22, 26));
 
-    let Some((clip, it)) = active_color_clip(app) else {
+    let active_group = app.ui.active_color_group.and_then(|gid| {
+        let seq = app.session.active_sequence()?;
+        let g = seq.color_group(gid)?;
+        Some((gid, g.name.clone(), g.effects.clone()))
+    });
+
+    let (clip, it_name, it_effects, is_group_mode, group_id) = if let Some((gid, gname, geffects)) = active_group {
+        (filmcraft_project::ClipId(0), format!("Group: {gname}"), geffects, true, Some(gid))
+    } else if let Some((clip, it)) = active_color_clip(app) {
+        (clip, it.name, it.effects, false, None)
+    } else {
         crate::dock::placeholder(ui, rect, &t, tl!("(no clip selected)"));
         return;
     };
 
-    let lumetri_effects: Vec<(usize, &EffectInstance)> = it.effects.iter().enumerate().filter(|(_, e)| e.effect == "lumetri").collect();
+    let lumetri_effects: Vec<(usize, &EffectInstance)> = it_effects.iter().enumerate().filter(|(_, e)| e.effect == "lumetri").collect();
 
     let node_count = lumetri_effects.len();
     let active_node = if node_count == 0 {
@@ -337,7 +347,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let avail_right = (toolbar_r.max.x - bx - 8.0).max(0.0);
     if avail_right > 110.0 {
         let info_r = Rect::from_min_max(pos2(toolbar_r.max.x - avail_right.min(220.0), toolbar_r.min.y), pos2(toolbar_r.max.x - 8.0, toolbar_r.max.y));
-        let mut right_text = format!("Master · {}", it.name);
+        let mut right_text = format!("Master · {}", it_name);
         if node_count > 0 {
             right_text = format!("Node {}/{} | {}", active_node + 1, node_count, right_text);
         }
@@ -345,37 +355,48 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 
     // Execute Shortcut / Action requests
-    if add_serial {
-        let _ = app.session.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"}));
-        app.ui.active_color_node = node_count;
-        return;
-    }
-    if bypass_active && node_count > 0 {
-        let (idx, _) = lumetri_effects[active_node];
-        let _ = app.session.execute("effects.toggleEnabled", json!({"clip": clip.0, "index": idx}));
-        return;
-    }
-    if bypass_all && node_count > 0 {
-        let any_enabled = lumetri_effects.iter().any(|(_, e)| e.enabled);
-        for &(idx, e) in &lumetri_effects {
-            if e.enabled == any_enabled {
-                let _ = app.session.execute("effects.toggleEnabled", json!({"clip": clip.0, "index": idx}));
+    if is_group_mode && let Some(gid) = group_id {
+        if (bypass_active || bypass_all) && node_count > 0 {
+            let _ = app.session.execute("color.groupToggleBypass", json!({"group": gid.0}));
+            return;
+        }
+        if reset_active && node_count > 0 {
+            let _ = app.session.execute("color.groupReset", json!({"group": gid.0}));
+            return;
+        }
+    } else {
+        if add_serial {
+            let _ = app.session.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"}));
+            app.ui.active_color_node = node_count;
+            return;
+        }
+        if bypass_active && node_count > 0 {
+            let (idx, _) = lumetri_effects[active_node];
+            let _ = app.session.execute("effects.toggleEnabled", json!({"clip": clip.0, "index": idx}));
+            return;
+        }
+        if bypass_all && node_count > 0 {
+            let any_enabled = lumetri_effects.iter().any(|(_, e)| e.enabled);
+            for &(idx, e) in &lumetri_effects {
+                if e.enabled == any_enabled {
+                    let _ = app.session.execute("effects.toggleEnabled", json!({"clip": clip.0, "index": idx}));
+                }
             }
+            return;
         }
-        return;
-    }
-    if reset_active && node_count > 0 {
-        let (idx, _) = lumetri_effects[active_node];
-        let _ = app.session.execute("effects.reset", json!({"clip": clip.0, "index": idx}));
-        return;
-    }
-    if delete_active && node_count > 1 {
-        let (idx, _) = lumetri_effects[active_node];
-        let _ = app.session.execute("effects.remove", json!({"clip": clip.0, "index": idx}));
-        if active_node >= node_count - 1 {
-            app.ui.active_color_node = active_node.saturating_sub(1);
+        if reset_active && node_count > 0 {
+            let (idx, _) = lumetri_effects[active_node];
+            let _ = app.session.execute("effects.reset", json!({"clip": clip.0, "index": idx}));
+            return;
         }
-        return;
+        if delete_active && node_count > 1 {
+            let (idx, _) = lumetri_effects[active_node];
+            let _ = app.session.execute("effects.remove", json!({"clip": clip.0, "index": idx}));
+            if active_node >= node_count - 1 {
+                app.ui.active_color_node = active_node.saturating_sub(1);
+            }
+            return;
+        }
     }
 
     // Canvas Area

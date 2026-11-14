@@ -42,6 +42,40 @@ impl FrameRenderer for GpuFrameRenderer {
     fn render_plan_rgba8(&mut self, plan: &filmcraft_render::plan::FramePlan) -> Option<(u32, u32, Vec<u8>)> {
         self.0.render_plan_rgba8(plan)
     }
+
+    fn render_plan_nv12(&mut self, plan: &filmcraft_render::plan::FramePlan) -> Option<(u32, u32, Vec<u8>)> {
+        self.0.render_plan_nv12(plan)
+    }
+
+    fn render_plans_pipelined(
+        &mut self,
+        requests: &[(&filmcraft_render::plan::FramePlan, filmcraft_export::PlanRenderMode)],
+    ) -> Vec<Option<filmcraft_export::PlanRenderOutput>> {
+        let mapped: Vec<(&filmcraft_render::plan::FramePlan, filmcraft_gpu::ExportReadbackMode)> = requests
+            .iter()
+            .map(|(plan, mode)| {
+                let m = match mode {
+                    filmcraft_export::PlanRenderMode::RgbaF32 => filmcraft_gpu::ExportReadbackMode::RgbaF32,
+                    filmcraft_export::PlanRenderMode::Rgba8 => filmcraft_gpu::ExportReadbackMode::Rgba8,
+                    filmcraft_export::PlanRenderMode::Nv12 => filmcraft_gpu::ExportReadbackMode::Nv12,
+                };
+                (*plan, m)
+            })
+            .collect();
+        self.0
+            .render_plans_pipelined(&mapped)
+            .into_iter()
+            .map(|res| {
+                res.map(|out| match out {
+                    filmcraft_gpu::ExportOutput::RgbaF32(w, h, px) => {
+                        filmcraft_export::PlanRenderOutput::RgbaF32(filmcraft_render::Image { w: w as usize, h: h as usize, px })
+                    }
+                    filmcraft_gpu::ExportOutput::Rgba8(w, h, px) => filmcraft_export::PlanRenderOutput::Rgba8(w, h, px),
+                    filmcraft_gpu::ExportOutput::Nv12(w, h, px) => filmcraft_export::PlanRenderOutput::Nv12(w, h, px),
+                })
+            })
+            .collect()
+    }
 }
 
 /// The colour matte on V1, and with `adjusted` an adjustment layer over it on V2 (Proc Amp and
@@ -180,4 +214,39 @@ fn gpu_export_matches_cpu_and_counts() {
     let gpu = filmcraft_gpu::export_renderer::timing::get().frames - composited;
     assert_eq!(gpu, 2, "both frames with the adjustment layer composited on the GPU");
     assert_eq!(filmcraft_export::gpu_render_stats().fallbacks, fallbacks, "no frame with the adjustment layer fell back to the CPU");
+}
+
+#[test]
+#[ignore = "manual 1080p end-to-end export benchmark"]
+fn bench_1080p_export_stages() {
+    let Some(_) = filmcraft_gpu::ExportRenderer::new() else {
+        eprintln!("SKIPPED: no adapter");
+        return;
+    };
+    register_frame_renderer(|| Some(Box::new(GpuFrameRenderer(filmcraft_gpu::ExportRenderer::new().expect("adapter present")))));
+    let (p, seq, sources) = project_with(1920, 1080, true);
+    let out = std::env::temp_dir().join("filmcraft-bench-1080p.mp4");
+    let _ = std::fs::remove_file(&out);
+    let s = ExportSettings {
+        format: Format::H264,
+        path: out.to_string_lossy().into_owned(),
+        frame_size: Some((1920, 1080)),
+        range: Some(TimeRange::new(filmcraft_time::Tick::ZERO, filmcraft_time::FrameRate::FPS_24.tick_of(2))),
+        gpu_rendering: GpuRendering::Auto,
+        ..Default::default()
+    };
+    let t0 = std::time::Instant::now();
+    let report = export(&p, seq, &s, &sources, &Progress::default()).expect("export ok");
+    let wall = t0.elapsed();
+    let stages = filmcraft_export::stage_times();
+    let gpu_stats = filmcraft_export::gpu_render_stats();
+    eprintln!(
+        "1080p H264 (2 frames w/ blur+proc_amp): wall={:.2}s ({:.1} fps), gpu_frames={}, fallbacks={}, stages={:?}",
+        wall.as_secs_f64(),
+        report.render_fps,
+        gpu_stats.frames,
+        gpu_stats.fallbacks,
+        stages,
+    );
+    let _ = std::fs::remove_file(&out);
 }

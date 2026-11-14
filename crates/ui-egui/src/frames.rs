@@ -69,6 +69,8 @@ pub struct FrameKey {
     /// ([`filmcraft_media::cancel::with_draft`]). Draft frames have their own keys, so a paused
     /// monitor, an export or a render never shows one.
     pub draft: bool,
+    /// Global bypass of color grading and standard effects (true = render original without effects).
+    pub bypass: bool,
 }
 
 /// Whether a monitor frame is requested with draft decoding ([`FrameKey::draft`]): only while
@@ -812,7 +814,7 @@ impl FrameServer {
     /// The most recent cached frame for `target` at or before `frame` within `max_back` frames.
     pub fn nearest(&self, target: Target, frame: i64, size: u32, revision: u64, max_back: i64) -> Option<Arc<Rgba>> {
         for d in 0..=max_back {
-            if let Some(v) = self.get(&FrameKey { target, frame: frame - d, size, revision, draft: false }) {
+            if let Some(v) = self.get(&FrameKey { target, frame: frame - d, size, revision, draft: false, bypass: false }) {
                 return Some(v);
             }
         }
@@ -891,6 +893,10 @@ pub struct PlaybackMeter {
     current: Option<(i64, bool)>,
     /// Frames advanced per displayed frame (speed), and direction.
     step: i64,
+    /// Rolling window for live playback FPS estimation.
+    fps_window_start: Option<web_time::Instant>,
+    fps_window_shown: u64,
+    fps_last: Option<f32>,
 }
 
 impl PlaybackMeter {
@@ -900,11 +906,15 @@ impl PlaybackMeter {
 
     /// Record one display refresh: `frame` is due now and `exact` says whether it is on screen.
     pub fn refresh(&mut self, frame: i64, exact: bool) {
+        self.refresh_at(frame, exact, web_time::Instant::now());
+    }
+
+    pub(crate) fn refresh_at(&mut self, frame: i64, exact: bool, now: web_time::Instant) {
         let step = if self.step == 0 { 1 } else { self.step };
         match self.current {
             Some((f, seen)) if f == frame => self.current = Some((f, seen || exact)),
             Some((f, seen)) => {
-                self.close(seen);
+                self.close(seen, now);
                 let moved = (frame - f) / step;
                 // Forward progress: count frames passed over without a refresh. A jump backwards
                 // (loop restart) or a huge jump is a discontinuity, not a drop.
@@ -917,9 +927,24 @@ impl PlaybackMeter {
         }
     }
 
-    fn close(&mut self, seen: bool) {
+    fn close(&mut self, seen: bool, now: web_time::Instant) {
         if seen {
             self.shown += 1;
+            match self.fps_window_start {
+                None => {
+                    self.fps_window_start = Some(now);
+                    self.fps_window_shown = 1;
+                }
+                Some(start) => {
+                    self.fps_window_shown += 1;
+                    let dt = now.saturating_duration_since(start).as_secs_f32();
+                    if dt >= 0.5 {
+                        self.fps_last = Some(self.fps_window_shown as f32 / dt);
+                        self.fps_window_start = Some(now);
+                        self.fps_window_shown = 0;
+                    }
+                }
+            }
         } else {
             self.dropped += 1;
         }
@@ -934,8 +959,26 @@ impl PlaybackMeter {
     /// Playback stopped: account for the frame on screen.
     pub fn finish(&mut self) {
         if let Some((_, seen)) = self.current.take() {
-            self.close(seen);
+            self.close(seen, web_time::Instant::now());
         }
+    }
+
+    /// Measured displayed frames per second over the latest rolling window.
+    pub fn fps(&self) -> Option<f32> {
+        self.fps_at(web_time::Instant::now())
+    }
+
+    pub(crate) fn fps_at(&self, now: web_time::Instant) -> Option<f32> {
+        if let Some(start) = self.fps_window_start {
+            let dt = now.saturating_duration_since(start).as_secs_f32();
+            if dt >= 1.0 && self.fps_window_shown == 0 {
+                return Some(0.0);
+            }
+            if self.fps_last.is_none() && dt >= 0.15 && self.fps_window_shown > 0 {
+                return Some(self.fps_window_shown as f32 / dt);
+            }
+        }
+        self.fps_last
     }
 
     /// Shown and dropped so far, counting the frame currently due as shown when it is.
@@ -1132,8 +1175,9 @@ fn plan_job(
     services: &Arc<dyn Services>,
     previews: &PreviewStore,
 ) -> (filmcraft_render::plan::FramePlan, bool) {
-    let opts = filmcraft_render::RenderOptions { scale: job.scale, captions: true, ..Default::default() };
-    if let Some(frame) = preview_frame(job, seq, pool, previews)
+    let opts = filmcraft_render::RenderOptions { scale: job.scale, captions: true, effects: !job.key.bypass, ..Default::default() };
+    if !job.key.bypass
+        && let Some(frame) = preview_frame(job, seq, pool, previews)
         && let Some(q) = job.project.sequence(seq)
     {
         // One full-frame layer: the preview scaled to the output size. Previews never contain
@@ -1159,7 +1203,8 @@ fn plan_job(
 
 /// Render a job to RGBA8; the flag says whether it came from a render preview.
 fn render_job(job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Services>, previews: &PreviewStore) -> (Rgba, bool) {
-    if let Target::Sequence(seq) | Target::SequencePlan(seq, _) = job.key.target
+    if !job.key.bypass
+        && let Target::Sequence(seq) | Target::SequencePlan(seq, _) = job.key.target
         && let Some(f) = preview_frame(job, seq, pool, previews)
         && let Some(q) = job.project.sequence(seq)
     {
@@ -1178,7 +1223,7 @@ fn render_job(job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Services>, pr
         return (Rgba { w: img.w, h: img.h, px: img.over_black_with_alpha_rgba8() }, true);
     }
     let provider = provider(job, pool, services);
-    let opts = filmcraft_render::RenderOptions { scale: job.scale, captions: true, ..Default::default() };
+    let opts = filmcraft_render::RenderOptions { scale: job.scale, captions: true, effects: !job.key.bypass, ..Default::default() };
     let img = match job.key.target {
         Target::Sequence(seq) | Target::SequencePlan(seq, _) | Target::SequenceLive(seq) => {
             let (w, h, px) = filmcraft_render::render_sequence_rgba8(&job.project, seq, job.time, opts, &provider);
@@ -1252,7 +1297,7 @@ mod tests {
     /// #1673: the recent-frame fallback looks at frames already played, newest revision first.
     #[test]
     fn recent_frames_lie_on_the_played_side() {
-        let key = FrameKey { target: Target::Sequence(ItemId(1)), frame: 10, size: 1000, revision: 5, draft: false };
+        let key = FrameKey { target: Target::Sequence(ItemId(1)), frame: 10, size: 1000, revision: 5, draft: false, bypass: false };
         let fwd: Vec<(i64, u64)> = recent_keys(key, 1, 2, 1).map(|k| (k.frame, k.revision)).collect();
         assert_eq!(fwd, [(10, 5), (10, 4), (9, 5), (9, 4), (8, 5), (8, 4)]);
         let rev: Vec<(i64, u64)> = recent_keys(key, -1, 2, 1).map(|k| (k.frame, k.revision)).collect();
@@ -1326,7 +1371,7 @@ mod tests {
         let s = filmcraft_engine::Session::default();
         let server = FrameServer::new(s.media.clone(), s.services.clone(), s.previews.clone(), 3);
         let p = Arc::new(filmcraft_project::Project::new("Frames"));
-        let key = FrameKey { target: Target::Item(ItemId(999)), frame: 0, size: 32, revision: 0, draft: false };
+        let key = FrameKey { target: Target::Item(ItemId(999)), frame: 0, size: 32, revision: 0, draft: false, bypass: false };
         server.request(key, filmcraft_time::Tick::ZERO, 0.1, &p, 0);
         let (shared, project) = (Arc::downgrade(&server.shared), Arc::downgrade(&p));
         drop(p);
@@ -1349,7 +1394,7 @@ mod tests {
         let s = filmcraft_engine::Session::default();
         let server = FrameServer::new(s.media.clone(), s.services.clone(), s.previews.clone(), 1);
         let job = Job {
-            key: FrameKey { target: Target::Item(ItemId(999)), frame: 0, size: 32, revision: 0, draft: false },
+            key: FrameKey { target: Target::Item(ItemId(999)), frame: 0, size: 32, revision: 0, draft: false, bypass: false },
             queued: web_time::Instant::now(),
             cancel: Default::default(),
             prefetch: false,
@@ -1413,7 +1458,7 @@ mod tests {
         let p = Arc::new(p);
         let s = filmcraft_engine::Session::default();
         let server = FrameServer::new(s.media.clone(), s.services.clone(), s.previews.clone(), 2);
-        let key = |caps| FrameKey { target: Target::SequencePlan(seq, caps), frame: 0, size: 1000, revision: 0, draft: false };
+        let key = |caps| FrameKey { target: Target::SequencePlan(seq, caps), frame: 0, size: 1000, revision: 0, draft: false, bypass: false };
         for caps in [DeviceCaps::NONE, DeviceCaps::ALL] {
             server.request(key(caps), Tick::ZERO, 1.0, &p, 0);
         }
@@ -1428,5 +1473,21 @@ mod tests {
             matches!(&all.plan, FramePlan::Composite { steps, .. } if steps.iter().any(|st| matches!(st, PlanStep::Adjust { .. }))),
             "an effect stage: the adjustment layer is a step of the plan"
         );
+    }
+
+    #[test]
+    fn playback_meter_measures_rolling_fps_and_stalls() {
+        let mut meter = PlaybackMeter::default();
+        meter.start(1.0);
+        let t0 = web_time::Instant::now();
+        assert_eq!(meter.fps_at(t0), None);
+        // 14 exact frames across 574 ms (> 500 ms rolling window) -> ~24 fps
+        for i in 0..=14 {
+            meter.refresh_at(i, true, t0 + std::time::Duration::from_millis((i as u64) * 41));
+        }
+        let fps = meter.fps_at(t0 + std::time::Duration::from_millis(600)).expect("rolling fps");
+        assert!((20.0..=28.0).contains(&fps), "measured fps={fps}");
+        // Stalling for >= 1s after the window rolled drops fps to 0
+        assert_eq!(meter.fps_at(t0 + std::time::Duration::from_millis(1650)), Some(0.0));
     }
 }

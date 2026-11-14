@@ -9,15 +9,155 @@
 //! op to the GPU when [`FxOp::gpu_ok`] says the shader covers it (finite numbers, no minifying
 //! resample), otherwise the clip is rendered on the CPU as before.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use filmcraft_color::{hsl_to_rgb, linear_to_srgb, luma709, rgb_to_hsl};
 use filmcraft_geom::Affine;
 use filmcraft_project::EffectInstance;
 use rayon::prelude::*;
 
-use crate::effects::{FxCtx, b, choice, color, dec, enc, f, gaussian_boxes, grade_space, lift_scale, on, point, text};
+use crate::effects::{
+    FxCtx, b, box_blur, choice, color, curve_lut, curve_param, dec, enc, f, gaussian_boxes, grade_space, hsl_key, hue_lut, is_identity_curve,
+    lift_scale, median_filter, on, point, text, vs_sat_lut,
+};
 use crate::image::Image;
+
+pub const LUMETRI_CURVE_LEN: usize = 1024;
+
+/// Packed 1024×3 RGBA curve LUTs for GPU Lumetri Curves (`OP_LUMETRI_CURVES`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LumetriCurveTable {
+    /// 3 rows of 1024 RGBA f32 texels:
+    /// row 0 = [luma, red, green, blue],
+    /// row 1 = [hue_vs_hue, hue_vs_sat, luma_vs_sat, sat_vs_sat],
+    /// row 2 = [hue_vs_luma, 0, 0, 0].
+    pub texels: Arc<Vec<[f32; 4]>>,
+    /// Bitmask of active curves (0: luma .. 8: hvl).
+    pub active_mask: u32,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct CurveCacheKey([Option<Vec<[u32; 2]>>; 9]);
+
+fn curve_table_cache() -> &'static Mutex<HashMap<CurveCacheKey, Arc<Vec<[f32; 4]>>>> {
+    static CACHE: OnceLock<Mutex<HashMap<CurveCacheKey, Arc<Vec<[f32; 4]>>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn build_curve_table(e: &EffectInstance) -> Option<LumetriCurveTable> {
+    let tone_ids = ["curve_luma", "curve_red", "curve_green", "curve_blue"];
+    let hue_ids = ["hue_vs_hue", "hue_vs_sat", "hue_vs_luma"];
+    let vs_ids = ["luma_vs_sat", "sat_vs_sat"];
+
+    let mut active_mask = 0u32;
+    let mut raw: [Option<Vec<[f32; 2]>>; 9] = std::array::from_fn(|_| None);
+    for (i, id) in tone_ids.iter().enumerate() {
+        if let Some(c) = curve_param(e, id).filter(|c| !is_identity_curve(c)) {
+            active_mask |= 1u32 << i;
+            raw[i] = Some(c);
+        }
+    }
+    for (idx, id) in ["hue_vs_hue", "hue_vs_sat", "luma_vs_sat", "sat_vs_sat", "hue_vs_luma"].iter().enumerate() {
+        let valid = curve_param(e, id).filter(|c| !c.is_empty());
+        if let Some(c) = valid {
+            active_mask |= 1u32 << (4 + idx);
+            raw[4 + idx] = Some(c);
+        }
+    }
+    let _ = (hue_ids, vs_ids);
+    if active_mask == 0 {
+        return None;
+    }
+
+    let key = CurveCacheKey(raw.each_ref().map(|opt| opt.as_ref().map(|v| v.iter().map(|p| [p[0].to_bits(), p[1].to_bits()]).collect())));
+    {
+        let cache = curve_table_cache().lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(texels) = cache.get(&key) {
+            return Some(LumetriCurveTable { texels: texels.clone(), active_mask });
+        }
+    }
+
+    let mut texels = vec![[0.0f32; 4]; LUMETRI_CURVE_LEN * 3];
+    for (c_idx, slot) in raw[0..4].iter().enumerate() {
+        if let Some(pts) = slot {
+            let l = curve_lut(pts, LUMETRI_CURVE_LEN);
+            for (x, &v) in l.iter().enumerate() {
+                texels[x][c_idx] = v;
+            }
+        }
+    }
+    if let Some(pts) = &raw[4]
+        && let Some(l) = hue_lut(pts, LUMETRI_CURVE_LEN)
+    {
+        for (x, &v) in l.iter().enumerate() {
+            texels[LUMETRI_CURVE_LEN + x][0] = v;
+        }
+    }
+    if let Some(pts) = &raw[5]
+        && let Some(l) = hue_lut(pts, LUMETRI_CURVE_LEN)
+    {
+        for (x, &v) in l.iter().enumerate() {
+            texels[LUMETRI_CURVE_LEN + x][1] = v;
+        }
+    }
+    if let Some(pts) = &raw[6]
+        && let Some(l) = vs_sat_lut(pts, LUMETRI_CURVE_LEN)
+    {
+        for (x, &v) in l.iter().enumerate() {
+            texels[LUMETRI_CURVE_LEN + x][2] = v;
+        }
+    }
+    if let Some(pts) = &raw[7]
+        && let Some(l) = vs_sat_lut(pts, LUMETRI_CURVE_LEN)
+    {
+        for (x, &v) in l.iter().enumerate() {
+            texels[LUMETRI_CURVE_LEN + x][3] = v;
+        }
+    }
+    if let Some(pts) = &raw[8]
+        && let Some(l) = hue_lut(pts, LUMETRI_CURVE_LEN)
+    {
+        for (x, &v) in l.iter().enumerate() {
+            texels[LUMETRI_CURVE_LEN * 2 + x][0] = v;
+        }
+    }
+
+    let arc = Arc::new(texels);
+    let mut cache = curve_table_cache().lock().unwrap_or_else(PoisonError::into_inner);
+    if cache.len() >= 32 {
+        cache.clear();
+    }
+    cache.insert(key, arc.clone());
+    Some(LumetriCurveTable { texels: arc, active_mask })
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HslSecondaryParams {
+    pub hc: f32,
+    pub hr: f32,
+    pub smin: f32,
+    pub lmin: f32,
+    pub lmax: f32,
+    pub soft: f32,
+    pub show_mask: u32,
+    pub htemp: f32,
+    pub htint: f32,
+    pub hsat: f32,
+    pub hshift: f32,
+    pub denoise: f32,
+    pub denoise_r: u32,
+    pub blur_rx: Vec<u32>,
+    pub blur_ry: Vec<u32>,
+}
+
+/// Precomputed mask coverage for [`FxOp::Masked`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaskCoverage {
+    pub w: u32,
+    pub h: u32,
+    pub cov: Arc<Vec<f32>>,
+}
 
 /// A bilinear resample of the working image through an affine map (`Image::transformed` at a
 /// magnification or mild minification: no mip pre-filter).
@@ -233,7 +373,14 @@ pub enum FxOp {
         ls: f32,
         lm: f32,
         lh: f32,
+        curves: Option<LumetriCurveTable>,
+        hsl: Option<Box<HslSecondaryParams>>,
         gpu_capable: bool,
+    },
+    /// Any GPU effect restricted to active mask coverage (`lerp(before, after, coverage)`).
+    Masked {
+        inner: Box<FxOp>,
+        mask: MaskCoverage,
     },
 }
 
@@ -603,7 +750,7 @@ impl FxOp {
                 FxOp::VideoLimiter { max: 1.0 + clip_level / 100.0, comp: comp_val, axis, warn, warning_color: wc }
             }
             "lumetri" => {
-                use crate::effects::{curve_param, is_identity_curve, wheel_rgb};
+                use crate::effects::wheel_rgb;
                 let (basic_on, creative_on, vignette_on) = (on(e, "basic_on"), on(e, "creative_on"), on(e, "vignette_on"));
                 let gs = grade_space(e, cx, "hdr_white");
                 let is_hdr = gs.is_hdr();
@@ -620,12 +767,7 @@ impl FxOp {
                 };
 
                 let curves_on = on(e, "curves_on");
-                let has_curves = curves_on && {
-                    ["curve_luma", "curve_red", "curve_green", "curve_blue"].iter().any(|id| curve_param(e, id).is_some_and(|c| !is_identity_curve(&c)))
-                        || ["hue_vs_sat", "hue_vs_hue", "hue_vs_luma", "luma_vs_sat", "sat_vs_sat"]
-                            .iter()
-                            .any(|id| curve_param(e, id).is_some_and(|c| !c.is_empty()))
-                };
+                let curves = if curves_on { build_curve_table(e) } else { None };
 
                 let wheels_on = on(e, "wheels_on");
                 let (ws, wm, wh_rgb, ls, lm, lh) = if wheels_on {
@@ -638,24 +780,54 @@ impl FxOp {
                 };
 
                 let hsl_on = b(e, "hsl_on");
+                let hsl = if hsl_on {
+                    let denoise = f(e, "hsl_denoise", cx).clamp(0.0, 100.0) / 100.0;
+                    let blur = f(e, "hsl_blur", cx).clamp(0.0, 100.0) / 100.0;
+                    let denoise_r = if denoise > 0.0 { ((1.0 + 2.0 * denoise) * cx.px_scale).round().max(1.0) as u32 } else { 0 };
+                    let (blur_rx, blur_ry) = if blur > 0.0 {
+                        let sigma = blur * 20.0 * cx.px_scale;
+                        if sigma >= 0.3 { gaussian_boxes(w, h, sigma, sigma) } else { (Vec::new(), Vec::new()) }
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
+                    Some(Box::new(HslSecondaryParams {
+                        hc: f(e, "hsl_hue", cx) / 360.0,
+                        hr: (f(e, "hsl_hue_range", cx) / 360.0).max(1e-3),
+                        smin: f(e, "hsl_sat_min", cx) / 100.0,
+                        lmin: f(e, "hsl_luma_min", cx) / 100.0,
+                        lmax: f(e, "hsl_luma_max", cx) / 100.0,
+                        soft: (f(e, "hsl_soft", cx) / 100.0 * 0.3).max(0.01),
+                        show_mask: choice(e, "hsl_show_mask"),
+                        htemp: f(e, "hsl_temp", cx) / 100.0,
+                        htint: f(e, "hsl_tint", cx) / 100.0,
+                        hsat: f(e, "hsl_sat", cx) / 100.0,
+                        hshift: f(e, "hsl_hue_shift", cx) / 360.0,
+                        denoise,
+                        denoise_r,
+                        blur_rx,
+                        blur_ry,
+                    }))
+                } else {
+                    None
+                };
 
                 let input_lut_3d = if has_input_lut {
-                    crate::luts::resolve(cx.project, text(e, "input_lut")).and_then(|l| l.baked_cube(33).ok()).map(Arc::new)
+                    crate::luts::resolve_baked_cube(cx.project, text(e, "input_lut"), 33)
                 } else {
                     None
                 };
                 let look_lut_3d = if has_look_lut {
-                    crate::luts::resolve(cx.project, text(e, "look_lut")).and_then(|l| l.baked_cube(33).ok()).map(Arc::new)
+                    crate::luts::resolve_baked_cube(cx.project, text(e, "look_lut"), 33)
                 } else {
                     None
                 };
 
+                let hsl_ok = hsl.as_ref().is_none_or(|h| h.denoise_r <= 3);
                 let gpu_capable = !is_hdr
                     && (!has_input_lut || input_lut_3d.is_some())
                     && (!has_look_lut || look_lut_3d.is_some())
                     && look <= 8
-                    && !has_curves
-                    && !hsl_on;
+                    && hsl_ok;
 
                 let bf = |id: &str| if basic_on { f(e, id, cx) } else { 0.0 };
                 let temp = bf("temperature") / 100.0;
@@ -712,11 +884,26 @@ impl FxOp {
                     ls,
                     lm,
                     lh,
+                    curves,
+                    hsl,
                     gpu_capable,
                 }
             }
             _ => return None,
         })
+    }
+
+    /// Evaluate `e`, wrapping in [`FxOp::Masked`] if `e` carries active masks.
+    pub fn eval_masked(e: &EffectInstance, cx: &FxCtx, w: usize, h: usize) -> Option<FxOp> {
+        let op = Self::eval(e, cx, w, h)?;
+        if let Some(cov) = crate::mask::effect_coverage(&e.masks, cx.t, cx.px_scale, w, h) {
+            Some(FxOp::Masked {
+                inner: Box::new(op),
+                mask: MaskCoverage { w: w as u32, h: h as u32, cov: Arc::new(cov) },
+            })
+        } else {
+            Some(op)
+        }
     }
 
     fn crop_rect(w: usize, h: usize, l: f32, t: f32, r: f32, b: f32, feather: f32) -> FxOp {
@@ -788,6 +975,8 @@ impl FxOp {
                 ls,
                 lm,
                 lh,
+                curves,
+                hsl,
                 gpu_capable,
                 ..
             } => {
@@ -801,6 +990,17 @@ impl FxOp {
                     && fin(wm)
                     && fin(wh_rgb)
                     && fin(&[*ls, *lm, *lh])
+                    && curves.as_ref().is_none_or(|c| c.texels.len() == LUMETRI_CURVE_LEN * 3)
+                    && hsl.as_ref().is_none_or(|h| {
+                        h.denoise_r <= 3 && fin(&[h.hc, h.hr, h.smin, h.lmin, h.lmax, h.soft, h.htemp, h.htint, h.hsat, h.hshift, h.denoise])
+                    })
+            }
+            FxOp::Masked { inner, mask } => {
+                inner.gpu_ok()
+                    && mask.w > 0
+                    && mask.h > 0
+                    && mask.cov.len() == (mask.w as usize).saturating_mul(mask.h as usize)
+                    && mask.cov.iter().all(|v| v.is_finite())
             }
         }
     }
@@ -1164,6 +1364,8 @@ impl FxOp {
                 ls,
                 lm,
                 lh,
+                curves,
+                hsl,
                 ..
             } => {
                 let (input_lut, look_lut) = (input_lut.as_deref(), look_lut.as_deref());
@@ -1254,13 +1456,122 @@ impl FxOp {
                             v2[k] += (wm[k] * 0.3 + lm * 0.3) * wmid;
                             v2[k] *= 1.0 + (wh_rgb[k] * 0.5 + lh * 0.5) * whi;
                         }
-                        dec(v2)
-                    } else {
-                        dec(v)
+                        v = v2;
                     }
+                    if let Some(ct) = curves
+                        && ct.active_mask != 0
+                    {
+                        v = enc(dec(v));
+                        let sample_tbl = |row: usize, ch: usize, x: f32| {
+                            let p = x.clamp(0.0, 1.0) * (LUMETRI_CURVE_LEN - 1) as f32;
+                            let i = p as usize;
+                            let j = (i + 1).min(LUMETRI_CURVE_LEN - 1);
+                            let base = row * LUMETRI_CURVE_LEN;
+                            let a = ct.texels[base + i][ch];
+                            let b = ct.texels[base + j][ch];
+                            a + (b - a) * (p - i as f32)
+                        };
+                        let m = ct.active_mask;
+                        if m & 1 != 0 {
+                            v = v.map(|q| sample_tbl(0, 0, q));
+                        }
+                        if m & 2 != 0 {
+                            v[0] = sample_tbl(0, 1, v[0]);
+                        }
+                        if m & 4 != 0 {
+                            v[1] = sample_tbl(0, 2, v[1]);
+                        }
+                        if m & 8 != 0 {
+                            v[2] = sample_tbl(0, 3, v[2]);
+                        }
+                        if m & 0x1F0 != 0 {
+                            let u = v.map(|q| q.clamp(0.0, 1.0));
+                            let mut h = rgb_to_hsl(u[0], u[1], u[2]);
+                            let (h0, s0, l0) = (h[0], h[1], h[2]);
+                            if m & 16 != 0 {
+                                h[0] = (h[0] + (sample_tbl(1, 0, h0) - 0.5)).rem_euclid(1.0);
+                            }
+                            let mut sm = 1.0;
+                            if m & 32 != 0 {
+                                sm *= sample_tbl(1, 1, h0) * 2.0;
+                            }
+                            if m & 64 != 0 {
+                                sm *= sample_tbl(1, 2, l0) * 2.0;
+                            }
+                            if m & 128 != 0 {
+                                sm *= sample_tbl(1, 3, s0) * 2.0;
+                            }
+                            h[1] = (h[1] * sm).clamp(0.0, 1.0);
+                            if m & 256 != 0 {
+                                h[2] = (h[2] + (sample_tbl(2, 0, h0) - 0.5) * 0.5).clamp(0.0, 1.0);
+                            }
+                            v = hsl_to_rgb(h[0], h[1], h[2]);
+                        }
+                    }
+                    dec(v)
                 });
+                if let Some(hsl) = hsl {
+                    let (iw, ih) = (img.w, img.h);
+                    let mut mask: Vec<f32> = img
+                        .px
+                        .par_chunks(4)
+                        .map(|p| {
+                            if p[3] <= 1e-6 {
+                                0.0
+                            } else {
+                                let u = enc(Image::unpremul([p[0], p[1], p[2], p[3]])).map(|q| q.clamp(0.0, 1.0));
+                                hsl_key(u, hsl.hc, hsl.hr, hsl.smin, hsl.lmin, hsl.lmax, hsl.soft)
+                            }
+                        })
+                        .collect();
+                    if hsl.denoise > 0.0 && hsl.denoise_r > 0 {
+                        let med = median_filter(&mask, iw, ih, hsl.denoise_r as usize);
+                        mask.iter_mut().zip(med).for_each(|(m, d)| *m += (d - *m) * hsl.denoise.min(1.0));
+                    }
+                    if !hsl.blur_rx.is_empty() || !hsl.blur_ry.is_empty() {
+                        let mut mimg = Image::new(iw, ih);
+                        for (i, &m) in mask.iter().enumerate() {
+                            mimg.px[i * 4] = m;
+                            mimg.px[i * 4 + 3] = 1.0;
+                        }
+                        box_blur(&mut mimg, &hsl.blur_rx, &hsl.blur_ry, true);
+                        for (i, m) in mask.iter_mut().enumerate() {
+                            *m = mimg.px[i * 4];
+                        }
+                    }
+                    img.map_rgb(|c, x, y| {
+                        let m = mask[y * iw + x];
+                        let u = enc(c).map(|q| q.clamp(0.0, 1.0));
+                        let out = match hsl.show_mask {
+                            1 => {
+                                let g = rgb_to_hsl(u[0], u[1], u[2])[2];
+                                [g + (u[0] - g) * m, g + (u[1] - g) * m, g + (u[2] - g) * m]
+                            }
+                            2 => u.map(|q| q * m),
+                            3 => [m, m, m],
+                            _ => {
+                                let mut hh = rgb_to_hsl(u[0], u[1], u[2]);
+                                hh[0] = (hh[0] + hsl.hshift).rem_euclid(1.0);
+                                hh[1] = (hh[1] * hsl.hsat).clamp(0.0, 1.0);
+                                let mut c2 = hsl_to_rgb(hh[0], hh[1], hh[2]);
+                                c2[0] *= 1.0 + 0.25 * hsl.htemp;
+                                c2[2] *= 1.0 - 0.25 * hsl.htemp;
+                                c2[1] *= 1.0 - 0.2 * hsl.htint;
+                                [u[0] + (c2[0] - u[0]) * m, u[1] + (c2[1] - u[1]) * m, u[2] + (c2[2] - u[2]) * m]
+                            }
+                        };
+                        dec(out)
+                    });
+                }
                 if sharpen.abs() > 1e-3 && !sharpen_rx.is_empty() {
                     crate::effects::unsharp_boxes(img, sharpen_rx, sharpen_ry, sharpen.max(-1.0), 0.0);
+                }
+            }
+            FxOp::Masked { inner, mask } => {
+                if mask.cov.len() == img.w.saturating_mul(img.h) {
+                    let orig = img.clone();
+                    inner.apply(img);
+                    crate::mask::mix(img, &orig, &mask.cov);
                 }
             }
         }

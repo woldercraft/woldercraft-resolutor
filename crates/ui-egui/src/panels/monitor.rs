@@ -81,7 +81,8 @@ fn draw_picture(app: &mut FilmcraftApp, ui: &mut egui::Ui, which: Which, mv: &cr
     };
     // Draft decoding (opt-in): only while playing at 1/2 resolution or lower.
     let draft = crate::frames::draft_playback(playing, scale, app.session.prefs.playback.draft_decode);
-    let key = FrameKey { target, frame, size: size_key, revision: rev, draft };
+    let bypass = which == Which::Program && app.ui.global_bypass;
+    let key = FrameKey { target, frame, size: size_key, revision: rev, draft, bypass };
     let project = app.session.project.clone();
     let speed = if which == Which::Program { app.playback.speed } else { app.source_playback.clock.speed };
     // while playing, which way: frames on the other side of the playhead are not due yet
@@ -147,7 +148,7 @@ fn draw_picture(app: &mut FilmcraftApp, ui: &mut egui::Ui, which: Which, mv: &cr
             Target::Sequence(s) if mv.transparency_grid => Target::SequenceLive(s),
             t => t,
         };
-        let rkey = FrameKey { target: rtarget, frame: rf, size: size_key, revision: rev, draft: false };
+        let rkey = FrameKey { target: rtarget, frame: rf, size: size_key, revision: rev, draft: false, bypass: false };
         app.frames.request(rkey, rate.tick_of(rf), scale, &project, 1);
         let rpic = fit(ra, display_w, frame_size.1 as f32);
         if mv.transparency_grid {
@@ -191,10 +192,62 @@ fn draw_picture(app: &mut FilmcraftApp, ui: &mut egui::Ui, which: Which, mv: &cr
     }
 }
 
-fn drop_indicator(app: &FilmcraftApp, ui: &mut egui::Ui, video_area: Rect, which: Which, t: &Tokens) {
-    if which == Which::Program && app.playback.playing && !app.ui.fullscreen_program {
-        let c = if app.playback.meter.counts().1 > 0 { t.render_yellow } else { t.render_green };
-        ui.painter().circle_filled(pos2(video_area.min.x + 10.0, video_area.min.y + 10.0), 4.0, c);
+fn fps_indicator(app: &FilmcraftApp, ui: &mut egui::Ui, video_area: Rect, which: Which, rate: filmcraft_time::FrameRate, t: &Tokens) {
+    if which != Which::Program || app.ui.fullscreen_program {
+        return;
+    }
+    let playing = app.playback.playing;
+    let (dot_col, label, text_col) = if playing {
+        let target_fps = rate.as_f64() as f32;
+        let actual_fps = app.playback.meter.fps();
+        let dropped = app.playback.meter.counts().1;
+        let lagging = dropped > 0 || actual_fps.is_some_and(|f| f < target_fps * 0.90);
+        let dot = if lagging { t.render_yellow } else { t.render_green };
+        let text = match (actual_fps, dropped > 0) {
+            (Some(f), true) => format!("{f:.1} / {} fps · {dropped} drop", rate.label()),
+            (Some(f), false) => format!("{f:.1} / {} fps", rate.label()),
+            (None, _) => format!("… / {} fps", rate.label()),
+        };
+        (Some(dot), text, Color32::from_gray(235))
+    } else {
+        (None, format!("{} fps", rate.label()), t.text_dim)
+    };
+    let font = Tokens::ui(10.5);
+    let galley = ui.painter().layout_no_wrap(label, font, text_col);
+    let dot_w = if dot_col.is_some() { 11.0 } else { 0.0 };
+    let pad = vec2(7.0, 3.0);
+    let pill = Rect::from_min_size(video_area.min + vec2(8.0, 8.0), vec2(galley.size().x + dot_w + pad.x * 2.0, galley.size().y + pad.y * 2.0));
+    let bg = if playing { Color32::from_black_alpha(175) } else { Color32::from_black_alpha(120) };
+    ui.painter().rect_filled(pill, 4.0, bg);
+    ui.painter().rect_stroke(pill, 4.0, Stroke::new(1.0, Color32::from_white_alpha(24)), StrokeKind::Inside);
+    if let Some(dot) = dot_col {
+        ui.painter().circle_filled(pos2(pill.min.x + pad.x + 3.5, pill.center().y), 3.5, dot);
+    }
+    ui.painter().galley(pos2(pill.min.x + pad.x + dot_w, pill.center().y - galley.size().y * 0.5), galley, text_col);
+}
+
+/// DaVinci Resolve-style global "Bypass Color Grades & Effects" icon:
+/// a circular color-wheel badge with a diagonal slash highlighted in warm orange when bypassed.
+fn paint_bypass_icon(p: &egui::Painter, rect: Rect, bypassed: bool, hovered: bool, t: &Tokens) {
+    let c = rect.center();
+    let r = (rect.width().min(rect.height()) * 0.44).max(4.5);
+    let ring = if bypassed {
+        Color32::from_rgb(232, 106, 56)
+    } else if hovered {
+        t.tab_text_active
+    } else {
+        t.icon
+    };
+    p.circle_stroke(c, r, Stroke::new(1.5, ring));
+    // Inner multi-tone triad dots / arc hinting at color & effects when active; diagonal slash when bypassed.
+    if bypassed {
+        let d = r * 0.72;
+        p.line_segment([pos2(c.x - d, c.y + d), pos2(c.x + d, c.y - d)], Stroke::new(1.8, ring));
+    } else {
+        let dot_r = (r * 0.24).max(1.2);
+        p.circle_filled(pos2(c.x, c.y - r * 0.36), dot_r, Color32::from_rgb(235, 95, 95));
+        p.circle_filled(pos2(c.x - r * 0.32, c.y + r * 0.24), dot_r, Color32::from_rgb(95, 205, 115));
+        p.circle_filled(pos2(c.x + r * 0.32, c.y + r * 0.24), dot_r, Color32::from_rgb(95, 155, 240));
     }
 }
 
@@ -373,7 +426,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
             PictureCtx { target, frame_size, rate, time, duration, drop_frame, time_display, compare, ref_area, pic, video_area, prefix },
         );
     }
-    drop_indicator(app, ui, video_area, which, &t);
+    fps_indicator(app, ui, video_area, which, rate, &t);
     if cinema {
         ui.set_clip_rect(saved_clip);
         return;
@@ -493,6 +546,8 @@ fn controls_row(
         row1.max.x - 90.0
     } else if stacked_controls {
         zr.max.x + 6.0
+    } else if which == Which::Program {
+        row1.max.x - 216.0
     } else {
         row1.max.x - 196.0
     };
@@ -513,9 +568,32 @@ fn controls_row(
         }
     });
     let wr = Rect::from_min_size(pos2(rr.max.x + 6.0, settings_y + 1.0), vec2(22.0, 22.0));
-    let wresp = ui.interact(wr, egui::Id::unique((prefix, "wrench")), Sense::click());
+    let wresp = ui.interact(wr, egui::Id::unique((prefix, "wrench")), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
     icons::paint(ui.painter(), wr.shrink(4.0), Icon::Wrench, if wresp.hovered() { t.tab_text_active } else { t.icon });
     app.auto.add(&format!("{prefix}.settings"), wr, "Settings");
+    if which == Which::Program {
+        let br = Rect::from_min_size(pos2(wr.max.x + 6.0, settings_y + 1.0), vec2(22.0, 22.0));
+        let tip = if app.ui.global_bypass {
+            tl!("Enable Color Grades & Effects (Bypassed)")
+        } else {
+            tl!("Bypass Color Grades & Effects")
+        };
+        let bresp = ui
+            .interact(br, egui::Id::unique((prefix, "global-bypass")), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(tip);
+        bresp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tip));
+        if app.ui.global_bypass {
+            ui.painter().rect_filled(br, 4.0, Color32::from_rgb(232, 106, 56).gamma_multiply(0.18));
+        } else if bresp.hovered() {
+            ui.painter().rect_filled(br, 4.0, Color32::from_white_alpha(18));
+        }
+        paint_bypass_icon(ui.painter(), br.shrink(2.0), app.ui.global_bypass, bresp.hovered(), &t);
+        app.auto.add("program.globalBypass", br, "Bypass Color Grades & Effects");
+        if bresp.clicked() {
+            let _ = crate::menus::invoke(app, &ctx, "view.toggleGlobalBypass", json!({}));
+        }
+    }
     // stays open while options are toggled; a choice (a display mode, a resolution, an action) or a
     // click outside closes it
     egui::Popup::menu(&wresp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
@@ -709,7 +787,7 @@ fn eyedropper(app: &mut FilmcraftApp, ui: &mut egui::Ui, resp: &egui::Response, 
         let frame = rate.frame_at(time);
         // a revision of its own, so this render never replaces what the monitor caches
         let revision = app.session.revision ^ 0x5eed_d70b_0000_0000 ^ armed.clip.rotate_left(17) ^ armed.effect as u64;
-        let key = FrameKey { target, frame, size: (EYEDROPPER_SCALE * 1000.0) as u32, revision, draft: false };
+        let key = FrameKey { target, frame, size: (EYEDROPPER_SCALE * 1000.0) as u32, revision, draft: false, bypass: app.ui.global_bypass };
         ctx.data_mut(|d| d.insert_temp(pending_id, EyedropperPick { uv, key, time: rate.tick_of(frame), project: std::sync::Arc::new(project) }));
     }
     let Some(pick) = ctx.data(|d| d.get_temp::<EyedropperPick>(pending_id)) else { return };
@@ -1423,5 +1501,21 @@ mod tests {
     fn eyedropper_rejects_empty_and_truncated_frames() {
         assert_eq!(sample_rgb(&Rgba { w: 0, h: 0, px: vec![] }, (0.5, 0.5)), None);
         assert_eq!(sample_rgb(&Rgba { w: 4, h: 4, px: vec![0; 10] }, (0.5, 0.5)), None);
+    }
+
+    #[test]
+    fn global_bypass_toggles_state_and_menu_checkmark() {
+        let mut app = crate::FilmcraftApp::new(filmcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        assert!(!app.ui.global_bypass);
+        crate::menus::invoke(&mut app, &ctx, "view.toggleGlobalBypass", json!({})).expect("toggle on");
+        assert!(app.ui.global_bypass);
+        let checked = crate::menus::menu_items(&app)
+            .into_iter()
+            .find(|it| it.id == "view.toggleGlobalBypass")
+            .and_then(|it| it.checked);
+        assert_eq!(checked, Some(true));
+        crate::menus::invoke(&mut app, &ctx, "view.toggleGlobalBypass", json!({})).expect("toggle off");
+        assert!(!app.ui.global_bypass);
     }
 }

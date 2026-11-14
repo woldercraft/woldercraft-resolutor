@@ -30,15 +30,16 @@ pub struct BridgeClient {
 }
 
 impl BridgeClient {
-    /// `addr` such as `127.0.0.1:9876` (loopback only). Reads `FILMCRAFT_CONTROL_TOKEN`
-    /// from the environment; the desktop app requires this credential on every request.
+    /// `addr` such as `127.0.0.1:9876` (loopback only). Reads `RESOLUTOR_CONTROL_TOKEN` (or
+    /// `FILMCRAFT_CONTROL_TOKEN`) from the environment, falling back to `<data_dir>/control_token`.
     pub fn new(addr: impl Into<String>) -> Result<Self, AutomationError> {
         let addr = addr.into();
         let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&addr);
         if !matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1") {
             return Err(AutomationError::BadRequest(format!("bridge address must be loopback, got `{addr}`")));
         }
-        Ok(Self { addr, token: std::env::var("FILMCRAFT_CONTROL_TOKEN").ok(), idle: Mutex::new(Vec::new()), next_id: AtomicU64::new(1) })
+        let token = env_token();
+        Ok(Self { addr, token, idle: Mutex::new(Vec::new()), next_id: AtomicU64::new(1) })
     }
 
     /// Run engine command `id` in the app. A blocking export (`file.exportMedia` with
@@ -88,7 +89,8 @@ impl BridgeClient {
                 None => self.connect().await?,
             };
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let line = format!("{}\n", json!({"id": id, "token": self.token, "method": method, "params": params}));
+            let token = self.token.clone().or_else(read_token_file);
+            let line = format!("{}\n", json!({"id": id, "token": token, "method": method, "params": params}));
             let res: Result<Value, AutomationError> = async {
                 conn.1.write_all(line.as_bytes()).await.map_err(|e| AutomationError::Bridge(e.to_string()))?;
                 let mut buf = String::new();
@@ -124,12 +126,37 @@ impl BridgeClient {
             .await
             .map_err(|_| AutomationError::Bridge(format!("timed out connecting to {}", self.addr)))?
             .map_err(|e| AutomationError::Bridge(format!(
-                "cannot connect to {} ({e}); start the app with `filmcraft --control <port>` and set FILMCRAFT_CONTROL_TOKEN to the same 64-hex-character value on both sides (see docs/control-protocol.md)",
+                "cannot connect to {} ({e}); start the app with `resolutor --control <port>` (or enable AI Integration in Preferences) and set RESOLUTOR_CONTROL_TOKEN / FILMCRAFT_CONTROL_TOKEN to the same 64-hex-character value on both sides (see docs/control-protocol.md)",
                 self.addr
             )))?;
         let (r, w) = s.into_split();
         Ok((BufReader::new(r), w))
     }
+}
+
+fn env_token() -> Option<String> {
+    std::env::var("RESOLUTOR_CONTROL_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("FILMCRAFT_CONTROL_TOKEN").ok().filter(|s| !s.is_empty()))
+}
+
+fn read_token_file() -> Option<String> {
+    let env_path = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
+    let data_dir = env_path("RESOLUTOR_DATA_DIR")
+        .or_else(|| env_path("FILMCRAFT_DATA_DIR"))
+        .or_else(|| {
+            if cfg!(target_os = "macos") {
+                env_path("HOME").map(|h| h.join("Library/Application Support/Resolutor"))
+            } else if cfg!(windows) {
+                env_path("APPDATA").map(|h| h.join("Resolutor"))
+            } else {
+                env_path("XDG_DATA_HOME").map(|d| d.join("resolutor")).or_else(|| env_path("HOME").map(|h| h.join(".local/share/resolutor")))
+            }
+        })?;
+    let raw = std::fs::read_to_string(data_dir.join("control_token")).ok()?;
+    let trimmed = raw.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 #[cfg(test)]

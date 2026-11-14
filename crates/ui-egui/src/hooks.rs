@@ -98,6 +98,23 @@ pub struct HostHooks {
     pub clipboard_media: Option<Box<dyn FnMut() -> Option<ClipboardMedia>>>,
     /// Release freed process heap memory back to the operating system (e.g. malloc_trim on Linux).
     pub trim_heap: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Start, stop, or reconfigure the local AI integration control server without restarting.
+    pub configure_ai_control: Option<Box<dyn FnMut(bool, u16) -> (Option<Receiver<crate::ControlRequest>>, AiControlStatus)>>,
+    /// Current runtime status of the local AI integration control server.
+    pub ai_control_status: Option<Box<dyn Fn() -> AiControlStatus>>,
+    /// Regenerate the local AI integration token on disk and restart the server if active.
+    pub regenerate_ai_token: Option<Box<dyn FnMut() -> (Option<Receiver<crate::ControlRequest>>, AiControlStatus)>>,
+}
+
+/// Runtime status of the local AI integration control server (`127.0.0.1`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum AiControlStatus {
+    #[default]
+    Disabled,
+    Listening {
+        port: u16,
+    },
+    Error(String),
 }
 
 /// What [`HostHooks::clipboard_media`] found on the system clipboard.

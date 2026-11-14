@@ -46,9 +46,14 @@ fn hash_of(v: impl Hash) -> u64 {
     h.finish()
 }
 
-/// The active sequence's frame `frame` for the scopes: the monitor picture (¼ resolution, from
-/// the frame workers at priority `prio`) or, for Rec. 2100 scopes of an HDR sequence, a small
-/// working-space render. While a new frame renders the last one stays.
+pub(crate) fn gpu_scope_key(seq_id: filmcraft_project::ItemId, frame: i64, rev: u64, bypass: bool) -> u64 {
+    hash_of((seq_id.0, frame, rev, false, bypass))
+}
+
+/// The active sequence's frame `frame` for the scopes: when GPU compositing is active on SDR
+/// scopes, feeds directly from a tiny GPU downsampled async readback (zero CPU double-render).
+/// For Rec. 2100 HDR scopes or when GPU is unavailable, falls back to working-space / CPU render
+/// with playback throttling. While a new frame renders the last one stays.
 pub fn frame_signal(app: &mut FilmcraftApp, ctx: &egui::Context, slot: &str, frame: i64, st: &ScopesState, prio: u32) -> Option<ScopeFrame> {
     let seq_id = app.session.state.active_sequence?;
     let q = app.session.active_sequence()?;
@@ -59,18 +64,59 @@ pub fn frame_signal(app: &mut FilmcraftApp, ctx: &egui::Context, slot: &str, fra
     let rev = app.session.revision;
     let id = egui::Id::unique(("scope-signal", slot));
     let cached: Option<(u64, Arc<Signal>, bool)> = ctx.data(|d| d.get_temp(id));
-    let key = hash_of((seq_id.0, frame, rev, pq));
+    let bypass = app.ui.global_bypass;
+    let key = hash_of((seq_id.0, frame, rev, pq, bypass));
     if let Some((k, s, p)) = &cached
         && *k == key
     {
         return Some(ScopeFrame { signal: s.clone(), key, pq: *p, space });
     }
+    let playing = app.playback.playing;
+    let program_frame = rate.frame_at(app.session.playhead()).max(0);
+    if !pq
+        && (slot == "program" || frame == program_frame)
+        && let Some(g) = app.gpu.as_mut()
+    {
+        g.scope_last_requested = Some(web_time::Instant::now());
+        if let Some((gpu_tag, w, h, px)) = g.compositor.poll_scope_frame() {
+            let gpu_tag_id = egui::Id::unique(("scope-gpu-tag", slot));
+            let last_gpu_tag: Option<u64> = ctx.data(|d| d.get_temp(gpu_tag_id));
+            if gpu_tag == key || (playing && last_gpu_tag != Some(gpu_tag)) {
+                let s = Arc::new(Signal::from_rgba8(w as usize, h as usize, &px));
+                let out_key = if gpu_tag == key { key } else { gpu_tag };
+                ctx.data_mut(|d| {
+                    d.insert_temp(gpu_tag_id, gpu_tag);
+                    d.insert_temp(id, (out_key, s.clone(), false));
+                });
+                return Some(ScopeFrame { signal: s, key: out_key, pq: false, space });
+            }
+        }
+        let gpu_has_current = g.last_key.is_some_and(|lk| matches!(lk.target, Target::SequencePlan(id2, _) if id2 == seq_id) && lk.frame == frame && lk.revision == rev);
+        if gpu_has_current && !g.compositor.has_scope_tag(key) {
+            g.compositor.capture_scope_now(key);
+        }
+        if g.compositor.scope_pending() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(8));
+        }
+        return cached.filter(|c| c.2 == pq).map(|(k, s, p)| ScopeFrame { signal: s, key: k, pq: p, space });
+    }
+    let throttle_id = egui::Id::unique(("scope-throttle", slot));
+    let last_req: Option<web_time::Instant> = ctx.data(|d| d.get_temp(throttle_id));
+    let allow_req = !playing || last_req.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(120));
     let fresh = if pq {
-        filmcraft_engine::scopes::scope_signal(&app.session, rate.tick_of(frame), 0.125, true)
+        if allow_req {
+            ctx.data_mut(|d| d.insert_temp(throttle_id, web_time::Instant::now()));
+            filmcraft_engine::scopes::scope_signal(&app.session, rate.tick_of(frame), 0.125, true)
+        } else {
+            None
+        }
     } else {
-        let fkey = FrameKey { target: Target::Sequence(seq_id), frame, size: 250, revision: rev, draft: false };
-        let project = app.session.project.clone();
-        app.frames.request(fkey, rate.tick_of(frame), 0.25, &project, prio);
+        let fkey = FrameKey { target: Target::Sequence(seq_id), frame, size: 250, revision: rev, draft: false, bypass };
+        if allow_req {
+            ctx.data_mut(|d| d.insert_temp(throttle_id, web_time::Instant::now()));
+            let project = app.session.project.clone();
+            app.frames.request(fkey, rate.tick_of(frame), 0.25, &project, if playing { prio.max(80) } else { prio });
+        }
         app.frames.get(&fkey).map(|img| Signal::from_rgba8(img.w, img.h, &img.px))
     };
     match fresh {
