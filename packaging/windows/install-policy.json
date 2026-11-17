@@ -1,6 +1,6 @@
 {
   "id": "filmcraft",
-  "name": "FilmCraft",
+  "name": "Resolutor",
   "upgradeCode": "31E6FB14-9DBC-41DD-B24B-26B71FB31B62",
   "sources": [
     "filmcraft.wxs"
@@ -13,12 +13,12 @@
   "payloads": [
     "NOTICE",
     "filmcraft-cli.exe",
-    "filmcraft.exe"
+    "resolutor.exe"
   ],
   "registry": [
     [
       "-1",
-      "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\filmcraft.exe",
+      "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\resolutor.exe",
       "",
       "[#FilmcraftExe]"
     ]
