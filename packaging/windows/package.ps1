@@ -76,8 +76,9 @@ function Get-PeHeader([string] $Path) {
   $pe = [BitConverter]::ToInt32($bytes, 0x3C)
   return @{ Machine = [BitConverter]::ToUInt16($bytes, $pe + 4); Subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x5C) }
 }
+$AppExe = if (Test-Path (Join-Path $Bin 'resolutor.exe')) { 'resolutor.exe' } else { 'filmcraft.exe' }
 $Machine = switch ($Arch) { 'x64' { 0x8664 } 'x86' { 0x14C } 'arm64' { 0xAA64 } }
-foreach ($check in @(@('filmcraft.exe', 2), @('filmcraft-cli.exe', 3))) {
+foreach ($check in @(@($AppExe, 2), @('filmcraft-cli.exe', 3))) {
   $h = Get-PeHeader (Join-Path $Bin $check[0])
   if ($h.Machine -ne $Machine) { throw "$($check[0]) is for machine 0x$('{0:X}' -f $h.Machine), expected 0x$('{0:X}' -f $Machine) ($Arch)" }
   if ($h.Subsystem -ne $check[1]) { throw "$($check[0]) has PE subsystem $($h.Subsystem), expected $($check[1])" }
@@ -88,7 +89,8 @@ Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 # Dependency font notices are required even without optional craft-fonts.
 Copy-Item -LiteralPath (Join-Path $Root 'NOTICE') -Destination $Stage
-Copy-Item (Join-Path $Bin 'filmcraft.exe'), (Join-Path $Bin 'filmcraft-cli.exe') $Stage
+Copy-Item (Join-Path $Bin $AppExe) (Join-Path $Stage 'filmcraft.exe')
+Copy-Item (Join-Path $Bin 'filmcraft-cli.exe') $Stage
 
 & (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'filmcraft.exe') (Join-Path $Stage 'filmcraft-cli.exe')
 
