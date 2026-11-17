@@ -145,11 +145,20 @@ impl FilmcraftApp {
             }
         }
         if prev.is_none() && !self.workspace_restored {
-            // reopen the workspace in use when the app last closed
-            self.workspace_restored = true;
+            // reopen the workspace or header preset in use when the app last closed
             if let Some(w) = dock::find(&self.workspaces, &self.workspaces.current) {
                 self.set_workspace(&w);
             }
+            if let Some(preset) = dock::find_preset(&self.header_presets, &self.header_presets.current) {
+                self.apply_header_preset(&preset);
+            }
+            self.workspace_restored = true;
+            let save_key = if self.ui.active_preset.is_empty() {
+                self.ui.workspace.clone()
+            } else {
+                format!("preset:{}", self.ui.active_preset)
+            };
+            self.last_saved_dock = Some((save_key, self.ui.dock.clone()));
         }
         self.applied_prefs = Some(p);
     }

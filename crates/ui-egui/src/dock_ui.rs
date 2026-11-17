@@ -498,6 +498,10 @@ fn dock_style(ui: &egui::Ui, t: &Tokens) -> DockStyle {
     style.float_group_label = "Undock Panel Group".into();
     style.close_group_label = "Close Panel Group".into();
     style.tab_height = t.tab_h;
+    // Keep panel tab labels at their full natural width; tabs that don't fit move to the
+    // overflow ("…") menu instead of shrinking to truncated prefixes like "Pro… Nav…".
+    // Capped at 4096.0 to satisfy craft_ui::docking::DockStyle::valid().
+    style.min_tab_width = 4096.0;
     style.gap = t.gap;
     style.background = t.panel_bg;
     style.tab_background = t.tab_bg;
@@ -563,6 +567,14 @@ impl DockContent<PanelKind> for FilmContent<'_> {
     }
 
     fn logical_label(&self, panel: &PanelKind) -> String {
+        if let PanelKind::Custom(id) = panel {
+            return self
+                .app
+                .custom_panels
+                .title(*id)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{} {}", crate::i18n::t("Custom Panel"), id + 1));
+        }
         crate::i18n::t(panel.title()).to_string()
     }
 
@@ -604,6 +616,15 @@ impl DockContent<PanelKind> for FilmContent<'_> {
         app.auto.add_response(&format!("panel.tabMenu.{}.restoreWorkspace", panel.id()), &response, "Restore Workspace");
         if response.clicked() {
             self.restore_workspace = true;
+            close = true;
+        }
+        if let PanelKind::Custom(id) = panel {
+            if ui.button(tl!("Configure Panel…")).clicked() {
+                app.ui.custom_panel_dialog = Some(panels::custom_panels::CustomPanelDialog { selected: Some(*id) });
+                close = true;
+            }
+        } else if ui.button(tl!("Custom Panels…")).clicked() {
+            app.ui.custom_panel_dialog = Some(panels::custom_panels::CustomPanelDialog::default());
             close = true;
         }
         close |= panels::panel_items(app, ui, *panel);

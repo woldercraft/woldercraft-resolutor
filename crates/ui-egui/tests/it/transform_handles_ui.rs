@@ -794,3 +794,32 @@ fn corner_pin_handles_move_its_corners() {
     let after: Vec<(f64, f64)> = ["upper_left", "upper_right", "lower_right", "lower_left"].iter().map(|p| d.point(clip, "corner_pin", p)).collect();
     assert_eq!(after, pins);
 }
+
+#[test]
+fn viewer_overlay_selector_shows_transform_and_crop_for_selected_clip() {
+    let mut d = Driver::demo();
+    let (clip, _) = d.first_clip();
+    assert!(d.find("program.transform.box").is_none(), "overlay starts disabled");
+
+    // Enabling the Resolve-style overlay button shows Transform handles for the selected timeline clip
+    d.click("program.overlay.toggle");
+    d.frames(2);
+    assert!(d.find("program.transform.box").is_some(), "Transform box appears for the selected clip");
+
+    // Switching to Crop via the dropdown shows Crop handles and dragging applies/updates Crop
+    d.click("program.overlay.mode");
+    d.frames(2);
+    d.click("program.overlay.mode.crop");
+    d.frames(2);
+    assert!(d.find("program.crop.box").is_some(), "Crop box appears");
+    d.drag("program.crop.handle.7", 40.0, 0.0);
+    d.frames(2);
+    let item = d.app().session.active_sequence().unwrap().find_item(ClipId(clip)).unwrap().1;
+    let crop = item.effects.iter().find(|e| e.effect == "crop").expect("dragging a crop handle applies Crop");
+    assert!(crop.f64_at("left", filmcraft_time::Tick::ZERO) > 1.0, "left crop percentage increased");
+
+    // Toggling off hides the overlay
+    d.click("program.overlay.toggle");
+    d.frames(2);
+    assert!(d.find("program.crop.box").is_none(), "overlay hides when toggled off");
+}

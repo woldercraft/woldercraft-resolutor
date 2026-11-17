@@ -282,8 +282,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 } else {
                     std::mem::take(&mut after_fixed)
                 };
-                let key = format!("{}:{}", clip.0, idx);
-                let open = !app.ui.collapsed_fx.contains(&key);
+                let key = format!("ec:{}:{}", clip.0, idx);
+                let open = app.ui.expanded_fx.contains(&key);
                 let selected = app.session.state.selected_effect.as_ref().is_some_and(|s| s.clip == clip && s.index(&it.effects) == Some(idx));
                 let (r, resp) = bui.allocate_exact_size(vec2(body.width(), ROW_H), Sense::click());
                 if selected {
@@ -325,9 +325,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 app.auto.add(&format!("effectControls.effect.{}", e.effect), r, def.name);
                 if twresp.clicked() {
                     if open {
-                        app.ui.collapsed_fx.push(key.clone());
+                        app.ui.expanded_fx.retain(|k| *k != key);
                     } else {
-                        app.ui.collapsed_fx.retain(|k| *k != key);
+                        app.ui.expanded_fx.push(key.clone());
                     }
                 } else if resp.clicked() && !fxresp.clicked() && !rresp.clicked() {
                     actions.push(("effects.select".into(), json!({"clip": clip.0, "effect": idx})));
@@ -1042,14 +1042,14 @@ pub fn lumetri_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         for g in groups {
             let key = format!("lumetri:{g}");
-            let open = !app.ui.collapsed_fx.contains(&key);
+            let open = app.ui.expanded_fx.contains(&key);
             let (resp, now_open) = crate::widgets::section_header(ui, egui::Id::unique(&key), crate::i18n::t(g), open, &t, true);
             app.auto.add(&format!("lumetri.section.{g}"), resp.rect, g);
             if now_open != open {
                 if now_open {
-                    app.ui.collapsed_fx.retain(|k| *k != key);
+                    app.ui.expanded_fx.push(key.clone());
                 } else {
-                    app.ui.collapsed_fx.push(key.clone());
+                    app.ui.expanded_fx.retain(|k| *k != key);
                 }
             }
             if !now_open {
@@ -1289,7 +1289,7 @@ fn inspector_added_effect_card(
         return;
     }
     let key = format!("props:fx:{}:{}", clip.0, idx);
-    let open = !app.ui.collapsed_fx.contains(&key);
+    let open = app.ui.expanded_fx.contains(&key);
     let (hr, hresp) = bui.allocate_exact_size(vec2(bui.available_width(), 28.0), Sense::click());
     bui.painter().rect_filled(hr, 4.0, if hresp.hovered() { t.hover } else { t.tl_header_bg });
     icons::paint(
@@ -1328,9 +1328,9 @@ fn inspector_added_effect_card(
 
     if hresp.clicked() && !en_resp.hovered() && !rm_resp.hovered() && !rs_resp.hovered() {
         if open {
-            app.ui.collapsed_fx.push(key);
+            app.ui.expanded_fx.retain(|k| *k != key);
         } else {
-            app.ui.collapsed_fx.retain(|k| *k != key);
+            app.ui.expanded_fx.push(key);
         }
     }
 
@@ -1420,7 +1420,7 @@ fn inspector_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, active
      -> (bool, bool) {
         ui.add_space(4.0);
         let key = format!("props:{name}");
-        let open = !app.ui.collapsed_fx.contains(&key);
+        let open = app.ui.expanded_fx.contains(&key);
         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
         ui.painter().rect_filled(r, 4.0, Color32::from_rgba_unmultiplied(255, 255, 255, 10));
         ui.painter().line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, t.separator));
@@ -1454,9 +1454,9 @@ fn inspector_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, active
         }
         if resp.clicked() && !toggle_hovered && !reset_hovered {
             if open {
-                app.ui.collapsed_fx.push(key);
+                app.ui.expanded_fx.retain(|k| *k != key);
             } else {
-                app.ui.collapsed_fx.retain(|k| *k != key);
+                app.ui.expanded_fx.push(key);
             }
         }
         (open, toggle_clicked)

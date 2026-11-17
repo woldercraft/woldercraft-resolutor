@@ -28,6 +28,18 @@ impl FilmcraftApp {
         let frames = Arc::new(FrameServer::new(session.media.clone(), session.services.clone(), session.previews.clone(), FrameServer::default_workers()));
         let workspaces =
             session.prefs_path.as_ref().and_then(|p| p.parent()).map(|d| dock::WorkspacePrefs::load(&d.join(dock::WORKSPACES_FILE))).unwrap_or_default();
+        let header_presets = session
+            .prefs_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| dock::WorkspacePrefs::load(&d.join(dock::HEADER_PRESETS_FILE)))
+            .unwrap_or_default();
+        let custom_panels = session
+            .prefs_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| panels::custom_panels::CustomPanelStore::load(&d.join(panels::custom_panels::CUSTOM_PANELS_FILE)))
+            .unwrap_or_default();
         let language = i18n::Language::parse(&session.prefs.general.interface_language).unwrap_or_default();
         let ime_document_epoch = session.document_epoch;
         let ime_active_sequence = session.state.active_sequence;
@@ -128,6 +140,8 @@ impl FilmcraftApp {
             last_saved_dock: None,
             dock_dirty_since: None,
             workspaces,
+            header_presets,
+            custom_panels,
             menu_workspaces: Default::default(),
         }
     }

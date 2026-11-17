@@ -3885,3 +3885,49 @@
 	Global	Global
 	Reset this wheel (or double-click)	Restablecer esta rueda (o doble clic)
 	Drag horizontally to adjust luminance (Shift = fine, Double-click = reset)	Arrastra horizontalmente para ajustar luminancia (Shift = preciso, Doble clic = restablecer)
+
+# Independent header layout presets.
+	Layout Presets	Presets
+	No saved presets	Sin presets guardados
+	Reset Preset	Restablecer preset
+	Save Changes to this Preset	Guardar cambios en este preset
+	Save as New Preset…	Guardar como nuevo preset…
+	Edit Presets…	Editar presets…
+	New Preset	Nuevo preset
+	Edit Presets	Editar presets
+	Untitled Preset	Preset sin título
+
+# User-defined composite custom panels.
+	Custom Panel	Panel personalizado
+	Custom Panels	Paneles personalizados
+	Custom Panels…	Paneles personalizados…
+	Edit Custom Panels…	Editar paneles personalizados…
+	Empty custom panel	Panel personalizado vacío
+	Configure Panel…	Configurar panel…
+	Saved Custom Panels	Paneles personalizados guardados
+	No custom panels yet	Aún no hay paneles personalizados
+	+ New Panel	+ Nuevo panel
+	Create a custom panel on the left to configure its panels.	Crea un panel personalizado a la izquierda para configurar sus paneles.
+	Layout:	Diseño:
+	Tabs	Pestañas
+	Vertical Split	División vertical
+	Horizontal Split	División horizontal
+	Included Panels	Paneles incluidos
+	Add panels from the list below	Añade paneles desde la lista de abajo
+	Add Built-in Panel	Añadir panel
+	Open in Workspace	Abrir en el espacio
+	Keyboard Customization	Personalización del teclado
+	All Commands	Todos los comandos
+	Assigned	Asignados
+	Unassigned	Sin asignar
+	Conflicts	Conflictos
+	Reset to “{active}”	Restablecido a “{active}”
+	Modifiers:	Modificadores:
+	Categories	Categorías
+	Removed {key} from {command}	Se quitó {key} de {command}
+	Key: {key}	Tecla: {key}
+	Filter commands by selected key	Filtrar comandos por la tecla seleccionada
+	Remove shortcut	Quitar atajo
+	Effect Overlay	Superposición de efectos
+	On-Screen Controls ({mode})	Controles en pantalla ({mode})
+	On-Screen Controls Mode	Modo de controles en pantalla

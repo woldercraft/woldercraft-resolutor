@@ -164,7 +164,7 @@ impl FilmcraftApp {
                     "projects" => self.ui.mode = state::Mode::Import,
                     "edit" => {
                         self.ui.mode = state::Mode::Edit;
-                        if matches!(self.ui.workspace.as_str(), "Color" | "Effects") {
+                        if matches!(self.ui.workspace.as_str(), "Color" | "Effects") || !self.ui.active_preset.is_empty() {
                             self.set_workspace("Editing");
                         }
                     }

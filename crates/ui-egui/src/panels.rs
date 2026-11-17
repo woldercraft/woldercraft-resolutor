@@ -9,6 +9,7 @@ pub mod color_clips;
 pub mod color_dialogs;
 pub mod color_groups;
 pub mod color_nodes;
+pub mod custom_panels;
 pub mod dialogs;
 pub mod effect_controls;
 pub mod effects;
@@ -189,6 +190,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect)
         PanelKind::VfxNodes => vfx_nodes::show(app, ui, rect),
         PanelKind::ColorClips => color_clips::show(app, ui, rect),
         PanelKind::ColorGroups => color_groups::show(app, ui, rect),
+        PanelKind::Custom(id) => custom_panels::show_custom_panel(app, ui, rect, id),
         other => crate::dock::placeholder(ui, rect, &app.tokens, &tlf!("{panel} — coming in a later milestone", panel = crate::i18n::t(other.title()))),
     }
 }

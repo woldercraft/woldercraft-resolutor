@@ -208,6 +208,13 @@ fn delete_clears_timeline_clips_and_project_items() {
 fn compat_presets_map_other_editors() {
     let mut s = Session::default();
     with_ui_commands(&mut s);
+    s.execute("shortcuts.loadPreset", json!({"name": "DaVinci Resolve"})).unwrap();
+    assert_eq!(s.shortcuts.primary("tool.razor").as_deref(), Some("B"));
+    assert_eq!(s.shortcuts.primary("sequence.addEdit").as_deref(), Some("Cmd+B"));
+    assert_eq!(s.shortcuts.primary("sequence.snap").as_deref(), Some("N"));
+    assert_eq!(s.shortcuts.primary("clip.enable").as_deref(), Some("D"));
+    assert_eq!(s.shortcuts.primary("source.insert").as_deref(), Some("F9"));
+    assert_eq!(s.shortcuts.primary("source.overwrite").as_deref(), Some("F10"));
     s.execute("shortcuts.loadPreset", json!({"name": "Premiere Pro Compatible"})).unwrap();
     assert_eq!(s.shortcuts.primary("markers.clearIn").as_deref(), Some("Alt+I"));
     assert_eq!(s.shortcuts.primary("edit.clear").as_deref(), Some("Delete"));

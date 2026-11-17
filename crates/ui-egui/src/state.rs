@@ -317,6 +317,36 @@ impl DisplayMode {
     }
 }
 
+/// DaVinci Resolve-style On-Screen Controls mode for the Program monitor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ViewerOverlayMode {
+    #[default]
+    Transform,
+    Crop,
+    EffectOverlay,
+}
+
+impl ViewerOverlayMode {
+    pub const ALL: [Self; 3] = [Self::Transform, Self::Crop, Self::EffectOverlay];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Transform => "Transform",
+            Self::Crop => "Crop",
+            Self::EffectOverlay => "Effect Overlay",
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Transform => "transform",
+            Self::Crop => "crop",
+            Self::EffectOverlay => "effectOverlay",
+        }
+    }
+}
+
 /// Monitor guide (frame pixels): `vertical` = a line at x = `position`.
 pub type Guide = filmcraft_engine::autosave::Guide;
 
@@ -353,6 +383,10 @@ pub struct MonitorView {
     /// Snap in Program Monitor: graphic drags snap to guides, the frame edges and centre.
     pub snap: bool,
     pub guides: Vec<Guide>,
+    /// Viewer On-Screen Controls toggle (Resolve-style `[box] ⌄` button).
+    pub viewer_overlay_enabled: bool,
+    /// Active Viewer On-Screen Controls mode.
+    pub viewer_overlay_mode: ViewerOverlayMode,
 }
 
 impl Default for MonitorView {
@@ -378,6 +412,8 @@ impl Default for MonitorView {
             lock_guides: false,
             snap: true,
             guides: Vec::new(),
+            viewer_overlay_enabled: false,
+            viewer_overlay_mode: ViewerOverlayMode::Transform,
         }
     }
 }
@@ -692,6 +728,15 @@ pub struct UiState {
     /// Open Window ▸ Workspaces dialog.
     #[serde(default)]
     pub workspace_dialog: Option<WorkspaceDialog>,
+    /// Active top-bar layout preset (empty when none is selected).
+    #[serde(default)]
+    pub active_preset: String,
+    /// Open top-bar layout presets dialog (Save as New Preset / Edit Presets).
+    #[serde(default)]
+    pub preset_dialog: Option<WorkspaceDialog>,
+    /// Open Custom Panels editor dialog.
+    #[serde(default)]
+    pub custom_panel_dialog: Option<crate::panels::custom_panels::CustomPanelDialog>,
     /// Edit / Clip / File menu dialog (Paste Attributes, Make Subclip, Frame Hold Options, …;
     /// open when Some). See `panels::clip_dialogs`.
     #[serde(default)]
@@ -873,13 +918,7 @@ pub struct ProxyDraft {
 
 impl Default for ProxyDraft {
     fn default() -> Self {
-        Self {
-            items: Vec::new(),
-            preset: String::new(),
-            destination: String::new(),
-            render_buffer: true,
-            concurrency: 2,
-        }
+        Self { items: Vec::new(), preset: String::new(), destination: String::new(), render_buffer: true, concurrency: 2 }
     }
 }
 
@@ -1215,6 +1254,9 @@ impl Default for UiState {
             guide_dialog: None,
             text_props_dialog: None,
             workspace_dialog: None,
+            active_preset: String::new(),
+            preset_dialog: None,
+            custom_panel_dialog: None,
             clip_dialog: None,
             extras: Default::default(),
             gfx_templates: Default::default(),

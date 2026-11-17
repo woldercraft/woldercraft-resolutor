@@ -55,6 +55,7 @@ pub enum PanelKind {
     ColorCreative,
     ColorVignette,
     VfxNodes,
+    Custom(u8),
 }
 
 impl PanelKind {
@@ -146,13 +147,22 @@ impl PanelKind {
             PanelKind::ColorCreative => "Creative & LUTs",
             PanelKind::ColorVignette => "Vignette",
             PanelKind::VfxNodes => "VFX Nodes",
+            PanelKind::Custom(_) => "Custom Panel",
         }
     }
     pub fn id(self) -> String {
-        format!("{self:?}")
+        match self {
+            Self::Custom(n) => format!("Custom{n}"),
+            _ => format!("{self:?}"),
+        }
     }
     pub fn from_name(s: &str) -> Option<PanelKind> {
         let n = s.to_ascii_lowercase().replace([' ', '_', '-'], "");
+        if let Some(rest) = n.strip_prefix("custom")
+            && let Ok(slot) = rest.parse::<u8>()
+        {
+            return Some(PanelKind::Custom(slot));
+        }
         if n == "colorgrade" || n == "lumetricolor" {
             return Some(PanelKind::LumetriColor);
         }
@@ -198,6 +208,9 @@ pub const WORKSPACES: [&str; 10] =
 
 /// The user's workspaces file, beside `preferences.json` in the data directory.
 pub const WORKSPACES_FILE: &str = "workspaces.json";
+
+/// Independent user layout presets (top-bar preset menu), beside `preferences.json`.
+pub const HEADER_PRESETS_FILE: &str = "layout_presets.json";
 
 /// Window ▸ Workspaces: the user's own workspaces and saved changes to the built-in ones, and the
 /// workspace in use (reopened at launch).
@@ -305,6 +318,31 @@ pub fn saved_workspace(prefs: &WorkspacePrefs, name: &str) -> Workspace {
 /// The saved layout of a workspace (see [`saved_workspace`]).
 pub fn saved_docking(prefs: &WorkspacePrefs, name: &str) -> Layout {
     saved_workspace(prefs, name).layout
+}
+
+/// Independent user layout presets in alphabetical order (empty by default, no built-ins).
+pub fn preset_names(prefs: &WorkspacePrefs) -> Vec<String> {
+    let mut v: Vec<String> = prefs.saved.iter().map(|s| s.name.clone()).collect();
+    v.sort_by_key(|n| n.to_lowercase());
+    v.dedup();
+    v
+}
+
+/// Find a user layout preset by name (case- and space-insensitive).
+pub fn find_preset(prefs: &WorkspacePrefs, query: &str) -> Option<String> {
+    preset_names(prefs).into_iter().find(|n| slug(n) == slug(query))
+}
+
+/// Load a saved user layout preset if it exists and validates.
+pub fn saved_preset_docking(prefs: &WorkspacePrefs, name: &str) -> Option<Layout> {
+    let saved = prefs.saved.iter().find(|saved| saved.name == name)?;
+    let workspace = if saved.workspace.is_null() {
+        Workspace::new(legacy::layout(&saved.layout, &saved.floating)?)
+    } else {
+        serde_json::from_value::<Workspace>(saved.workspace.clone()).ok()?
+    };
+    workspace.validate().ok()?;
+    Some(workspace.layout)
 }
 
 /// The frame tree and floating groups FilmCraft wrote before its workspaces were craft-ui
@@ -1205,6 +1243,23 @@ mod tests {
             second: Box::new(effects.root),
         };
         assert_eq!(read(&split), (None, vec![]));
+    }
+
+    #[test]
+    fn header_presets_start_empty_and_remain_independent() {
+        let empty = WorkspacePrefs::default();
+        assert!(preset_names(&empty).is_empty());
+        assert!(find_preset(&empty, "Editing").is_none());
+        assert!(saved_preset_docking(&empty, "Editing").is_none());
+
+        let layout = workspace("Color");
+        let prefs = WorkspacePrefs {
+            saved: vec![SavedWorkspace::new("Multicámara", &layout).unwrap()],
+            current: "Multicámara".into(),
+        };
+        assert_eq!(preset_names(&prefs), vec!["Multicámara"]);
+        assert_eq!(find_preset(&prefs, "multicámara").as_deref(), Some("Multicámara"));
+        assert_eq!(saved_preset_docking(&prefs, "Multicámara"), Some(layout));
     }
 }
 

@@ -192,6 +192,14 @@ fn draw_picture(app: &mut FilmcraftApp, ui: &mut egui::Ui, which: Which, mv: &cr
     }
 }
 
+fn format_fps_number(fps: f32) -> String {
+    if !fps.is_finite() {
+        return String::from("0");
+    }
+    let rounded = fps.round();
+    if (fps - rounded).abs() < 0.05 { format!("{rounded:.0}") } else { format!("{fps:.2}").trim_end_matches('0').trim_end_matches('.').to_string() }
+}
+
 fn fps_indicator(app: &FilmcraftApp, ui: &mut egui::Ui, video_area: Rect, which: Which, rate: filmcraft_time::FrameRate, t: &Tokens) {
     if which != Which::Program || app.ui.fullscreen_program {
         return;
@@ -203,25 +211,21 @@ fn fps_indicator(app: &FilmcraftApp, ui: &mut egui::Ui, video_area: Rect, which:
         let dropped = app.playback.meter.counts().1;
         let lagging = dropped > 0 || actual_fps.is_some_and(|f| f < target_fps * 0.90);
         let dot = if lagging { t.render_yellow } else { t.render_green };
-        let text = match (actual_fps, dropped > 0) {
-            (Some(f), true) => format!("{f:.1} / {} fps · {dropped} drop", rate.label()),
-            (Some(f), false) => format!("{f:.1} / {} fps", rate.label()),
-            (None, _) => format!("… / {} fps", rate.label()),
-        };
+        let text = actual_fps.map(format_fps_number).unwrap_or_else(|| rate.label());
         (Some(dot), text, Color32::from_gray(235))
     } else {
-        (None, format!("{} fps", rate.label()), t.text_dim)
+        (None, rate.label(), t.text_dim)
     };
-    let font = Tokens::ui(10.5);
+    let font = Tokens::ui(10.0);
     let galley = ui.painter().layout_no_wrap(label, font, text_col);
-    let dot_w = if dot_col.is_some() { 11.0 } else { 0.0 };
-    let pad = vec2(7.0, 3.0);
+    let dot_w = if dot_col.is_some() { 10.0 } else { 0.0 };
+    let pad = vec2(5.0, 2.0);
     let pill = Rect::from_min_size(video_area.min + vec2(8.0, 8.0), vec2(galley.size().x + dot_w + pad.x * 2.0, galley.size().y + pad.y * 2.0));
     let bg = if playing { Color32::from_black_alpha(175) } else { Color32::from_black_alpha(120) };
     ui.painter().rect_filled(pill, 4.0, bg);
     ui.painter().rect_stroke(pill, 4.0, Stroke::new(1.0, Color32::from_white_alpha(24)), StrokeKind::Inside);
     if let Some(dot) = dot_col {
-        ui.painter().circle_filled(pos2(pill.min.x + pad.x + 3.5, pill.center().y), 3.5, dot);
+        ui.painter().circle_filled(pos2(pill.min.x + pad.x + 3.0, pill.center().y), 3.0, dot);
     }
     ui.painter().galley(pos2(pill.min.x + pad.x + dot_w, pill.center().y - galley.size().y * 0.5), galley, text_col);
 }
@@ -573,15 +577,9 @@ fn controls_row(
     app.auto.add(&format!("{prefix}.settings"), wr, "Settings");
     if which == Which::Program {
         let br = Rect::from_min_size(pos2(wr.max.x + 6.0, settings_y + 1.0), vec2(22.0, 22.0));
-        let tip = if app.ui.global_bypass {
-            tl!("Enable Color Grades & Effects (Bypassed)")
-        } else {
-            tl!("Bypass Color Grades & Effects")
-        };
-        let bresp = ui
-            .interact(br, egui::Id::unique((prefix, "global-bypass")), Sense::click())
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(tip);
+        let tip = if app.ui.global_bypass { tl!("Enable Color Grades & Effects (Bypassed)") } else { tl!("Bypass Color Grades & Effects") };
+        let bresp =
+            ui.interact(br, egui::Id::unique((prefix, "global-bypass")), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip);
         bresp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tip));
         if app.ui.global_bypass {
             ui.painter().rect_filled(br, 4.0, Color32::from_rgb(232, 106, 56).gamma_multiply(0.18));
@@ -1234,29 +1232,42 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
             monitor_view::view_mut(app, which).transport_hidden = edited_hidden;
         }
     }
-    let available = (row.width() - 46.0).max(0.0);
+    let left_reserve = if !src && row.width() >= 90.0 {
+        overlay_selector(app, ui, Rect::from_min_size(pos2(row.min.x + 6.0, row.min.y + 4.0), vec2(42.0, 24.0)));
+        52.0
+    } else {
+        0.0
+    };
+    let available = (row.width() - 46.0 - left_reserve).max(0.0);
     let widths = vec![TRANSPORT_BUTTON; buttons.len()];
     // roomy spacing when every button fits with it, tight spacing before any goes to the overflow menu
     let count = buttons.len() as f32;
     let gap = if count * TRANSPORT_BUTTON + (count - 1.0).max(0.0) * 6.0 <= available { 6.0 } else { 2.0 };
     let Some(fit) = craft_ui::layout::fit_toolbar(&widths, available, gap, TRANSPORT_BUTTON) else {
-        ui.scope_builder(egui::UiBuilder::new().max_rect(Rect::from_min_max(row.min, pos2((row.right() - 30.0).max(row.left()), row.bottom()))), |ui| {
-            egui::ScrollArea::horizontal().id_salt((prefix, "transport-scroll")).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for (icon, command, label) in &buttons {
-                        let (rect, _) = ui.allocate_exact_size(vec2(TRANSPORT_BUTTON, TRANSPORT_BUTTON), Sense::hover());
-                        if transport_button(app, ui, rect, prefix, *icon, command, label) {
-                            invoke_transport(app, ui.ctx(), which, command);
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(Rect::from_min_max(
+                pos2(row.min.x + left_reserve, row.min.y),
+                pos2((row.right() - 30.0).max(row.left() + left_reserve), row.bottom()),
+            )),
+            |ui| {
+                egui::ScrollArea::horizontal().id_salt((prefix, "transport-scroll")).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (icon, command, label) in &buttons {
+                            let (rect, _) = ui.allocate_exact_size(vec2(TRANSPORT_BUTTON, TRANSPORT_BUTTON), Sense::hover());
+                            if transport_button(app, ui, rect, prefix, *icon, command, label) {
+                                invoke_transport(app, ui.ctx(), which, command);
+                            }
                         }
-                    }
+                    });
                 });
-            });
-        });
+            },
+        );
         return;
     };
     let pitch = TRANSPORT_BUTTON + gap;
     let total = fit.shown.len() as f32 * pitch - gap + if fit.overflow.is_empty() { 0.0 } else { pitch };
-    let mut x = row.center().x - 15.0 - total.max(TRANSPORT_BUTTON) / 2.0;
+    let center_x = (row.min.x + left_reserve + row.max.x - 30.0) * 0.5;
+    let mut x = (center_x - total.max(TRANSPORT_BUTTON) / 2.0).max(row.min.x + left_reserve);
     for (index, _) in &fit.shown {
         let Some((icon, command, label)) = buttons.get(*index) else { continue };
         let rect = Rect::from_min_size(pos2(x, row.min.y + 2.0), vec2(TRANSPORT_BUTTON, TRANSPORT_BUTTON));
@@ -1297,6 +1308,86 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
                 }
             }
         });
+    }
+}
+
+/// DaVinci Resolve-style On-Screen Controls split button (`[box] ⌄`) on the Program monitor.
+fn overlay_selector(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    use crate::state::ViewerOverlayMode;
+    let t = app.tokens;
+    let mv = monitor_view::view(app, Which::Program);
+    let enabled = mv.viewer_overlay_enabled;
+    let mode = mv.viewer_overlay_mode;
+    let toggle_rect = Rect::from_min_size(rect.min, vec2(26.0, rect.height()));
+    let drop_rect = Rect::from_min_max(pos2(toggle_rect.max.x, rect.min.y), rect.max);
+
+    let tip = tlf!("On-Screen Controls ({mode})", mode = crate::i18n::t(mode.label()));
+    let tresp = ui.interact(toggle_rect, egui::Id::unique(("program", "overlay-toggle")), Sense::click()).on_hover_text(tip.clone());
+    app.auto.add_response("program.overlay.toggle", &tresp, &tip);
+    if tresp.hovered() || enabled {
+        let fill = if enabled { Color32::from_rgba_unmultiplied(0xe5, 0x7e, 0x2a, 38) } else { t.hover };
+        ui.painter().rect_filled(toggle_rect, 4.0, fill);
+    }
+    let icon_col = if enabled {
+        Color32::from_rgb(0xe5, 0x7e, 0x2a)
+    } else if tresp.hovered() {
+        t.tab_text_active
+    } else {
+        t.icon
+    };
+    paint_overlay_icon(ui.painter(), toggle_rect.shrink2(vec2(6.0, 5.0)), mode, icon_col);
+    if tresp.clicked() {
+        monitor_view::view_mut(app, Which::Program).viewer_overlay_enabled = !enabled;
+    }
+
+    let dresp = ui.interact(drop_rect, egui::Id::unique(("program", "overlay-mode")), Sense::click()).on_hover_text(tl!("On-Screen Controls Mode"));
+    app.auto.add_response("program.overlay.mode", &dresp, "On-Screen Controls Mode");
+    if dresp.hovered() {
+        ui.painter().rect_filled(drop_rect, 4.0, t.hover);
+    }
+    let c = drop_rect.center();
+    let acol = if dresp.hovered() { t.tab_text_active } else { t.text_dim };
+    ui.painter().line_segment([c + vec2(-3.5, -1.5), c + vec2(0.0, 2.0)], Stroke::new(1.3, acol));
+    ui.painter().line_segment([c + vec2(0.0, 2.0), c + vec2(3.5, -1.5)], Stroke::new(1.3, acol));
+
+    egui::Popup::menu(&dresp).show(|ui| {
+        for m in ViewerOverlayMode::ALL {
+            let selected = enabled && mode == m;
+            let r = ui.selectable_label(selected, crate::i18n::t(m.label()));
+            app.auto.add_response(&format!("program.overlay.mode.{}", m.id()), &r, m.label());
+            if r.clicked() {
+                let v = monitor_view::view_mut(app, Which::Program);
+                v.viewer_overlay_mode = m;
+                v.viewer_overlay_enabled = true;
+                ui.close();
+            }
+        }
+    });
+}
+
+fn paint_overlay_icon(p: &egui::Painter, r: Rect, mode: crate::state::ViewerOverlayMode, col: Color32) {
+    use crate::state::ViewerOverlayMode;
+    let s = Stroke::new(1.2, col);
+    match mode {
+        ViewerOverlayMode::Transform => {
+            p.rect_stroke(r, 0.0, s, StrokeKind::Inside);
+            for pt in [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()] {
+                p.rect_filled(Rect::from_center_size(pt, vec2(3.0, 3.0)), 0.0, col);
+            }
+        }
+        ViewerOverlayMode::Crop => {
+            let arm = (r.width().min(r.height()) * 0.36).max(3.0);
+            for (pt, dx, dy) in [(r.left_top(), arm, arm), (r.right_top(), -arm, arm), (r.right_bottom(), -arm, -arm), (r.left_bottom(), arm, -arm)] {
+                p.line_segment([pt, pt + vec2(dx, 0.0)], s);
+                p.line_segment([pt, pt + vec2(0.0, dy)], s);
+            }
+        }
+        ViewerOverlayMode::EffectOverlay => {
+            let c = r.center();
+            let rad = (r.width().min(r.height()) * 0.34).max(3.0);
+            p.circle_stroke(c, rad, s);
+            p.circle_filled(c, 1.5, col);
+        }
     }
 }
 
@@ -1510,10 +1601,7 @@ mod tests {
         assert!(!app.ui.global_bypass);
         crate::menus::invoke(&mut app, &ctx, "view.toggleGlobalBypass", json!({})).expect("toggle on");
         assert!(app.ui.global_bypass);
-        let checked = crate::menus::menu_items(&app)
-            .into_iter()
-            .find(|it| it.id == "view.toggleGlobalBypass")
-            .and_then(|it| it.checked);
+        let checked = crate::menus::menu_items(&app).into_iter().find(|it| it.id == "view.toggleGlobalBypass").and_then(|it| it.checked);
         assert_eq!(checked, Some(true));
         crate::menus::invoke(&mut app, &ctx, "view.toggleGlobalBypass", json!({})).expect("toggle off");
         assert!(!app.ui.global_bypass);
