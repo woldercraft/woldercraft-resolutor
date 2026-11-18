@@ -145,10 +145,7 @@ fn config_for(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSetting
     let device = render_node().ok_or_else(|| "no VA-API DRM render node".to_string())?;
     let kbps = s.bitrate_kbps.max(100);
     let max_kbps = s.max_bitrate_kbps.filter(|m| *m >= kbps).unwrap_or_else(|| kbps.saturating_add(kbps / 2));
-    let keyint = s
-        .keyframe_distance
-        .filter(|k| *k > 0)
-        .unwrap_or_else(|| (f64::from(num) / f64::from(den) * 2.0).round().max(1.0) as u32);
+    let keyint = s.keyframe_distance.filter(|k| *k > 0).unwrap_or_else(|| (f64::from(num) / f64::from(den) * 2.0).round().max(1.0) as u32);
     let profile = match (hevc, s.h264_profile) {
         (true, _) => "main",
         (false, H264Profile::Baseline) => "constrained_baseline",
@@ -190,18 +187,16 @@ fn rgba_to_nv12_bt709(rgba: &[u8], w: usize, h: usize, nv12: &mut Vec<u8>) {
     let rgba_valid = &rgba[..rgba_end];
     let luma_valid = &mut luma[..luma_end];
     let chroma_valid = &mut chroma[..chroma_end];
-    for ((src_pair, y_pair), uv_row) in rgba_valid
-        .chunks_exact(rgba_pair)
-        .zip(luma_valid.chunks_exact_mut(luma_pair))
-        .zip(chroma_valid.chunks_exact_mut(w))
-    {
+    for ((src_pair, y_pair), uv_row) in rgba_valid.chunks_exact(rgba_pair).zip(luma_valid.chunks_exact_mut(luma_pair)).zip(chroma_valid.chunks_exact_mut(w)) {
         let (src0, src1) = src_pair.split_at(row_bytes);
         let (y0, y1) = y_pair.split_at_mut(w);
         for (((p0, p1), (dy0, dy1)), duv) in src0
-            .chunks_exact(8)
-            .zip(src1.chunks_exact(8))
-            .zip(y0.chunks_exact_mut(2).zip(y1.chunks_exact_mut(2)))
-            .zip(uv_row.chunks_exact_mut(2))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .zip(src1.as_chunks::<8>().0.iter())
+            .zip(y0.as_chunks_mut::<2>().0.iter_mut().zip(y1.as_chunks_mut::<2>().0.iter_mut()))
+            .zip(uv_row.as_chunks_mut::<2>().0.iter_mut())
         {
             let (r00, g00, b00) = (i32::from(p0[0]), i32::from(p0[1]), i32::from(p0[2]));
             let (r01, g01, b01) = (i32::from(p0[4]), i32::from(p0[5]), i32::from(p0[6]));
@@ -227,11 +222,7 @@ fn codec_args(cfg: &Config, nv12_input: bool) -> Vec<String> {
         Codec::H264 => ("h264_vaapi", "h264"),
         Codec::Hevc => ("hevc_vaapi", "hevc"),
     };
-    let vf = if nv12_input {
-        "format=nv12,hwupload=extra_hw_frames=16"
-    } else {
-        "format=nv12,hwupload"
-    };
+    let vf = if nv12_input { "format=nv12,hwupload=extra_hw_frames=16" } else { "format=nv12,hwupload" };
     let mut args = vec![
         "-vf".into(),
         vf.into(),
@@ -397,37 +388,24 @@ impl VaapiEncoder {
         let stderr_log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let err_log = stderr_log.clone();
         if let Some(mut se) = stderr {
-            let _ = std::thread::Builder::new()
-                .name("vaapi-encode-stderr".into())
-                .spawn(move || {
-                    let mut chunk = [0u8; 4096];
-                    while let Ok(n) = se.read(&mut chunk) {
-                        if n == 0 {
-                            break;
-                        }
-                        if let Ok(mut text) = err_log.lock() {
-                            let s = String::from_utf8_lossy(&chunk[..n]);
-                            text.push_str(&s);
-                            if text.len() > 8192 {
-                                let start = text.len() - 8192;
-                                *text = text[start..].to_string();
-                            }
+            let _ = std::thread::Builder::new().name("vaapi-encode-stderr".into()).spawn(move || {
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = se.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    if let Ok(mut text) = err_log.lock() {
+                        let s = String::from_utf8_lossy(&chunk[..n]);
+                        text.push_str(&s);
+                        if text.len() > 8192 {
+                            let start = text.len() - 8192;
+                            *text = text[start..].to_string();
                         }
                     }
-                });
+                }
+            });
         }
-        Ok(Self {
-            cfg,
-            rate,
-            entry,
-            child,
-            write_tx: Some(write_tx),
-            free_rx,
-            writer: Some(writer),
-            rx,
-            buf: Vec::new(),
-            stderr_log,
-        })
+        Ok(Self { cfg, rate, entry, child, write_tx: Some(write_tx), free_rx, writer: Some(writer), rx, buf: Vec::new(), stderr_log })
     }
 
     fn drain_packets(&mut self, flush_all: bool) -> Result<Vec<EncodedPacket>> {
@@ -445,8 +423,7 @@ impl VaapiEncoder {
             let start = aud_positions[i];
             let end = aud_positions.get(i + 1).copied().unwrap_or(self.buf.len());
             let Some(au) = self.buf.get(start..end) else { continue };
-            let data = annex_b_to_length_prefixed_for(self.cfg.codec, au)
-                .map_err(|e| ExportError::Encode(format!("VA-API bitstream: {e}")))?;
+            let data = annex_b_to_length_prefixed_for(self.cfg.codec, au).map_err(|e| ExportError::Encode(format!("VA-API bitstream: {e}")))?;
             let key = is_idr(self.cfg.codec, au);
             out.push(EncodedPacket { data, key, duration, composition_offset: 0 });
         }
@@ -517,10 +494,7 @@ impl VideoEncoder for VaapiEncoder {
 
     fn encode(&mut self, f: &EncoderFrame) -> Result<Vec<EncodedPacket>> {
         if f.width != self.cfg.width || f.height != self.cfg.height {
-            return Err(ExportError::Encode(format!(
-                "VA-API: a {}x{} picture for a {}x{} encoder",
-                f.width, f.height, self.cfg.width, self.cfg.height
-            )));
+            return Err(ExportError::Encode(format!("VA-API: a {}x{} picture for a {}x{} encoder", f.width, f.height, self.cfg.width, self.cfg.height)));
         }
         if f.hdr.is_some() {
             return Err(ExportError::Unsupported("VA-API 8-bit encoder does not take HDR pictures".into()));

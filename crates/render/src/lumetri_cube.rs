@@ -76,7 +76,10 @@ pub fn sample_lumetri(
     if !(MIN_SIZE..=MAX_SIZE).contains(&size) {
         return Err(format!("`size` must be between {MIN_SIZE} and {MAX_SIZE}"));
     }
-    if effects.iter().any(|e| e.enabled && e.effect == "lumetri" && !e.masks.is_empty()) {
+    if effects.iter().any(|e| {
+        let masks_on = e.param("masks_on").and_then(|p| p.value.as_bool()).unwrap_or(true);
+        e.enabled && e.effect == "lumetri" && masks_on && !e.masks.is_empty()
+    }) {
         return Err("Color Grading with masks cannot be exported to a LUT: a LUT has no spatial input".into());
     }
     let mut left_out = Vec::new();

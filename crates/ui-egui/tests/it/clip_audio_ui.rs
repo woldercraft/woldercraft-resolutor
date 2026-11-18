@@ -129,9 +129,7 @@ fn effect_controls_show_the_audio_of_a_video_clip() {
     d.rect("effectControls.effect.panner");
 
     // the audio rows edit the audio clip
-    for fx in ["motion", "opacity", "time_remap"] {
-        d.click(&format!("effectControls.effect.{fx}.twirl"));
-    }
+    d.click("effectControls.effect.volume.twirl");
     d.click("effectControls.volume.level.stopwatch");
     assert!(d.item(pair.audio).effect("volume").unwrap().param("level").unwrap().is_animated());
     assert!(d.item(pair.video).effect("volume").is_none());
@@ -151,26 +149,30 @@ fn effect_controls_show_audio_fx_on_a_linked_pair() {
     d.exec("timeline.select", json!({"clips": [pair.video]}));
     d.exec("effects.apply", json!({"clips": [pair.video], "effect": "parametric_eq"}));
     assert_eq!(d.item(pair.audio).effects.last().map(|e| e.effect.as_str()), Some("parametric_eq"));
-    for fx in ["motion", "opacity", "time_remap", "volume", "channel_volume", "panner"] {
-        d.click(&format!("effectControls.effect.{fx}"));
-    }
+    d.click("effectControls.effect.parametric_eq.twirl");
     d.rect("effectControls.effect.parametric_eq");
     d.rect("effectControls.effect.parametric_eq.edit");
 }
 
 #[test]
 fn properties_show_the_audio_of_a_video_clip() {
-    let (mut d, pair) = Driver::demo(&["Properties"]);
+    let (mut d, pair) = Driver::demo(&["InspectorVideo"]);
+    for sec in ["props:Transform", "props:Audio"] {
+        d.harness.state_mut().ui.expanded_fx.push(sec.into());
+    }
     d.exec("timeline.select", json!({"clips": [pair.video]}));
-    let scale = d.rect("properties.motion.scale.addKeyframe");
-    let level = d.rect("properties.volume.level.addKeyframe");
-    assert!(level[1] > scale[1]);
+    d.rect("properties.motion.scale.addKeyframe");
+    d.ok("ui.panel.show", json!({"panel": "InspectorAudio"}));
+    d.frames(2);
+    d.rect("properties.volume.level.addKeyframe");
     d.click("properties.volume.level.addKeyframe");
     assert_eq!(d.item(pair.audio).effect("volume").unwrap().param("level").unwrap().keyframes.len(), 1);
 
     d.exec("sequence.linkedSelection", json!({"on": false}));
     d.exec("timeline.select", json!({"clips": [pair.audio]}));
     d.rect("properties.volume.level.addKeyframe");
+    d.ok("ui.panel.show", json!({"panel": "InspectorVideo"}));
+    d.frames(2);
     assert!(d.find("properties.motion.scale.addKeyframe").is_none());
 }
 

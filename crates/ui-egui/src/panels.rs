@@ -399,12 +399,15 @@ pub fn panel_menu_area(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     let mut close = false;
     let area = egui::Area::new(id.with("area")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
-            let scroll =
-                egui::ScrollArea::vertical().id_salt("panel-menu-scroll").max_height((ui.ctx().content_rect().height() - 16.0).max(0.0)).show(ui, |ui| {
+            let scroll = egui::ScrollArea::vertical()
+                .id_salt("panel-menu-scroll")
+                .auto_shrink([true, true])
+                .max_height((ui.ctx().content_rect().height() - 16.0).max(0.0))
+                .show(ui, |ui| {
                     // a small window (a floated panel can be narrower than the menu) takes the menu at its width
                     let width = ui.ctx().content_rect().width() - 16.0;
                     ui.set_min_width(190.0_f32.min(width.max(0.0)));
-                    ui.set_max_width(width.max(0.0));
+                    ui.set_max_width(320.0_f32.min(width.max(0.0)));
                     // the Timeline's tabs are its open sequences: Close Panel closes the active one and
                     // keeps the panel (Premiere's wording and behaviour)
                     if p == PanelKind::Timeline && app.session.state.active_sequence.is_some() {

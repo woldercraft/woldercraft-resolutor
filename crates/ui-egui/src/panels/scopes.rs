@@ -91,7 +91,8 @@ pub fn frame_signal(app: &mut FilmcraftApp, ctx: &egui::Context, slot: &str, fra
                 return Some(ScopeFrame { signal: s, key: out_key, pq: false, space });
             }
         }
-        let gpu_has_current = g.last_key.is_some_and(|lk| matches!(lk.target, Target::SequencePlan(id2, _) if id2 == seq_id) && lk.frame == frame && lk.revision == rev);
+        let gpu_has_current =
+            g.last_key.is_some_and(|lk| matches!(lk.target, Target::SequencePlan(id2, _) if id2 == seq_id) && lk.frame == frame && lk.revision == rev);
         if gpu_has_current && !g.compositor.has_scope_tag(key) {
             g.compositor.capture_scope_now(key);
         }
@@ -171,7 +172,8 @@ fn footer(app: &mut FilmcraftApp, ui: &mut egui::Ui, r: Rect, space: Option<Colo
             app.auto.add(&format!("scopes.menu.scale.{}", s.label().replace(' ', "")), r.rect, s.label());
         }
     });
-    app.auto.add("scopes.scale", cb.response.rect, "Signal scale");
+    let cb_resp = crate::widgets::accessible_name(cb.response, tl!("Signal scale"));
+    app.auto.add("scopes.scale", cb_resp.rect, "Signal scale");
     let galley = ui.painter().layout_no_wrap(tl!("Clamp Signal").into(), Tokens::ui(12.0), t.text);
     let cw = galley.size().x + 24.0;
     let cr = Rect::from_min_size(pos2(sr.min.x - cw - 10.0, r.min.y + 4.0), vec2(cw, 22.0));

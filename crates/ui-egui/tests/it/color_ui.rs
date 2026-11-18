@@ -182,6 +182,7 @@ fn effect_controls_lut_rows_pick_a_lut() {
     d.ok("ui.set", json!({"focused": "EffectControls"}));
     d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
     d.frames(4);
+    d.click("effectControls.effect.lumetri.twirl");
     let ids = d.ids("effectControls.lumetri.input_lut");
     assert!(ids.iter().any(|i| i == "effectControls.lumetri.input_lut"), "{ids:?}");
     d.click("effectControls.lumetri.input_lut");
@@ -224,6 +225,7 @@ fn effect_controls_lut_browse_imports_and_sets_in_one_undo_step() {
     d.ok("ui.set", json!({"focused": "EffectControls"}));
     d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
     d.frames(4);
+    d.click("effectControls.effect.lumetri.twirl");
     let luts = |d: &mut Driver| d.harness.state().session.project.luts.len();
     let before = luts(&mut d);
     d.click("effectControls.lumetri.input_lut");
@@ -724,10 +726,7 @@ fn color_tool_panels_docking_and_switching() {
 
     // Float ColorMasks window anywhere on screen
     d.harness.state_mut().show_panel(PanelKind::ColorMasks);
-    d.harness.state_mut().apply_dock(craft_ui::docking::Action::Float {
-        panel: PanelKind::ColorMasks,
-        rect: [100.0, 100.0, 400.0, 300.0],
-    }).unwrap();
+    d.harness.state_mut().apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::ColorMasks, rect: [100.0, 100.0, 400.0, 300.0] }).unwrap();
     d.frames(2);
     assert!(d.harness.state().ui.dock.floating.iter().any(|w| w.contains(&PanelKind::ColorMasks)));
 
@@ -971,8 +970,7 @@ fn lumetri_primaries_wheels_and_controls_fit_inside_panel_at_1080p() {
                 "lumetri.wheel.gain",
                 "lumetri.wheel.offset",
             ] {
-                let rect = arr.iter().rfind(|el| el["id"] == id).unwrap_or_else(|| panic!("{tag}: missing {id} in {elems}"))["rect"]
-                    .clone();
+                let rect = arr.iter().rfind(|el| el["id"] == id).unwrap_or_else(|| panic!("{tag}: missing {id} in {elems}"))["rect"].clone();
                 let right = rect[0].as_f64().unwrap() + rect[2].as_f64().unwrap();
                 assert!(right <= panel_right + 1.0, "{tag}: {id} clipped past panel_right={panel_right}: rect={rect}");
             }
@@ -985,5 +983,242 @@ fn lumetri_primaries_wheels_and_controls_fit_inside_panel_at_1080p() {
         d.click("lumetri.bar.dual");
         d.frames(3);
         check_fit(&mut d, &format!("{w}x{h} dual"));
+    }
+}
+
+#[test]
+fn lumetri_power_windows_switch_and_section_reset() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(3);
+    let clip = select_first_clip(&mut d);
+    d.exec("effects.apply", json!({"clips": [clip], "effect": "lumetri"}));
+    d.frames(3);
+
+    d.click("lumetri.switch.Power Windows");
+    d.frames(2);
+    let e = lumetri(&mut d, clip);
+    assert_eq!(e["params"]["masks_on"]["value"], json!("Bool(false)"));
+    assert!(d.app().ui.status.is_empty(), "status: {}", d.app().ui.status);
+
+    let idx = lumetri_index(&mut d, clip);
+    d.exec("effects.setParam", json!({"clip": clip, "effect": idx, "param": "vignette_amount", "value": -2.5}));
+    d.click("lumetri.section.Vignette");
+    d.frames(2);
+    d.click("lumetri.section_reset.vignette");
+    d.frames(2);
+    let e2 = lumetri(&mut d, clip);
+    assert_eq!(e2["params"]["vignette_amount"]["value"], json!("Float(0.0)"));
+
+    // Direct keyframing on a slider
+    d.click("lumetri.section.Basic Correction");
+    d.click("lumetri.mode.sliders");
+    d.frames(2);
+    d.click("lumetri.keyframe.exposure");
+    d.frames(2);
+    {
+        let q = d.app().session.active_sequence().unwrap().clone();
+        let (_, it) = q.find_item(filmcraft_project::ClipId(clip)).unwrap();
+        let exp = it.effects[idx].param("exposure").unwrap();
+        assert!(!exp.keyframes.is_empty(), "keyframe added");
+    }
+
+    // Copy & Paste Grade onto a second node
+    d.click("lumetri.copyGrade");
+    d.click("lumetri.node.add");
+    d.frames(2);
+    d.click("lumetri.pasteGrade");
+    d.frames(2);
+    let q = d.app().session.active_sequence().unwrap().clone();
+    let (_, it) = q.find_item(filmcraft_project::ClipId(clip)).unwrap();
+    let lumetris: Vec<_> = it.effects.iter().filter(|e| e.effect == "lumetri").collect();
+    assert_eq!(lumetris.len(), 2);
+    assert_eq!(lumetris[1].param("masks_on").and_then(|p| p.value.as_bool()), Some(false));
+}
+
+#[test]
+fn creative_tints_pen_on_fresh_clip_hsl_auto_enable_and_dual_ids() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(4);
+    let clip = select_first_clip(&mut d);
+
+    // 1. Arming Pen on a clip with intrinsic effects and no lumetri yet creates lumetri and targets its real index
+    d.click("lumetri.section.Power Windows");
+    d.frames(2);
+    d.click("lumetri.mask.add_pen");
+    d.frames(2);
+    let expected_idx = lumetri_index(&mut d, clip);
+    let pen = d.app().ui.mask_pen.as_ref().expect("mask_pen armed");
+    assert_eq!(pen.clip, clip);
+    assert_eq!(pen.effect, expected_idx, "Pen must target the lumetri effect index, not 0 (Motion)");
+    d.click("lumetri.mask.add_pen");
+    d.frames(2);
+    assert!(d.app().ui.mask_pen.is_none());
+
+    // 2. Creative exposes shadow_tint and highlight_tint
+    d.click("lumetri.section.Creative");
+    d.frames(2);
+    assert!(d.element("lumetri.param.shadow_tint").is_some(), "shadow_tint picker present");
+    assert!(d.element("lumetri.param.highlight_tint").is_some(), "highlight_tint picker present");
+
+    // 3. Wheel section reset undoes in 1 step
+    d.exec("effects.setParam", json!({"clip": clip, "effect": expected_idx, "param": "wheel_shadows", "value": [0.3, -0.2]}));
+    d.exec("effects.setParam", json!({"clip": clip, "effect": expected_idx, "param": "wheel_shadows_l", "value": 15.0}));
+    d.click("lumetri.section.Color Wheels & Match");
+    d.frames(2);
+    d.click("lumetri.section_reset.wheels");
+    d.frames(2);
+    {
+        let q = d.app().session.active_sequence().unwrap();
+        let (_, it) = q.find_item(filmcraft_project::ClipId(clip)).unwrap();
+        let fx = &it.effects[expected_idx];
+        assert_eq!(fx.param("wheel_shadows_l").and_then(|p| p.value.as_f64()), Some(0.0));
+        assert_eq!(fx.param("wheel_shadows").and_then(|p| p.value.as_vec2()).map(|v| (v.x, v.y)), Some((0.0, 0.0)));
+    }
+    d.ok("ui.key", json!({"key": "Cmd+Z"}));
+    d.frames(2);
+    {
+        let q = d.app().session.active_sequence().unwrap();
+        let (_, it) = q.find_item(filmcraft_project::ClipId(clip)).unwrap();
+        let fx = &it.effects[expected_idx];
+        assert_eq!(fx.param("wheel_shadows_l").and_then(|p| p.value.as_f64()), Some(15.0));
+        assert_eq!(fx.param("wheel_shadows").and_then(|p| p.value.as_vec2()).map(|v| (v.x, v.y)), Some((0.3, -0.2)));
+    }
+
+    // 4. Editing HSL Secondary while hsl_on is false auto-enables hsl_on
+    d.click("lumetri.section.HSL Secondary");
+    d.frames(2);
+    assert_eq!(lumetri(&mut d, clip)["params"]["hsl_on"]["value"], json!("Bool(false)"));
+    let hue_rect = d.element("lumetri.param.hsl_hue").expect("hsl_hue slider");
+    d.ok("ui.click", json!({"x": hue_rect[0] + hue_rect[2] * 0.55, "y": hue_rect[1] + hue_rect[3] * 0.5}));
+    d.frames(2);
+    assert_eq!(lumetri(&mut d, clip)["params"]["hsl_on"]["value"], json!("Bool(true)"), "editing HSL auto-enables hsl_on");
+
+    // 5. Dual View emits independent `lumetri.secondary.*` automation ids
+    d.click("lumetri.section.Basic Correction");
+    d.click("lumetri.bar.dual");
+    d.frames(2);
+    let sec_ids = d.ids("lumetri.secondary.");
+    assert!(sec_ids.iter().any(|i| i == "lumetri.secondary.switch.Curves"), "{sec_ids:?}");
+    assert!(sec_ids.iter().any(|i| i == "lumetri.secondary.curve.curve_luma"), "{sec_ids:?}");
+}
+
+#[test]
+fn wb_eyedropper_tint_cancels_green_cast_with_positive_tint() {
+    let mut d = Driver::demo();
+    let matte = d.exec("file.newColorMatte", json!({"color": "#20d020", "seconds": 5.0}))["item"].as_u64().unwrap();
+    let seq_id = filmcraft_project::ItemId(d.exec("file.newSequence", json!({"name": "GreenWB", "fromItem": matte}))["sequence"].as_u64().unwrap());
+    d.exec("playhead.set", json!({"time": 0}));
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(4);
+
+    let clip = {
+        let q = d.app().session.project.sequence(seq_id).unwrap();
+        q.video_tracks[0].items[0].id.0
+    };
+    d.exec("timeline.select", json!({"clips": [clip]}));
+    d.frames(16);
+    d.click("lumetri.eyedropper.wb");
+    d.frames(2);
+    d.click("program.picture");
+    let t0 = std::time::Instant::now();
+    loop {
+        d.frames(1);
+        let q = d.app().session.active_sequence().unwrap();
+        let (_, it) = q.find_item(filmcraft_project::ClipId(clip)).unwrap();
+        if it.effects.iter().find(|e| e.effect == "lumetri").and_then(|e| e.param("tint")).and_then(|p| p.value.as_f64()).is_some_and(|v| v != 0.0) {
+            break;
+        }
+        assert!(t0.elapsed().as_secs() < 10, "timed out waiting for WB eyedropper; status={}", d.app().ui.status);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let q = d.app().session.active_sequence().unwrap();
+    let (_, it) = q.find_item(filmcraft_project::ClipId(clip)).unwrap();
+    let tint = it.effects.iter().find(|e| e.effect == "lumetri").unwrap().param("tint").unwrap().value.as_f64().unwrap();
+    assert!(tint > 0.0, "green cast must produce positive tint (1 - 0.3*tint cuts green), got {tint}");
+}
+
+#[test]
+fn lumetri_part2_presets_hsl_bars_mask_chips_and_paste_all() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(4);
+    let seq = d.exec("sequence.inspect", json!({}));
+    let items = seq["video"][0]["items"].as_array().expect("video items");
+    assert!(items.len() >= 2, "demo project should have at least 2 video clips: {items:?}");
+    let clip1 = select_first_clip(&mut d);
+    let clip2 = items[1]["clip"].as_u64().expect("second clip id");
+    d.frames(4);
+
+    // 1. Curves preset pill (`soft_s`) + numeric X/Y fields on selected curve point
+    d.click("lumetri.section.Curves");
+    d.frames(2);
+    d.click("lumetri.curve.preset.soft_s");
+    d.frames(2);
+    {
+        let q = d.app().session.active_sequence().unwrap();
+        let (_, it) = q.find_item(filmcraft_project::ClipId(clip1)).unwrap();
+        let fx = it.effects.iter().find(|e| e.effect == "lumetri").expect("lumetri applied");
+        let pts = match fx.param("curve_luma").map(|p| &p.value) {
+            Some(filmcraft_project::ParamValue::Curve(v)) => v.clone(),
+            other => panic!("expected curve_luma Curve, got {other:?}"),
+        };
+        assert_eq!(pts.len(), 4, "soft_s preset sets 4 control points: {pts:?}");
+    }
+    let curve_rect = d.element("lumetri.curve.curve_luma").expect("curve_luma widget");
+    d.ok("ui.click", json!({"x": curve_rect[0] + 1.0, "y": curve_rect[1] + curve_rect[3] - 1.0}));
+    d.frames(2);
+    assert!(d.element("lumetri.curve.pt_x").is_some(), "Curve Point X field visible after point selection");
+    assert!(d.element("lumetri.curve.pt_y").is_some(), "Curve Point Y field visible after point selection");
+
+    // 2. HSL Secondary interactive bars register automation IDs and sat_bar click updates hsl_sat_min + enables hsl_on
+    d.click("lumetri.section.HSL Secondary");
+    d.frames(2);
+    assert!(d.element("lumetri.hsl.hue_bar").is_some(), "hsl hue bar present");
+    assert!(d.element("lumetri.hsl.luma_bar").is_some(), "hsl luma bar present");
+    let sat_bar = d.element("lumetri.hsl.sat_bar").expect("hsl sat bar present");
+    d.ok("ui.click", json!({"x": sat_bar[0] + sat_bar[2] * 0.65, "y": sat_bar[1] + sat_bar[3] * 0.5}));
+    d.frames(2);
+    {
+        let fx = lumetri(&mut d, clip1);
+        assert_eq!(fx["params"]["hsl_on"]["value"], json!("Bool(true)"));
+        let sat_min = fx["params"]["hsl_sat_min"]["value"].as_str().unwrap_or("");
+        assert_ne!(sat_min, "Float(10.0)", "clicking hsl.sat_bar should update hsl_sat_min, got {sat_min}");
+    }
+
+    // 3. Power Windows mask chips toggle visibility (`MaskMode::None` <-> `MaskMode::Add`)
+    d.click("lumetri.section.Power Windows");
+    d.frames(2);
+    d.click("lumetri.mask.add_linear");
+    d.frames(2);
+    assert!(d.element("lumetri.mask.chip.0").is_some(), "mask chip 0 present");
+    d.click("lumetri.mask.vis.0");
+    d.frames(2);
+    {
+        let q = d.app().session.active_sequence().unwrap();
+        let (_, it) = q.find_item(filmcraft_project::ClipId(clip1)).unwrap();
+        let fx = it.effects.iter().find(|e| e.effect == "lumetri").unwrap();
+        assert_eq!(fx.masks[0].mode, filmcraft_project::MaskMode::None);
+    }
+    d.click("lumetri.mask.vis.0");
+    d.frames(2);
+    {
+        let q = d.app().session.active_sequence().unwrap();
+        let (_, it) = q.find_item(filmcraft_project::ClipId(clip1)).unwrap();
+        let fx = it.effects.iter().find(|e| e.effect == "lumetri").unwrap();
+        assert_eq!(fx.masks[0].mode, filmcraft_project::MaskMode::Add);
+    }
+
+    // 4. `Paste All` copies clip1's grade onto clip2 when both are in selected_color_clips
+    d.harness.state_mut().ui.selected_color_clips = vec![filmcraft_project::ClipId(clip1), filmcraft_project::ClipId(clip2)];
+    d.frames(2);
+    assert!(d.element("lumetri.pasteAll").is_some(), "lumetri.pasteAll shown when other clips selected");
+    d.click("lumetri.pasteAll");
+    d.frames(2);
+    {
+        let q = d.app().session.active_sequence().unwrap();
+        let (_, it2) = q.find_item(filmcraft_project::ClipId(clip2)).unwrap();
+        assert!(it2.effects.iter().any(|e| e.effect == "lumetri"), "Paste All should copy lumetri grade to clip2");
     }
 }

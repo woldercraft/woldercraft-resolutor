@@ -153,11 +153,7 @@ impl FilmcraftApp {
                 self.apply_header_preset(&preset);
             }
             self.workspace_restored = true;
-            let save_key = if self.ui.active_preset.is_empty() {
-                self.ui.workspace.clone()
-            } else {
-                format!("preset:{}", self.ui.active_preset)
-            };
+            let save_key = if self.ui.active_preset.is_empty() { self.ui.workspace.clone() } else { format!("preset:{}", self.ui.active_preset) };
             self.last_saved_dock = Some((save_key, self.ui.dock.clone()));
         }
         self.applied_prefs = Some(p);

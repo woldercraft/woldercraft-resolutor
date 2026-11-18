@@ -3,7 +3,7 @@
   <?ifndef HasCraftFontLicences ?>
   <?define HasCraftFontLicences=0 ?>
   <?endif?>
-  <Package Name="Resolutor" Manufacturer="WolderCraft" Version="$(var.Version)" UpgradeCode="31E6FB14-9DBC-41DD-B24B-26B71FB31B62" Scope="perUserOrMachine" Compressed="yes" Language="1033">
+  <Package Name="Resolutor" Manufacturer="WolderCraft" Version="$(var.Version)" UpgradeCode="34480CC2-7036-4A7A-9ACC-A7AAC1D7602B" Scope="perUserOrMachine" Compressed="yes" Language="1033">
     <SummaryInformation Description="Resolutor video editor" Manufacturer="WolderCraft" />
     <?include $(sys.SOURCEFILEDIR)install-policy.wxi?>
     <!-- Same-version upgrades let successive pre-releases of one X.Y.Z replace each other
@@ -44,7 +44,7 @@
     </ComponentGroup>
     <?endif?>
     <ComponentGroup Id="FilmcraftFiles" Directory="INSTALLFOLDER">
-      <Component Id="FilmcraftApp" Guid="15933017-925B-4963-8992-52000EB26AAA">
+      <Component Id="FilmcraftApp" Guid="C5167678-4810-4465-A2FB-B33D7C9FA457">
         <File Id="FilmcraftNotice" Source="$(var.BinDir)\NOTICE" KeyPath="no" />
         <File Id="FilmcraftExe" Source="$(var.BinDir)\resolutor.exe" KeyPath="yes">
           <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="Resolutor" Description="Resolutor video editor" WorkingDirectory="INSTALLFOLDER" Advertise="yes" Icon="FilmcraftIcon.ico" IconIndex="0" />

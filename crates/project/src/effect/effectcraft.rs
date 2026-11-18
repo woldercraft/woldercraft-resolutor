@@ -52,14 +52,7 @@ pub fn defs() -> Vec<EffectDef> {
             let group = ps.id.split_once('/').map(|(g, _)| g);
             let (kind, default, animatable) = match &ps.ui {
                 ParamUi::Slider { min, max, slider_min, slider_max, decimals } => (
-                    ParamKind::Float {
-                        min: *min,
-                        max: *max,
-                        soft_min: *slider_min,
-                        soft_max: *slider_max,
-                        unit: "",
-                        decimals: *decimals,
-                    },
+                    ParamKind::Float { min: *min, max: *max, soft_min: *slider_min, soft_max: *slider_max, unit: "", decimals: *decimals },
                     ParamValue::Float(ps.default.as_f64()),
                     true,
                 ),
@@ -79,18 +72,11 @@ pub fn defs() -> Vec<EffectDef> {
                     true,
                 ),
                 ParamUi::Angle => (ParamKind::Angle, ParamValue::Float(ps.default.as_f64()), true),
-                ParamUi::Point | ParamUi::Point3 => (
-                    ParamKind::Point,
-                    ParamValue::Vec2(Vec2::new(f64::NAN, f64::NAN)),
-                    true,
-                ),
+                ParamUi::Point | ParamUi::Point3 => (ParamKind::Point, ParamValue::Vec2(Vec2::new(f64::NAN, f64::NAN)), true),
                 ParamUi::Color => (ParamKind::Color, ParamValue::Color(ps.default.as_color()), true),
                 ParamUi::Checkbox => (ParamKind::Bool, ParamValue::Bool(ps.default.as_bool()), false),
                 ParamUi::Popup { options } => {
-                    let leaked: Vec<&'static str> = options
-                        .iter()
-                        .map(|s| -> &'static str { Box::leak(s.clone().into_boxed_str()) })
-                        .collect();
+                    let leaked: Vec<&'static str> = options.iter().map(|s| -> &'static str { Box::leak(s.clone().into_boxed_str()) }).collect();
                     let slice: &'static [&'static str] = Box::leak(leaked.into_boxed_slice());
                     (ParamKind::Choice(slice), ParamValue::Choice(ps.default.as_enum()), false)
                 }

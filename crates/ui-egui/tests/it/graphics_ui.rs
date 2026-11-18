@@ -223,6 +223,9 @@ fn effect_controls_text_accessible_name_follows_language() {
     d.ok("ui.set", json!({"workspace": "Captions and Graphics"}));
     let clip = d.exec("graphics.newText", json!({"text": "Night Drive"}))["clip"].as_u64().unwrap();
     d.exec("timeline.select", json!({"clips": [clip]}));
+    for idx in 0..4 {
+        d.harness.state_mut().ui.expanded_fx.push(format!("ec:{clip}:{idx}"));
+    }
     d.ok("ui.panel.show", json!({"panel": "Effect Controls"}));
     d.frames(4);
 
@@ -703,6 +706,9 @@ fn effect_controls_font_and_style_are_drop_downs_that_apply() {
     d.ok("ui.set", json!({"workspace": "Captions and Graphics"}));
     let clip = d.exec("graphics.newText", json!({"text": "Night Drive"}))["clip"].as_u64().unwrap();
     d.exec("timeline.select", json!({"clips": [clip]}));
+    for idx in 0..4 {
+        d.harness.state_mut().ui.expanded_fx.push(format!("ec:{clip}:{idx}"));
+    }
     d.ok("ui.panel.show", json!({"panel": "Effect Controls"}));
     d.frames(4);
     let fams = filmcraft_text::families();

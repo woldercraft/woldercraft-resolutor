@@ -985,6 +985,32 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, cx: &mut Ctx)
 
 // ------------------------------------------------------------------------------------- clip mixer
 
+fn clip_mixer_header(app: &mut FilmcraftApp, ui: &mut egui::Ui, header_rect: Rect) {
+    let t = app.tokens;
+    ui.painter().rect_filled(header_rect, 0.0, t.panel_bg);
+    ui.painter().line_segment([pos2(header_rect.min.x, header_rect.max.y), pos2(header_rect.max.x, header_rect.max.y)], Stroke::new(1.0, t.field_border));
+    let mut hui = ui.new_child(egui::UiBuilder::new().max_rect(header_rect));
+    hui.horizontal_centered(|ui| {
+        ui.add_space(6.0);
+        let target_track = app.ui.clip_mixer_target_track;
+        let compact = header_rect.width() < 280.0;
+        let clip_text = if compact { tl!("Clip") } else { tl!("Clip at playhead") };
+        let track_text = if compact { tl!("Track") } else { tl!("Entire track") };
+
+        let r_clip = ui.selectable_label(!target_track, clip_text).on_hover_text(tl!("Only for the clip at the timeline playhead"));
+        app.auto.add("clipMixer.mode.clip", r_clip.rect, "Clip mode");
+        if r_clip.clicked() {
+            app.ui.clip_mixer_target_track = false;
+        }
+
+        let r_track = ui.selectable_label(target_track, track_text).on_hover_text(tl!("Apply to entire track (Track Mixer mode)"));
+        app.auto.add("clipMixer.mode.track", r_track.rect, "Track mode");
+        if r_track.clicked() {
+            app.ui.clip_mixer_target_track = true;
+        }
+    });
+}
+
 /// Audio Clip Mixer: one strip per audio track, controlling the clip under the playhead (clip
 /// Volume and Panner). With the keyframe button on, changes add keyframes at the playhead.
 pub fn clip_mixer(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
@@ -1002,41 +1028,10 @@ pub fn clip_mixer(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let kf_id = egui::Id::unique("clip-mixer-keyframes");
     let mut write_kf: HashMap<u64, bool> = ui.data(|d| d.get_temp(kf_id)).unwrap_or_default();
 
-    // Mode selector header: Whole Track vs Clip at Playhead
     let header_h = 28.0;
     let header_rect = Rect::from_min_max(pos2(rect.min.x, rect.min.y), pos2(rect.max.x, rect.min.y + header_h));
     let strips_rect = Rect::from_min_max(pos2(rect.min.x, rect.min.y + header_h), rect.max);
-
-    ui.painter().rect_filled(header_rect, 0.0, t.panel_bg);
-    ui.painter().line_segment(
-        [pos2(header_rect.min.x, header_rect.max.y), pos2(header_rect.max.x, header_rect.max.y)],
-        Stroke::new(1.0, t.field_border),
-    );
-
-    let mut hui = ui.new_child(egui::UiBuilder::new().max_rect(header_rect));
-    hui.horizontal_centered(|ui| {
-        ui.add_space(6.0);
-        let target_track = app.ui.clip_mixer_target_track;
-        let compact = header_rect.width() < 280.0;
-        let clip_text = if compact { tl!("Clip") } else { tl!("Clip at playhead") };
-        let track_text = if compact { tl!("Track") } else { tl!("Entire track") };
-
-        let r_clip = ui
-            .selectable_label(!target_track, clip_text)
-            .on_hover_text(tl!("Only for the clip at the timeline playhead"));
-        app.auto.add("clipMixer.mode.clip", r_clip.rect, "Clip mode");
-        if r_clip.clicked() {
-            app.ui.clip_mixer_target_track = false;
-        }
-
-        let r_track = ui
-            .selectable_label(target_track, track_text)
-            .on_hover_text(tl!("Apply to entire track (Track Mixer mode)"));
-        app.auto.add("clipMixer.mode.track", r_track.rect, "Track mode");
-        if r_track.clicked() {
-            app.ui.clip_mixer_target_track = true;
-        }
-    });
+    clip_mixer_header(app, ui, header_rect);
 
     let target_track = app.ui.clip_mixer_target_track;
     // Like Premiere, the strips narrow so that every track fits the panel; below the narrowest
@@ -1122,59 +1117,9 @@ pub fn clip_mixer(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 set(&mut acts, "panner", "balance", 0.0, true);
             }
         }
-        // automation mode
-        let mode = if target_track {
-            tr.mixer.mode
-        } else {
-            filmcraft_engine::mixer::clip_mode(&app.session, tr.id)
-        };
-        let mdr = Rect::from_min_size(pos2(sr.min.x + 4.0, sr.min.y + 2.0), vec2(sr.width() - 8.0, 16.0));
-        let mdresp = crate::widgets::dropdown_text(ui, mdr, crate::i18n::t(mode.label()), &t, egui::Id::unique((&ap, "mode")));
-        app.auto.add(&format!("{ap}.mode"), mdr, &format!("{} automation mode: {}", if target_track { "Track" } else { "Clip" }, mode.label()));
-        egui::Popup::menu(&mdresp).show(|ui| {
-            for m in AutomationMode::ALL {
-                let r = ui.selectable_label(m == mode, crate::i18n::t(m.label()));
-                app.auto.add(&format!("{ap}.mode.{}", m.label()), r.rect, m.label());
-                if r.clicked() {
-                    if target_track {
-                        acts.push(("mixer.setMode".into(), json!({"strip": tr.id.0, "mode": m.label()})));
-                    } else {
-                        acts.push(("clipMixer.setMode".into(), json!({"track": tr.id.0, "mode": m.label()})));
-                    }
-                }
-            }
-        });
-        // M S ◇ / R
-        let y = sr.min.y + 72.0;
-        let step = ((sr.width() - 6.0 - 18.0) / 2.0).min(24.0);
-        let b = |k: f32| Rect::from_min_size(pos2(sr.center().x - step - 9.0 + k * step, y), vec2(18.0, 16.0));
-        let mr = crate::widgets::letter_toggle(ui, b(0.0), "M", tr.muted, MUTE_ON, &t, egui::Id::unique((&ap, "M")));
-        app.auto.add(&format!("{ap}.mute"), b(0.0), "Mute Track");
-        if mr.clicked() {
-            acts.push(("mixer.setStrip".into(), json!({"strip": tr.id.0, "muted": !tr.muted})));
-        }
-        let so = crate::widgets::letter_toggle(ui, b(1.0), "S", tr.solo, SOLO_ON, &t, egui::Id::unique((&ap, "S")));
-        app.auto.add(&format!("{ap}.solo"), b(1.0), "Solo Track");
-        if so.clicked() {
-            acts.push(("mixer.setStrip".into(), json!({"strip": tr.id.0, "solo": !tr.solo})));
-        }
-        if target_track {
-            let r_r = crate::widgets::letter_toggle(ui, b(2.0), "R", tr.mixer.record_arm, RED, &t, egui::Id::unique((&ap, "R")))
-                .on_hover_text(tl!("Enable track for recording"));
-            app.auto.add(&format!("{ap}.record"), b(2.0), "Enable Track for Recording");
-            if r_r.clicked() {
-                acts.push(("mixer.setStrip".into(), json!({"strip": tr.id.0, "recordArm": !tr.mixer.record_arm})));
-            }
-        } else {
-            let kresp = crate::widgets::icon_toggle(ui, b(2.0), Icon::Keyframe, kf, &t, egui::Id::unique((&ap, "kf")), Some(t.accent))
-                .on_hover_text(tl!("Write keyframes"));
-            app.auto.add(&format!("{ap}.keyframe"), b(2.0), "Write Keyframes");
-            if kresp.clicked() {
-                write_kf.insert(tr.id.0, !kf);
-            }
-        }
+        clip_mixer_mode_and_toggles(app, ui, sr, tr, &ap, target_track, kf, &mut write_kf, &mut acts);
         // fader + meter
-        let area = Rect::from_min_max(pos2(sr.min.x, y + 30.0), pos2(sr.max.x, sr.max.y - 46.0));
+        let area = Rect::from_min_max(pos2(sr.min.x, sr.min.y + 102.0), pos2(sr.max.x, sr.max.y - 46.0));
         if area.height() > 40.0 {
             let track = Rect::from_min_max(pos2(sr.min.x + 33.0, area.min.y + 8.0), pos2(sr.min.x + 37.0, area.max.y - 8.0));
             let ypos = |db: f64| track.max.y - db_to_pos(db) * track.height();
@@ -1237,6 +1182,66 @@ pub fn clip_mixer(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     ui.data_mut(|d| d.insert_temp(kf_id, write_kf));
     run_actions(app, &ui.ctx().clone(), acts);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn clip_mixer_mode_and_toggles(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    sr: Rect,
+    tr: &filmcraft_project::Track,
+    ap: &str,
+    target_track: bool,
+    kf: bool,
+    write_kf: &mut HashMap<u64, bool>,
+    acts: &mut Vec<(String, Value)>,
+) {
+    let t = app.tokens;
+    let mode = if target_track { tr.mixer.mode } else { filmcraft_engine::mixer::clip_mode(&app.session, tr.id) };
+    let mdr = Rect::from_min_size(pos2(sr.min.x + 4.0, sr.min.y + 2.0), vec2(sr.width() - 8.0, 16.0));
+    let mdresp = crate::widgets::dropdown_text(ui, mdr, crate::i18n::t(mode.label()), &t, egui::Id::unique((ap, "mode")));
+    app.auto.add(&format!("{ap}.mode"), mdr, &format!("{} automation mode: {}", if target_track { "Track" } else { "Clip" }, mode.label()));
+    egui::Popup::menu(&mdresp).show(|ui| {
+        for m in AutomationMode::ALL {
+            let r = ui.selectable_label(m == mode, crate::i18n::t(m.label()));
+            app.auto.add(&format!("{ap}.mode.{}", m.label()), r.rect, m.label());
+            if r.clicked() {
+                if target_track {
+                    acts.push(("mixer.setMode".into(), json!({"strip": tr.id.0, "mode": m.label()})));
+                } else {
+                    acts.push(("clipMixer.setMode".into(), json!({"track": tr.id.0, "mode": m.label()})));
+                }
+            }
+        }
+    });
+    let y = sr.min.y + 72.0;
+    let step = ((sr.width() - 6.0 - 18.0) / 2.0).min(24.0);
+    let b = |k: f32| Rect::from_min_size(pos2(sr.center().x - step - 9.0 + k * step, y), vec2(18.0, 16.0));
+    let mr = crate::widgets::letter_toggle(ui, b(0.0), "M", tr.muted, MUTE_ON, &t, egui::Id::unique((ap, "M")));
+    app.auto.add(&format!("{ap}.mute"), b(0.0), "Mute Track");
+    if mr.clicked() {
+        acts.push(("mixer.setStrip".into(), json!({"strip": tr.id.0, "muted": !tr.muted})));
+    }
+    let sresp = crate::widgets::letter_toggle(ui, b(1.0), "S", tr.solo, SOLO_ON, &t, egui::Id::unique((ap, "S")));
+    app.auto.add(&format!("{ap}.solo"), b(1.0), "Solo Track");
+    if sresp.clicked() {
+        acts.push(("mixer.setStrip".into(), json!({"strip": tr.id.0, "solo": !tr.solo})));
+    }
+    if target_track {
+        let r_r = crate::widgets::letter_toggle(ui, b(2.0), "R", tr.mixer.record_arm, RED, &t, egui::Id::unique((ap, "R")))
+            .on_hover_text(tl!("Enable track for recording"));
+        app.auto.add(&format!("{ap}.record"), b(2.0), "Enable Track for Recording");
+        if r_r.clicked() {
+            acts.push(("mixer.setStrip".into(), json!({"strip": tr.id.0, "recordArm": !tr.mixer.record_arm})));
+        }
+    } else {
+        let kresp =
+            crate::widgets::icon_toggle(ui, b(2.0), Icon::Keyframe, kf, &t, egui::Id::unique((ap, "kf")), Some(t.accent)).on_hover_text(tl!("Write keyframes"));
+        app.auto.add(&format!("{ap}.keyframe"), b(2.0), "Write Keyframes");
+        if kresp.clicked() {
+            write_kf.insert(tr.id.0, !kf);
+        }
+    }
 }
 
 #[cfg(test)]

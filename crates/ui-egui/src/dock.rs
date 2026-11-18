@@ -492,9 +492,7 @@ mod legacy {
         }
         fn upgrade_inspector(node: &mut Node<PanelKind>) {
             match node {
-                Node::Tabs { panels, active }
-                    if panels.as_slice() == [PanelKind::Properties, PanelKind::EssentialGraphics, PanelKind::Text] =>
-                {
+                Node::Tabs { panels, active } if panels.as_slice() == [PanelKind::Properties, PanelKind::EssentialGraphics, PanelKind::Text] => {
                     *panels = vec![PanelKind::InspectorVideo, PanelKind::InspectorAudio, PanelKind::Properties];
                     *active = (*active).min(2);
                 }
@@ -551,51 +549,19 @@ fn workspace_root(name: &str) -> Node<PanelKind> {
             let top_row = hsplit(
                 SplitSize::FixedFirst(270.0),
                 tabs(&[Project, MediaBrowser, Effects], 0),
-                hsplit(
-                    Ratio(0.55),
-                    tabs(&[Program], 0),
-                    tabs(&[ColorNodes], 0),
-                ),
+                hsplit(Ratio(0.55), tabs(&[Program], 0), tabs(&[ColorNodes], 0)),
             );
-            let bottom_row = hsplit(
-                Ratio(0.72),
-                tabs(&[LumetriColor], 0),
-                tabs(&[LumetriScopes], 0),
-            );
-            vsplit(
-                Ratio(0.35),
-                top_row,
-                vsplit(
-                    SplitSize::FixedFirst(110.0),
-                    tabs(&[ColorClips, Timeline, ColorGroups], 0),
-                    bottom_row,
-                ),
-            )
-        },
+            let bottom_row = hsplit(Ratio(0.72), tabs(&[LumetriColor], 0), tabs(&[LumetriScopes], 0));
+            vsplit(Ratio(0.35), top_row, vsplit(SplitSize::FixedFirst(110.0), tabs(&[ColorClips, Timeline, ColorGroups], 0), bottom_row))
+        }
         "Effects" => {
             let top_row = hsplit(
                 SplitSize::FixedFirst(290.0),
                 tabs(&[Effects, Project, MediaBrowser], 0),
-                hsplit(
-                    Ratio(0.55),
-                    tabs(&[Program, Source, ReferenceMonitor], 0),
-                    tabs(&[VfxNodes, EssentialGraphics], 0),
-                ),
+                hsplit(Ratio(0.55), tabs(&[Program, Source, ReferenceMonitor], 0), tabs(&[VfxNodes, EssentialGraphics], 0)),
             );
-            let bottom_row = hsplit(
-                Ratio(0.72),
-                tabs(&[EffectControls], 0),
-                tabs(&[LumetriScopes, Info, History], 0),
-            );
-            vsplit(
-                Ratio(0.36),
-                top_row,
-                vsplit(
-                    SplitSize::FixedFirst(76.0),
-                    tabs(&[ColorClips, Timeline, MacroTimeline], 0),
-                    bottom_row,
-                ),
-            )
+            let bottom_row = hsplit(Ratio(0.72), tabs(&[EffectControls], 0), tabs(&[LumetriScopes, Info, History], 0));
+            vsplit(Ratio(0.36), top_row, vsplit(SplitSize::FixedFirst(76.0), tabs(&[ColorClips, Timeline, MacroTimeline], 0), bottom_row))
         }
         "Audio" => hsplit(
             Ratio(0.8),
@@ -749,7 +715,9 @@ impl LayoutExt for Layout {
                 _ => false,
             }
         }
-        if let Some(root) = self.root.as_mut() && replace_in(root, from, to) {
+        if let Some(root) = self.root.as_mut()
+            && replace_in(root, from, to)
+        {
             return true;
         }
         for window in &mut self.floating {
@@ -813,11 +781,7 @@ impl LayoutExt for Layout {
             match n {
                 Node::Split { first, second, .. } => beside_program(first) || beside_program(second),
                 Node::Tabs { panels, .. } if panels.contains(&PanelKind::Program) => {
-                    *n = hsplit(
-                        SplitSize::Ratio(0.72),
-                        n.clone(),
-                        tabs(&[PanelKind::InspectorVideo, PanelKind::InspectorAudio, PanelKind::Properties], 0),
-                    );
+                    *n = hsplit(SplitSize::Ratio(0.72), n.clone(), tabs(&[PanelKind::InspectorVideo, PanelKind::InspectorAudio, PanelKind::Properties], 0));
                     true
                 }
                 _ => false,
@@ -989,7 +953,7 @@ pub fn sequence_tabs(ui: &mut egui::Ui, strip: Rect, seqs: &SeqTabs, t: &Tokens,
             actions.push(SeqAction::Close(*id));
         }
         if resp.secondary_clicked() {
-            actions.push(SeqAction::Menu(*id, resp.interact_pointer_pos().unwrap_or(tab_rect.left_bottom())));
+            actions.push(SeqAction::Menu(*id, resp.interact_pointer_pos().map_or(tab_rect.left_bottom(), |p| pos2(p.x, tab_rect.bottom()))));
         }
         x += w + 8.0;
     }
@@ -1253,10 +1217,7 @@ mod tests {
         assert!(saved_preset_docking(&empty, "Editing").is_none());
 
         let layout = workspace("Color");
-        let prefs = WorkspacePrefs {
-            saved: vec![SavedWorkspace::new("Multicámara", &layout).unwrap()],
-            current: "Multicámara".into(),
-        };
+        let prefs = WorkspacePrefs { saved: vec![SavedWorkspace::new("Multicámara", &layout).unwrap()], current: "Multicámara".into() };
         assert_eq!(preset_names(&prefs), vec!["Multicámara"]);
         assert_eq!(find_preset(&prefs, "multicámara").as_deref(), Some("Multicámara"));
         assert_eq!(saved_preset_docking(&prefs, "Multicámara"), Some(layout));

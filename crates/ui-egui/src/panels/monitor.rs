@@ -801,14 +801,100 @@ fn eyedropper(app: &mut FilmcraftApp, ui: &mut egui::Ui, resp: &egui::Response, 
         return;
     };
     // the parameter stores linear values, like the colour picker beside it
-    let lin = egui::Rgba::from(Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
-    let mut params = json!({"clip": armed.clip, "effect": armed.effect, "param": armed.param, "value": [lin.r(), lin.g(), lin.b(), 1.0]});
-    if let Some(k) = armed.mask {
-        params["mask"] = json!(k);
+    match &armed.kind {
+        crate::state::EyedropperKind::ColorParam => {
+            let lin = egui::Rgba::from(Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+            let mut params = json!({"clip": armed.clip, "effect": armed.effect, "param": armed.param, "value": [lin.r(), lin.g(), lin.b(), 1.0]});
+            if let Some(k) = armed.mask {
+                params["mask"] = json!(k);
+            }
+            if let Err(e) = app.session.execute("effects.setParam", params) {
+                app.ui.status = e.to_string();
+            }
+        }
+        crate::state::EyedropperKind::LumetriWb => {
+            let (r, g, b) = (rgb[0] as f64 / 255.0, rgb[1] as f64 / 255.0, rgb[2] as f64 / 255.0);
+            let avg = ((r + g + b) / 3.0).max(0.05);
+            let temp = ((b - r) / avg * 100.0).clamp(-100.0, 100.0).round();
+            let tint = ((g - (r + b) * 0.5) / avg * 100.0).clamp(-100.0, 100.0).round();
+            if let Err(e) = app.session.edit_group("White Balance Eyedropper", |s| {
+                s.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "temperature", "value": temp}))?;
+                s.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "tint", "value": tint}))
+            }) {
+                app.ui.status = e.to_string();
+            }
+        }
+        crate::state::EyedropperKind::LumetriHsl => {
+            let (r, g, b) = (rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0);
+            let (h, s, l) = rgb_to_hsl_deg(r, g, b);
+            let sat_min = (s * 100.0 - 15.0).clamp(0.0, 100.0).round();
+            let luma_min = (l * 100.0 - 20.0).clamp(0.0, 100.0).round();
+            let luma_max = (l * 100.0 + 20.0).clamp(0.0, 100.0).round();
+            if let Err(err) = app.session.edit_group("HSL Secondary Eyedropper", |sess| {
+                sess.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_on", "value": true}))?;
+                sess.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_hue", "value": h.round()}))?;
+                sess.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_sat_min", "value": sat_min}))?;
+                sess.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_luma_min", "value": luma_min}))?;
+                sess.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_luma_max", "value": luma_max}))
+            }) {
+                app.ui.status = err.to_string();
+            }
+        }
+        crate::state::EyedropperKind::LumetriCurve(param) => {
+            let (r, g, b) = (rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0);
+            let (h, s, l) = rgb_to_hsl_deg(r, g, b);
+            let is_hue_curve = matches!(param.as_str(), "hue_vs_hue" | "hue_vs_sat" | "hue_vs_luma" | "luma_vs_sat" | "sat_vs_sat");
+            let x = match param.as_str() {
+                "curve_red" => r,
+                "curve_green" => g,
+                "curve_blue" => b,
+                "curve_luma" => 0.2126 * r + 0.7152 * g + 0.0722 * b,
+                "hue_vs_hue" | "hue_vs_sat" | "hue_vs_luma" => h / 360.0,
+                "luma_vs_sat" => l,
+                "sat_vs_sat" => s,
+                _ => 0.2126 * r + 0.7152 * g + 0.0722 * b,
+            }
+            .clamp(0.0, 1.0);
+            let y = if is_hue_curve { 0.5 } else { x };
+            let mut pts = app
+                .session
+                .active_sequence()
+                .and_then(|q| q.find_item(filmcraft_project::ClipId(armed.clip)))
+                .and_then(|(_, it)| it.effects.get(armed.effect))
+                .and_then(|e| e.param(param))
+                .and_then(|p| p.value.as_curve())
+                .map(|c| c.to_vec())
+                .unwrap_or_else(|| if is_hue_curve { vec![] } else { vec![[0.0, 0.0], [1.0, 1.0]] });
+            if !pts.iter().any(|p| (p[0] - x).abs() < 0.015) {
+                pts.push([x, y]);
+                pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
+                let val: Vec<serde_json::Value> = pts.iter().map(|q| json!([q[0], q[1]])).collect();
+                if let Err(err) = app.session.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": param, "value": val})) {
+                    app.ui.status = err.to_string();
+                }
+            }
+        }
     }
-    if let Err(e) = app.session.execute("effects.setParam", params) {
-        app.ui.status = e.to_string();
+}
+
+fn rgb_to_hsl_deg(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) * 0.5;
+    let d = max - min;
+    if d <= 1e-5 {
+        return (0.0, 0.0, l);
     }
+    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let mut h = if (max - r).abs() < 1e-5 {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if (max - g).abs() < 1e-5 {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    h *= 60.0;
+    (h.rem_euclid(360.0), s.clamp(0.0, 1.0), l.clamp(0.0, 1.0))
 }
 
 /// The average colour of the 5×5 pixels around `uv` (0..1 across and down) of a frame, so a noisy

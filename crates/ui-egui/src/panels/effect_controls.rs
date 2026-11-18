@@ -852,7 +852,7 @@ fn param_value_widget(
                 set = Some(json!([rgba.r(), rgba.g(), rgba.b(), rgba.a()]));
             }
             // Eyedropper: arm it, then click a pixel in the Program monitor (Esc cancels)
-            let target = crate::state::Eyedropper { clip: clip.0, effect: idx, param: pd.id.to_string(), mask };
+            let target = crate::state::Eyedropper { clip: clip.0, effect: idx, param: pd.id.to_string(), mask, kind: crate::state::EyedropperKind::ColorParam };
             let armed = app.ui.eyedropper.as_ref() == Some(&target);
             let drop = icons::button(vui, Icon::Eyedropper, 18.0, armed, &t, tl!("Eyedropper (pick a color from the Program monitor)"));
             app.auto.add(&format!("effectControls.{}.{}.eyedropper", e.effect, pkey), drop.rect, "Eyedropper");
@@ -1167,11 +1167,7 @@ fn inspector_effect_picker_window(ctx: &egui::Context, t: Tokens, actions: &mut 
         .default_size(vec2(340.0, 420.0))
         .min_size(vec2(260.0, 240.0))
         .show(ctx, |ui| {
-            let search_resp = ui.add(
-                egui::TextEdit::singleline(&mut st.query)
-                    .hint_text(tl!("Search effects…"))
-                    .desired_width(f32::INFINITY),
-            );
+            let search_resp = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text(tl!("Search effects…")).desired_width(f32::INFINITY));
             if st.just_opened {
                 search_resp.request_focus();
                 st.just_opened = false;
@@ -1234,13 +1230,7 @@ fn inspector_effect_picker_window(ctx: &egui::Context, t: Tokens, actions: &mut 
                         sui.painter().rect_filled(rr, 4.0, t.hover);
                     }
                     sui.painter().text(pos2(rr.min.x + 8.0, rr.center().y), Align2::LEFT_CENTER, label, Tokens::ui(12.0), t.text);
-                    sui.painter().text(
-                        pos2(rr.max.x - 8.0, rr.center().y),
-                        Align2::RIGHT_CENTER,
-                        crate::i18n::t(cat_name),
-                        Tokens::ui(10.5),
-                        t.text_dim,
-                    );
+                    sui.painter().text(pos2(rr.max.x - 8.0, rr.center().y), Align2::RIGHT_CENTER, crate::i18n::t(cat_name), Tokens::ui(10.5), t.text_dim);
                     if rresp.clicked() {
                         actions.push(("effects.apply".into(), json!({"clips": [st.clip], "effect": def.id})));
                         if !shift {
@@ -1401,16 +1391,13 @@ fn inspector_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, active
     name_job.wrap.max_width = (hr.width() - 28.0).max(40.0);
     name_job.wrap.max_rows = 1;
     let name_g = bui.painter().layout_job(name_job);
-    bui.painter()
-        .with_clip_rect(Rect::from_min_max(pos2(hr.min.x + 22.0, hr.min.y), hr.max))
-        .galley(pos2(hr.min.x + 22.0, hr.center().y - name_g.size().y * 0.5), name_g, t.text);
+    bui.painter().with_clip_rect(Rect::from_min_max(pos2(hr.min.x + 22.0, hr.min.y), hr.max)).galley(
+        pos2(hr.min.x + 22.0, hr.center().y - name_g.size().y * 0.5),
+        name_g,
+        t.text,
+    );
     bui.add_space(4.0);
 
-    let row = |ui: &mut egui::Ui, label: &str| -> Rect {
-        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
-        ui.painter().text(pos2(r.min.x + 16.0, r.center().y), Align2::LEFT_CENTER, label, Tokens::ui(11.5), t.text_dim);
-        r
-    };
     let section = |ui: &mut egui::Ui,
                    app: &mut FilmcraftApp,
                    name: &str,
@@ -1469,7 +1456,6 @@ fn inspector_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, active
     egui::ScrollArea::vertical().id_salt("props-scroll").auto_shrink([false, false]).show(&mut bui, |bui| {
         bui.set_max_width((bui.available_width() - 12.0).max(1.0));
         let eff_idx = |id: &str| it.effects.iter().position(|e| e.effect == id);
-        let val = |eid: &str, p: &str| it.effect(eid).and_then(|e| e.param(p)).map(|p| p.value_at(mt));
 
         // ---- VIDEO INSPECTOR ----
         if show_video {
@@ -1481,77 +1467,7 @@ fn inspector_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, active
                     actions.push(("effects.toggleEnabled".into(), json!({"clip": clip.0, "index": i})));
                 }
                 if motion_open {
-                    for (label, p, unit, speed, range) in [
-                        (tl!("Position"), "position", "", 1.0, (-100_000.0, 100_000.0)),
-                        (tl!("Anchor point"), "anchor", "", 1.0, (-100_000.0, 100_000.0)),
-                        (tl!("Scale"), "scale", " %", 0.5, (0.0, 10000.0)),
-                        (tl!("Rotation"), "rotation", " °", 0.5, (-36000.0, 36000.0)),
-                    ] {
-                        let r = row(bui, label);
-                        let mut vui = bui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(Rect::from_min_max(pos2(r.min.x + 146.0, r.min.y + 3.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 3.0)))
-                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                        );
-                        match val("motion", p) {
-                            Some(ParamValue::Vec2(v)) => {
-                                let (_, nx) = crate::widgets::hot_number(
-                                    &mut vui,
-                                    &format!("{label} X"),
-                                    egui::Id::unique(("pp", p, "x", clip.0)),
-                                    v.x,
-                                    HotNumberOptions::new(speed, range, 0, " X", &t),
-                                );
-                                vui.add_space(10.0);
-                                let (_, ny) = crate::widgets::hot_number(
-                                    &mut vui,
-                                    &format!("{label} Y"),
-                                    egui::Id::unique(("pp", p, "y", clip.0)),
-                                    v.y,
-                                    HotNumberOptions::new(speed, range, 0, " Y", &t),
-                                );
-                                if nx.is_some() || ny.is_some() {
-                                    actions.push((
-                                        "effects.setParam".into(),
-                                        json!({"clip": clip.0, "effect": "motion", "param": p, "value": [nx.unwrap_or(v.x), ny.unwrap_or(v.y)]}),
-                                    ));
-                                }
-                            }
-                            Some(ParamValue::Float(v)) => {
-                                let (_, nv) = crate::widgets::hot_number(
-                                    &mut vui,
-                                    label,
-                                    egui::Id::unique(("pp", p, clip.0)),
-                                    v,
-                                    HotNumberOptions::new(speed, range, if p == "scale" { 0 } else { 1 }, unit, &t),
-                                );
-                                if let Some(nv) = nv {
-                                    actions.push(("effects.setParam".into(), json!({"clip": clip.0, "effect": "motion", "param": p, "value": nv})));
-                                }
-                            }
-                            _ => {}
-                        }
-                        properties_nav(app, bui, r, clip, &it, mt, "motion", p, &mut actions);
-                    }
-                    let r = row(bui, tl!("Opacity"));
-                    let mut vui = bui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(Rect::from_min_max(pos2(r.min.x + 146.0, r.min.y + 3.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 3.0)))
-                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                    );
-                    if let Some(ParamValue::Float(v)) = val("opacity", "opacity") {
-                        let (_, nv) = crate::widgets::hot_number(
-                            &mut vui,
-                            tl!("Opacity"),
-                            egui::Id::unique(("pp-op", clip.0)),
-                            v,
-                            HotNumberOptions::new(0.5, (0.0, 100.0), 0, " %", &t),
-                        );
-                        if let Some(nv) = nv {
-                            actions.push(("effects.setParam".into(), json!({"clip": clip.0, "effect": "opacity", "param": "opacity", "value": nv})));
-                        }
-                    }
-                    properties_nav(app, bui, r, clip, &it, mt, "opacity", "opacity", &mut actions);
+                    render_inspector_transform_rows(app, bui, clip, &it, mt, t, &mut actions);
                 }
 
                 let crop = eff_idx("crop");
@@ -1565,29 +1481,7 @@ fn inspector_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, active
                     }
                 }
                 if crop_open {
-                    for (label, p) in [(tl!("Left"), "left"), (tl!("Top"), "top"), (tl!("Right"), "right"), (tl!("Bottom"), "bottom")] {
-                        let r = row(bui, label);
-                        let mut vui = bui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(Rect::from_min_max(pos2(r.min.x + 146.0, r.min.y + 3.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 3.0)))
-                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                        );
-                        let v = val("crop", p).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        let (_, nv) = crate::widgets::hot_number(
-                            &mut vui,
-                            label,
-                            egui::Id::unique(("pp-crop", p, clip.0)),
-                            v,
-                            HotNumberOptions::new(0.2, (0.0, 100.0), 1, " %", &t),
-                        );
-                        if let Some(nv) = nv {
-                            if crop.is_none() {
-                                actions.push(("effects.apply".into(), json!({"clips": [clip.0], "effect": "crop"})));
-                            }
-                            actions.push(("effects.setParam".into(), json!({"clip": clip.0, "effect": "crop", "param": p, "value": nv})));
-                        }
-                        properties_nav(app, bui, r, clip, &it, mt, "crop", p, &mut actions);
-                    }
+                    render_inspector_crop_rows(app, bui, clip, &it, mt, crop.is_some(), t, &mut actions);
                 }
 
                 // Speed (Velocidad) — basic video effect inside Video Inspector
@@ -1611,64 +1505,7 @@ fn inspector_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, active
                     }
                 }
                 if speed_open {
-                    let r = row(bui, tl!("Speed"));
-                    let mut vui = bui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(Rect::from_min_max(pos2(r.min.x + 146.0, r.min.y + 3.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 3.0)))
-                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                    );
-                    let speed_pct = it.speed * 100.0;
-                    let (_, ns) = crate::widgets::hot_number(
-                        &mut vui,
-                        tl!("Speed"),
-                        egui::Id::unique(("pp-speed", clip.0)),
-                        speed_pct,
-                        HotNumberOptions::new(1.0, (10.0, 1000.0), 0, " %", &t),
-                    );
-                    if let Some(ns) = ns {
-                        actions.push((
-                            "clip.speedDuration".into(),
-                            json!({"clips": [clip.0], "speed": ns, "reverse": it.reverse, "ripple": false, "maintainPitch": it.maintain_pitch}),
-                        ));
-                    }
-                    let rr = Rect::from_center_size(pos2(r.max.x - PROPS_NAV_X, r.center().y), vec2(14.0, 14.0));
-                    let r_resp = bui.interact(rr, egui::Id::unique(("pp-speed-reset", clip.0)), Sense::click()).on_hover_text(tl!("Reset Speed"));
-                    icons::paint(bui.painter(), rr, Icon::Reset, if r_resp.hovered() { t.text } else { t.text_dim });
-                    if r_resp.clicked() {
-                        actions.push((
-                            "clip.speedDuration".into(),
-                            json!({"clips": [clip.0], "speed": 100.0, "reverse": false, "ripple": false, "maintainPitch": true}),
-                        ));
-                    }
-
-                    // DaVinci Resolve-style checkbox-first rows: [✓] Label
-                    let mut rev = it.reverse;
-                    let (rr_rev, _) = bui.allocate_exact_size(vec2(bui.available_width(), 24.0), Sense::hover());
-                    let mut cui_rev = bui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(Rect::from_min_max(pos2(rr_rev.min.x + 16.0, rr_rev.min.y), rr_rev.max))
-                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                    );
-                    if cui_rev.checkbox(&mut rev, tl!("Reverse Speed")).changed() {
-                        actions.push((
-                            "clip.speedDuration".into(),
-                            json!({"clips": [clip.0], "speed": speed_pct, "reverse": rev, "ripple": false, "maintainPitch": it.maintain_pitch}),
-                        ));
-                    }
-
-                    let mut pitch = it.maintain_pitch;
-                    let (rr_pitch, _) = bui.allocate_exact_size(vec2(bui.available_width(), 24.0), Sense::hover());
-                    let mut cui_pitch = bui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(Rect::from_min_max(pos2(rr_pitch.min.x + 16.0, rr_pitch.min.y), rr_pitch.max))
-                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                    );
-                    if cui_pitch.checkbox(&mut pitch, tl!("Maintain Audio Pitch")).changed() {
-                        actions.push((
-                            "clip.speedDuration".into(),
-                            json!({"clips": [clip.0], "speed": speed_pct, "reverse": it.reverse, "ripple": false, "maintainPitch": pitch}),
-                        ));
-                    }
+                    render_inspector_speed(bui, clip, &it, t, &mut actions);
                 }
 
                 // Applied & preset Video Effects inside Video Inspector
@@ -1679,8 +1516,7 @@ fn inspector_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, active
                     .filter(|(_, e)| {
                         e.effect != "crop"
                             && e.effect != "lumetri"
-                            && filmcraft_project::find_effect(&e.effect)
-                                .is_some_and(|d| !d.intrinsic && !filmcraft_project::graphic::is_layer_id(d.id))
+                            && filmcraft_project::find_effect(&e.effect).is_some_and(|d| !d.intrinsic && !filmcraft_project::graphic::is_layer_id(d.id))
                     })
                     .map(|(i, _)| i)
                     .collect();
@@ -1696,34 +1532,7 @@ fn inspector_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, active
                     }
                 }
                 if vfx_open {
-                    bui.add_space(4.0);
-                    for eid in PRESET_VIDEO_EFFECTS {
-                        if let Some(idx) = it.effects.iter().position(|e| e.effect == eid)
-                            && let Some(e) = it.effects.get(idx)
-                        {
-                            inspector_added_effect_card(app, bui, clip, &it, mt, idx, e, t, &mut actions);
-                        } else {
-                            inspector_preset_effect_row(bui, clip, eid, t, &mut actions);
-                        }
-                    }
-                    for &idx in &vfx_indices {
-                        if let Some(e) = it.effects.get(idx)
-                            && !PRESET_VIDEO_EFFECTS.contains(&e.effect.as_str())
-                        {
-                            inspector_added_effect_card(app, bui, clip, &it, mt, idx, e, t, &mut actions);
-                        }
-                    }
-                    bui.add_space(2.0);
-                    if bui.button(tl!("+ Add Effect")).clicked() {
-                        let pid = egui::Id::unique("inspector-effect-picker");
-                        bui.ctx().data_mut(|d| {
-                            d.insert_temp(
-                                pid,
-                                EffectPickerState { open: true, is_audio: false, clip: clip.0, query: String::new(), category: None, just_opened: true },
-                            );
-                        });
-                    }
-                    bui.add_space(4.0);
+                    render_inspector_vfx_list(app, bui, clip, &it, mt, &vfx_indices, t, &mut actions);
                 }
             } else if active_tab == InspectorTab::Video {
                 bui.add_space(8.0);
@@ -1736,7 +1545,6 @@ fn inspector_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, active
             if let Some((aclip, ait, _)) = clips.iter().find(|c| c.2 == TrackKind::Audio) {
                 let aclip = *aclip;
                 let amt = ait.effect_time_at(ph.clamp(ait.start, (ait.end() - Tick(1)).max(ait.start)));
-                let aval = |eid: &str, p: &str| ait.effect(eid).and_then(|e| e.param(p)).map(|p| p.value_at(amt));
                 let vol_idx = ait.effects.iter().position(|e| e.effect == "volume");
                 let vol_on = vol_idx.and_then(|i| ait.effects.get(i)).is_some_and(|e| e.enabled);
                 let (audio_open, audio_toggled) = section(bui, app, "Audio", Some(vol_on), vol_idx.map(|i| (i, aclip.0)), &mut actions);
@@ -1744,41 +1552,7 @@ fn inspector_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, active
                     actions.push(("effects.toggleEnabled".into(), json!({"clip": aclip.0, "index": i})));
                 }
                 if audio_open {
-                    let r = row(bui, tl!("Level"));
-                    let mut vui = bui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(Rect::from_min_max(pos2(r.min.x + 146.0, r.min.y + 3.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 3.0)))
-                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                    );
-                    let v = aval("volume", "level").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let (_, nv) = crate::widgets::hot_number(
-                        &mut vui,
-                        tl!("Level"),
-                        egui::Id::unique(("pp-vol", aclip.0)),
-                        v,
-                        HotNumberOptions::new(0.1, (-96.0, 15.0), 1, " dB", &t),
-                    );
-                    if let Some(nv) = nv {
-                        actions.push(("effects.setParam".into(), json!({"clip": aclip.0, "effect": "volume", "param": "level", "value": nv})));
-                    }
-                    properties_nav(app, bui, r, aclip, ait, amt, "volume", "level", &mut actions);
-                    let r = row(bui, tl!("Pan"));
-                    let mut vui = bui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(Rect::from_min_max(pos2(r.min.x + 146.0, r.min.y + 3.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 3.0)))
-                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                    );
-                    let v = aval("panner", "balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let (_, nv) = crate::widgets::hot_number(
-                        &mut vui,
-                        tl!("Pan"),
-                        egui::Id::unique(("pp-pan", aclip.0)),
-                        v,
-                        HotNumberOptions::new(0.5, (-100.0, 100.0), 0, "", &t),
-                    );
-                    if let Some(nv) = nv {
-                        actions.push(("effects.setParam".into(), json!({"clip": aclip.0, "effect": "panner", "param": "balance", "value": nv})));
-                    }
+                    render_inspector_audio_level_pan(app, bui, aclip, ait, amt, t, &mut actions);
 
                     // Applied & preset Audio Effects
                     let afx_indices: Vec<usize> = ait
@@ -1800,34 +1574,7 @@ fn inspector_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, active
                         }
                     }
                     if afx_open {
-                        bui.add_space(4.0);
-                        for eid in PRESET_AUDIO_EFFECTS {
-                            if let Some(idx) = ait.effects.iter().position(|e| e.effect == eid)
-                                && let Some(e) = ait.effects.get(idx)
-                            {
-                                inspector_added_effect_card(app, bui, aclip, ait, amt, idx, e, t, &mut actions);
-                            } else {
-                                inspector_preset_effect_row(bui, aclip, eid, t, &mut actions);
-                            }
-                        }
-                        for &idx in &afx_indices {
-                            if let Some(e) = ait.effects.get(idx)
-                                && !PRESET_AUDIO_EFFECTS.contains(&e.effect.as_str())
-                            {
-                                inspector_added_effect_card(app, bui, aclip, ait, amt, idx, e, t, &mut actions);
-                            }
-                        }
-                        bui.add_space(2.0);
-                        if bui.button(tl!("+ Add Effect")).clicked() {
-                            let pid = egui::Id::unique("inspector-effect-picker");
-                            bui.ctx().data_mut(|d| {
-                                d.insert_temp(
-                                    pid,
-                                    EffectPickerState { open: true, is_audio: true, clip: aclip.0, query: String::new(), category: None, just_opened: true },
-                                );
-                            });
-                        }
-                        bui.add_space(4.0);
+                        render_inspector_audio_fx(app, bui, aclip, ait, amt, &afx_indices, t, &mut actions);
                     }
                 }
             } else if active_tab == InspectorTab::Audio {
@@ -1838,93 +1585,385 @@ fn inspector_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, active
 
         // ---- CLIP PROPERTIES (METADATA: CODECS, DURATION, SIZE, LOCATION) ----
         if show_meta && section(bui, app, "Clip Properties", None, None, &mut actions).0 {
-            let seq_fps = app.session.active_sequence().map(|s| s.settings.frame_rate).unwrap_or_default();
-            let seq_drop = app.session.active_sequence().is_some_and(|s| s.settings.drop_frame);
-            let seq_rate = app.session.active_sequence().map_or(48000, |s| s.settings.sample_rate as i64);
-            let fmt_tc = |tick: Tick| filmcraft_time::format_time(tick, seq_fps, seq_drop, filmcraft_time::TimeDisplay::Timecode, seq_rate);
-
-            let kv = |bui: &mut egui::Ui, label: &str, value: String| {
-                let (r, _) = bui.allocate_exact_size(vec2(bui.available_width(), 22.0), Sense::hover());
-                bui.painter().text(pos2(r.min.x + 16.0, r.center().y), Align2::LEFT_CENTER, label, Tokens::ui(11.5), t.text_dim);
-                let val_x = r.min.x + 132.0;
-                let max_w = (r.max.x - val_x - 6.0).max(40.0);
-                let mut job = egui::text::LayoutJob::simple_singleline(value.clone(), Tokens::ui(11.5), t.text);
-                job.wrap.max_width = max_w;
-                job.wrap.max_rows = 1;
-                let g = bui.painter().layout_job(job);
-                bui.painter()
-                    .with_clip_rect(Rect::from_min_max(pos2(val_x, r.min.y), pos2(r.max.x - 4.0, r.max.y)))
-                    .galley(pos2(val_x, r.center().y - g.size().y * 0.5), g, t.text);
-                bui.interact(r, egui::Id::unique(("props-kv", label, clip.0)), Sense::hover()).on_hover_text(value);
-            };
-
-            kv(bui, tl!("Timeline Start:"), fmt_tc(it.start));
-            kv(bui, tl!("Duration:"), fmt_tc(it.duration));
-            kv(bui, tl!("Speed:"), format!("{:.0}%{}", it.speed * 100.0, if it.reverse { " (Rev)" } else { "" }));
-
-            if let Some(proj_item) = app.session.project.item(it.item) {
-                kv(bui, tl!("Type:"), crate::i18n::t(proj_item.type_label()).to_string());
-                if let Some(m) = proj_item.as_media() {
-                    if !m.info.container.is_empty() {
-                        kv(bui, tl!("Container:"), m.info.container.to_uppercase());
-                    }
-                    let size_bytes = m.info.file_size.or_else(|| m.identity.map(|i| i.size)).or_else(|| match &m.media {
-                        filmcraft_project::MediaRef::File { path } => std::fs::metadata(path).ok().map(|md| md.len()),
-                        _ => None,
-                    });
-                    if let Some(sz) = size_bytes {
-                        kv(bui, tl!("File Size:"), format_bytes(sz));
-                    }
-                    kv(
-                        bui,
-                        tl!("Source Duration:"),
-                        filmcraft_time::format_time(m.duration(), m.frame_rate(), false, filmcraft_time::TimeDisplay::Timecode, 48000),
-                    );
-                    if let Some(v) = &m.info.video {
-                        let codec = if v.codec.is_empty() { "—".to_string() } else { v.codec.clone() };
-                        kv(bui, tl!("Video Codec:"), codec);
-                        kv(bui, tl!("Resolution:"), format!("{} × {} · {} fps", v.width, v.height, v.frame_rate.label()));
-                        let (px, py) = m.pixel_aspect();
-                        kv(bui, tl!("Pixel Aspect:"), format!("{px}:{py}"));
-                    }
-                    if let Some(a) = m.info.audio() {
-                        let codec = if a.codec.is_empty() { "—".to_string() } else { a.codec.clone() };
-                        kv(bui, tl!("Audio Codec:"), codec);
-                        kv(bui, tl!("Audio Format:"), format!("{} Hz · {} ch", a.sample_rate, a.channels));
-                    }
-                    match &m.media {
-                        filmcraft_project::MediaRef::File { path } => {
-                            let (r, _) = bui.allocate_exact_size(vec2(bui.available_width(), 24.0), Sense::hover());
-                            bui.painter().text(pos2(r.min.x + 16.0, r.center().y), Align2::LEFT_CENTER, tl!("Location:"), Tokens::ui(11.5), t.text_dim);
-                            let copy_r = Rect::from_center_size(pos2(r.max.x - 20.0, r.center().y), vec2(32.0, 18.0));
-                            let copy_resp = bui.interact(copy_r, egui::Id::unique(("props-copy-path", clip.0)), Sense::click()).on_hover_text(path);
-                            bui.painter().rect_filled(copy_r, 3.0, if copy_resp.hovered() { t.hover } else { t.tl_header_bg });
-                            bui.painter().text(copy_r.center(), Align2::CENTER_CENTER, tl!("Copy"), Tokens::ui(10.0), t.text);
-                            if copy_resp.clicked() {
-                                ui.ctx().copy_text(path.clone());
-                            }
-                            let val_x = r.min.x + 132.0;
-                            let max_w = (copy_r.min.x - val_x - 6.0).max(30.0);
-                            let mut job = egui::text::LayoutJob::simple_singleline(path.clone(), Tokens::ui(11.0), t.text);
-                            job.wrap.max_width = max_w;
-                            job.wrap.max_rows = 1;
-                            let g = bui.painter().layout_job(job);
-                            bui.painter()
-                                .with_clip_rect(Rect::from_min_max(pos2(val_x, r.min.y), pos2(copy_r.min.x - 4.0, r.max.y)))
-                                .galley(pos2(val_x, r.center().y - g.size().y * 0.5), g, t.text);
-                            bui.interact(Rect::from_min_max(pos2(val_x, r.min.y), pos2(copy_r.min.x - 4.0, r.max.y)), egui::Id::unique(("props-path-tip", clip.0)), Sense::hover())
-                                .on_hover_text(path);
-                        }
-                        filmcraft_project::MediaRef::Generator(generator) => {
-                            kv(bui, tl!("Source:"), format!("{generator:?}"));
-                        }
-                    }
-                }
-            }
+            render_inspector_clip_meta(app, ui, bui, clip, &it, t);
         }
     });
     inspector_effect_picker_window(ui.ctx(), t, &mut actions);
     run(app, ui.ctx(), actions);
+}
+
+fn props_row(ui: &mut egui::Ui, label: &str, t: Tokens) -> (Rect, egui::Ui) {
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
+    ui.painter().text(pos2(r.min.x + 16.0, r.center().y), Align2::LEFT_CENTER, label, Tokens::ui(11.5), t.text_dim);
+    let vui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_max(pos2(r.min.x + 146.0, r.min.y + 3.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 3.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    (r, vui)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_inspector_transform_rows(
+    app: &mut FilmcraftApp,
+    bui: &mut egui::Ui,
+    clip: ClipId,
+    it: &TrackItem,
+    mt: Tick,
+    t: Tokens,
+    actions: &mut Vec<(String, Value)>,
+) {
+    let val = |eid: &str, p: &str| it.effect(eid).and_then(|e| e.param(p)).map(|p| p.value_at(mt));
+    for (label, p, unit, speed, range) in [
+        (tl!("Position"), "position", "", 1.0, (-100_000.0, 100_000.0)),
+        (tl!("Anchor point"), "anchor", "", 1.0, (-100_000.0, 100_000.0)),
+        (tl!("Scale"), "scale", " %", 0.5, (0.0, 10000.0)),
+        (tl!("Rotation"), "rotation", " °", 0.5, (-36000.0, 36000.0)),
+    ] {
+        let (r, mut vui) = props_row(bui, label, t);
+        match val("motion", p) {
+            Some(ParamValue::Vec2(v)) => {
+                let (_, nx) = crate::widgets::hot_number(
+                    &mut vui,
+                    &format!("{label} X"),
+                    egui::Id::unique(("pp", p, "x", clip.0)),
+                    v.x,
+                    HotNumberOptions::new(speed, range, 0, " X", &t),
+                );
+                vui.add_space(10.0);
+                let (_, ny) = crate::widgets::hot_number(
+                    &mut vui,
+                    &format!("{label} Y"),
+                    egui::Id::unique(("pp", p, "y", clip.0)),
+                    v.y,
+                    HotNumberOptions::new(speed, range, 0, " Y", &t),
+                );
+                if nx.is_some() || ny.is_some() {
+                    actions.push((
+                        "effects.setParam".into(),
+                        json!({"clip": clip.0, "effect": "motion", "param": p, "value": [nx.unwrap_or(v.x), ny.unwrap_or(v.y)]}),
+                    ));
+                }
+            }
+            Some(ParamValue::Float(v)) => {
+                let (_, nv) = crate::widgets::hot_number(
+                    &mut vui,
+                    label,
+                    egui::Id::unique(("pp", p, clip.0)),
+                    v,
+                    HotNumberOptions::new(speed, range, if p == "scale" { 0 } else { 1 }, unit, &t),
+                );
+                if let Some(nv) = nv {
+                    actions.push(("effects.setParam".into(), json!({"clip": clip.0, "effect": "motion", "param": p, "value": nv})));
+                }
+            }
+            _ => {}
+        }
+        properties_nav(app, bui, r, clip, it, mt, "motion", p, actions);
+    }
+    let (r, mut vui) = props_row(bui, tl!("Opacity"), t);
+    if let Some(ParamValue::Float(v)) = val("opacity", "opacity") {
+        let (_, nv) =
+            crate::widgets::hot_number(&mut vui, tl!("Opacity"), egui::Id::unique(("pp-op", clip.0)), v, HotNumberOptions::new(0.5, (0.0, 100.0), 0, " %", &t));
+        if let Some(nv) = nv {
+            actions.push(("effects.setParam".into(), json!({"clip": clip.0, "effect": "opacity", "param": "opacity", "value": nv})));
+        }
+    }
+    properties_nav(app, bui, r, clip, it, mt, "opacity", "opacity", actions);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_inspector_crop_rows(
+    app: &mut FilmcraftApp,
+    bui: &mut egui::Ui,
+    clip: ClipId,
+    it: &TrackItem,
+    mt: Tick,
+    has_crop: bool,
+    t: Tokens,
+    actions: &mut Vec<(String, Value)>,
+) {
+    for (label, p) in [(tl!("Left"), "left"), (tl!("Top"), "top"), (tl!("Right"), "right"), (tl!("Bottom"), "bottom")] {
+        let (r, mut vui) = props_row(bui, label, t);
+        let v = it.effect("crop").and_then(|e| e.param(p)).map(|p| p.value_at(mt)).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let (_, nv) =
+            crate::widgets::hot_number(&mut vui, label, egui::Id::unique(("pp-crop", p, clip.0)), v, HotNumberOptions::new(0.2, (0.0, 100.0), 1, " %", &t));
+        if let Some(nv) = nv {
+            if !has_crop {
+                actions.push(("effects.apply".into(), json!({"clips": [clip.0], "effect": "crop"})));
+            }
+            actions.push(("effects.setParam".into(), json!({"clip": clip.0, "effect": "crop", "param": p, "value": nv})));
+        }
+        properties_nav(app, bui, r, clip, it, mt, "crop", p, actions);
+    }
+}
+
+fn render_inspector_speed(bui: &mut egui::Ui, clip: ClipId, it: &TrackItem, t: Tokens, actions: &mut Vec<(String, Value)>) {
+    let (r, _) = bui.allocate_exact_size(vec2(bui.available_width(), 28.0), Sense::hover());
+    bui.painter().text(pos2(r.min.x + 16.0, r.center().y), Align2::LEFT_CENTER, tl!("Speed"), Tokens::ui(11.5), t.text_dim);
+    let mut vui = bui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_max(pos2(r.min.x + 146.0, r.min.y + 3.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 3.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let speed_pct = it.speed * 100.0;
+    let (_, ns) = crate::widgets::hot_number(
+        &mut vui,
+        tl!("Speed"),
+        egui::Id::unique(("pp-speed", clip.0)),
+        speed_pct,
+        HotNumberOptions::new(1.0, (10.0, 1000.0), 0, " %", &t),
+    );
+    if let Some(ns) = ns {
+        actions.push((
+            "clip.speedDuration".into(),
+            json!({"clips": [clip.0], "speed": ns, "reverse": it.reverse, "ripple": false, "maintainPitch": it.maintain_pitch}),
+        ));
+    }
+    let rr = Rect::from_center_size(pos2(r.max.x - PROPS_NAV_X, r.center().y), vec2(14.0, 14.0));
+    let r_resp = bui.interact(rr, egui::Id::unique(("pp-speed-reset", clip.0)), Sense::click()).on_hover_text(tl!("Reset Speed"));
+    icons::paint(bui.painter(), rr, Icon::Reset, if r_resp.hovered() { t.text } else { t.text_dim });
+    if r_resp.clicked() {
+        actions.push(("clip.speedDuration".into(), json!({"clips": [clip.0], "speed": 100.0, "reverse": false, "ripple": false, "maintainPitch": true})));
+    }
+
+    let mut rev = it.reverse;
+    let (rr_rev, _) = bui.allocate_exact_size(vec2(bui.available_width(), 24.0), Sense::hover());
+    let mut cui_rev = bui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_max(pos2(rr_rev.min.x + 16.0, rr_rev.min.y), rr_rev.max))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    if cui_rev.checkbox(&mut rev, tl!("Reverse Speed")).changed() {
+        actions.push((
+            "clip.speedDuration".into(),
+            json!({"clips": [clip.0], "speed": speed_pct, "reverse": rev, "ripple": false, "maintainPitch": it.maintain_pitch}),
+        ));
+    }
+
+    let mut pitch = it.maintain_pitch;
+    let (rr_pitch, _) = bui.allocate_exact_size(vec2(bui.available_width(), 24.0), Sense::hover());
+    let mut cui_pitch = bui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_max(pos2(rr_pitch.min.x + 16.0, rr_pitch.min.y), rr_pitch.max))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    if cui_pitch.checkbox(&mut pitch, tl!("Maintain Audio Pitch")).changed() {
+        actions.push((
+            "clip.speedDuration".into(),
+            json!({"clips": [clip.0], "speed": speed_pct, "reverse": it.reverse, "ripple": false, "maintainPitch": pitch}),
+        ));
+    }
+}
+
+fn render_inspector_audio_level_pan(
+    app: &mut FilmcraftApp,
+    bui: &mut egui::Ui,
+    aclip: ClipId,
+    ait: &TrackItem,
+    amt: Tick,
+    t: Tokens,
+    actions: &mut Vec<(String, Value)>,
+) {
+    let aval = |eid: &str, p: &str| ait.effect(eid).and_then(|e| e.param(p)).map(|p| p.value_at(amt));
+    let (r, _) = bui.allocate_exact_size(vec2(bui.available_width(), 28.0), Sense::hover());
+    bui.painter().text(pos2(r.min.x + 16.0, r.center().y), Align2::LEFT_CENTER, tl!("Level"), Tokens::ui(11.5), t.text_dim);
+    let mut vui = bui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_max(pos2(r.min.x + 146.0, r.min.y + 3.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 3.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let v = aval("volume", "level").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let (_, nv) =
+        crate::widgets::hot_number(&mut vui, tl!("Level"), egui::Id::unique(("pp-vol", aclip.0)), v, HotNumberOptions::new(0.1, (-96.0, 15.0), 1, " dB", &t));
+    if let Some(nv) = nv {
+        actions.push(("effects.setParam".into(), json!({"clip": aclip.0, "effect": "volume", "param": "level", "value": nv})));
+    }
+    properties_nav(app, bui, r, aclip, ait, amt, "volume", "level", actions);
+
+    let (r, _) = bui.allocate_exact_size(vec2(bui.available_width(), 28.0), Sense::hover());
+    bui.painter().text(pos2(r.min.x + 16.0, r.center().y), Align2::LEFT_CENTER, tl!("Pan"), Tokens::ui(11.5), t.text_dim);
+    let mut vui = bui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_max(pos2(r.min.x + 146.0, r.min.y + 3.0), pos2(r.max.x - PROPS_VALUE_R, r.max.y - 3.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let v = aval("panner", "balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let (_, nv) =
+        crate::widgets::hot_number(&mut vui, tl!("Pan"), egui::Id::unique(("pp-pan", aclip.0)), v, HotNumberOptions::new(0.5, (-100.0, 100.0), 0, "", &t));
+    if let Some(nv) = nv {
+        actions.push(("effects.setParam".into(), json!({"clip": aclip.0, "effect": "panner", "param": "balance", "value": nv})));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_inspector_audio_fx(
+    app: &mut FilmcraftApp,
+    bui: &mut egui::Ui,
+    aclip: ClipId,
+    ait: &TrackItem,
+    amt: Tick,
+    afx_indices: &[usize],
+    t: Tokens,
+    actions: &mut Vec<(String, Value)>,
+) {
+    bui.add_space(4.0);
+    for eid in PRESET_AUDIO_EFFECTS {
+        if let Some(idx) = ait.effects.iter().position(|e| e.effect == eid)
+            && let Some(e) = ait.effects.get(idx)
+        {
+            inspector_added_effect_card(app, bui, aclip, ait, amt, idx, e, t, actions);
+        } else {
+            inspector_preset_effect_row(bui, aclip, eid, t, actions);
+        }
+    }
+    for &idx in afx_indices {
+        if let Some(e) = ait.effects.get(idx)
+            && !PRESET_AUDIO_EFFECTS.contains(&e.effect.as_str())
+        {
+            inspector_added_effect_card(app, bui, aclip, ait, amt, idx, e, t, actions);
+        }
+    }
+    bui.add_space(2.0);
+    if bui.button(tl!("+ Add Effect")).clicked() {
+        let pid = egui::Id::unique("inspector-effect-picker");
+        bui.ctx().data_mut(|d| {
+            d.insert_temp(pid, EffectPickerState { open: true, is_audio: true, clip: aclip.0, query: String::new(), category: None, just_opened: true });
+        });
+    }
+    bui.add_space(4.0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_inspector_vfx_list(
+    app: &mut FilmcraftApp,
+    bui: &mut egui::Ui,
+    clip: ClipId,
+    it: &TrackItem,
+    mt: Tick,
+    vfx_indices: &[usize],
+    t: Tokens,
+    actions: &mut Vec<(String, Value)>,
+) {
+    bui.add_space(4.0);
+    for eid in PRESET_VIDEO_EFFECTS {
+        if let Some(idx) = it.effects.iter().position(|e| e.effect == eid)
+            && let Some(e) = it.effects.get(idx)
+        {
+            inspector_added_effect_card(app, bui, clip, it, mt, idx, e, t, actions);
+        } else {
+            inspector_preset_effect_row(bui, clip, eid, t, actions);
+        }
+    }
+    for &idx in vfx_indices {
+        if let Some(e) = it.effects.get(idx)
+            && !PRESET_VIDEO_EFFECTS.contains(&e.effect.as_str())
+        {
+            inspector_added_effect_card(app, bui, clip, it, mt, idx, e, t, actions);
+        }
+    }
+    bui.add_space(2.0);
+    if bui.button(tl!("+ Add Effect")).clicked() {
+        let pid = egui::Id::unique("inspector-effect-picker");
+        bui.ctx().data_mut(|d| {
+            d.insert_temp(pid, EffectPickerState { open: true, is_audio: false, clip: clip.0, query: String::new(), category: None, just_opened: true });
+        });
+    }
+    bui.add_space(4.0);
+}
+
+fn props_kv(bui: &mut egui::Ui, clip: ClipId, label: &str, value: String, t: Tokens) {
+    let (r, _) = bui.allocate_exact_size(vec2(bui.available_width(), 22.0), Sense::hover());
+    bui.painter().text(pos2(r.min.x + 16.0, r.center().y), Align2::LEFT_CENTER, label, Tokens::ui(11.5), t.text_dim);
+    let val_x = r.min.x + 132.0;
+    let max_w = (r.max.x - val_x - 6.0).max(40.0);
+    let mut job = egui::text::LayoutJob::simple_singleline(value.clone(), Tokens::ui(11.5), t.text);
+    job.wrap.max_width = max_w;
+    job.wrap.max_rows = 1;
+    let g = bui.painter().layout_job(job);
+    bui.painter().with_clip_rect(Rect::from_min_max(pos2(val_x, r.min.y), pos2(r.max.x - 4.0, r.max.y))).galley(
+        pos2(val_x, r.center().y - g.size().y * 0.5),
+        g,
+        t.text,
+    );
+    bui.interact(r, egui::Id::unique(("props-kv", label, clip.0)), Sense::hover()).on_hover_text(value);
+}
+
+fn render_inspector_clip_meta(app: &FilmcraftApp, ui: &egui::Ui, bui: &mut egui::Ui, clip: ClipId, it: &TrackItem, t: Tokens) {
+    let seq_fps = app.session.active_sequence().map(|s| s.settings.frame_rate).unwrap_or_default();
+    let seq_drop = app.session.active_sequence().is_some_and(|s| s.settings.drop_frame);
+    let seq_rate = app.session.active_sequence().map_or(48000, |s| s.settings.sample_rate as i64);
+    let fmt_tc = |tick: Tick| filmcraft_time::format_time(tick, seq_fps, seq_drop, filmcraft_time::TimeDisplay::Timecode, seq_rate);
+
+    props_kv(bui, clip, tl!("Timeline Start:"), fmt_tc(it.start), t);
+    props_kv(bui, clip, tl!("Duration:"), fmt_tc(it.duration), t);
+    props_kv(bui, clip, tl!("Speed:"), format!("{:.0}%{}", it.speed * 100.0, if it.reverse { " (Rev)" } else { "" }), t);
+
+    let Some(proj_item) = app.session.project.item(it.item) else { return };
+    props_kv(bui, clip, tl!("Type:"), crate::i18n::t(proj_item.type_label()).to_string(), t);
+    let Some(m) = proj_item.as_media() else { return };
+    if !m.info.container.is_empty() {
+        props_kv(bui, clip, tl!("Container:"), m.info.container.to_uppercase(), t);
+    }
+    let size_bytes = m.info.file_size.or_else(|| m.identity.map(|i| i.size)).or_else(|| match &m.media {
+        filmcraft_project::MediaRef::File { path } => std::fs::metadata(path).ok().map(|md| md.len()),
+        _ => None,
+    });
+    if let Some(sz) = size_bytes {
+        props_kv(bui, clip, tl!("File Size:"), format_bytes(sz), t);
+    }
+    props_kv(
+        bui,
+        clip,
+        tl!("Source Duration:"),
+        filmcraft_time::format_time(m.duration(), m.frame_rate(), false, filmcraft_time::TimeDisplay::Timecode, 48000),
+        t,
+    );
+    if let Some(v) = &m.info.video {
+        let codec = if v.codec.is_empty() { "—".to_string() } else { v.codec.clone() };
+        props_kv(bui, clip, tl!("Video Codec:"), codec, t);
+        props_kv(bui, clip, tl!("Resolution:"), format!("{} × {} · {} fps", v.width, v.height, v.frame_rate.label()), t);
+        let (px, py) = m.pixel_aspect();
+        props_kv(bui, clip, tl!("Pixel Aspect:"), format!("{px}:{py}"), t);
+    }
+    if let Some(a) = m.info.audio() {
+        let codec = if a.codec.is_empty() { "—".to_string() } else { a.codec.clone() };
+        props_kv(bui, clip, tl!("Audio Codec:"), codec, t);
+        props_kv(bui, clip, tl!("Audio Format:"), format!("{} Hz · {} ch", a.sample_rate, a.channels), t);
+    }
+    match &m.media {
+        filmcraft_project::MediaRef::File { path } => {
+            let (r, _) = bui.allocate_exact_size(vec2(bui.available_width(), 24.0), Sense::hover());
+            bui.painter().text(pos2(r.min.x + 16.0, r.center().y), Align2::LEFT_CENTER, tl!("Location:"), Tokens::ui(11.5), t.text_dim);
+            let copy_r = Rect::from_center_size(pos2(r.max.x - 20.0, r.center().y), vec2(32.0, 18.0));
+            let copy_resp = bui.interact(copy_r, egui::Id::unique(("props-copy-path", clip.0)), Sense::click()).on_hover_text(path);
+            bui.painter().rect_filled(copy_r, 3.0, if copy_resp.hovered() { t.hover } else { t.tl_header_bg });
+            bui.painter().text(copy_r.center(), Align2::CENTER_CENTER, tl!("Copy"), Tokens::ui(10.0), t.text);
+            if copy_resp.clicked() {
+                ui.ctx().copy_text(path.clone());
+            }
+            let val_x = r.min.x + 132.0;
+            let max_w = (copy_r.min.x - val_x - 6.0).max(30.0);
+            let mut job = egui::text::LayoutJob::simple_singleline(path.clone(), Tokens::ui(11.0), t.text);
+            job.wrap.max_width = max_w;
+            job.wrap.max_rows = 1;
+            let g = bui.painter().layout_job(job);
+            bui.painter().with_clip_rect(Rect::from_min_max(pos2(val_x, r.min.y), pos2(copy_r.min.x - 4.0, r.max.y))).galley(
+                pos2(val_x, r.center().y - g.size().y * 0.5),
+                g,
+                t.text,
+            );
+            bui.interact(
+                Rect::from_min_max(pos2(val_x, r.min.y), pos2(copy_r.min.x - 4.0, r.max.y)),
+                egui::Id::unique(("props-path-tip", clip.0)),
+                Sense::hover(),
+            )
+            .on_hover_text(path);
+        }
+        filmcraft_project::MediaRef::Generator(generator) => {
+            props_kv(bui, clip, tl!("Source:"), format!("{generator:?}"), t);
+        }
+    }
 }
 
 /// Where a row's highlight (hover, selection) is painted: the row less its first point, which is
@@ -1947,7 +1986,7 @@ pub(crate) fn run(app: &mut FilmcraftApp, ctx: &egui::Context, actions: Vec<(Str
     let begun = ctx.data(|d| d.get_temp::<Option<f64>>(key)).flatten();
     let mut wrote = false;
     for (cmd, mut p) in actions {
-        if cmd == "effects.setParam" && down {
+        if (cmd == "effects.setParam" || cmd == "color.groupSetParam") && down {
             if p.get("merge").is_none() {
                 p["merge"] = json!(true);
             }
@@ -2674,7 +2713,9 @@ mod frame_hold_tests {
         for i in 0..3 {
             app.auto.begin_frame();
             let mut out = ctx.run_ui(egui::RawInput { time: Some(f64::from(i) * 0.1), ..Default::default() }, |ui| match panel {
-                Panel::Lumetri => crate::panels::lumetri::show(&mut app, ui, Rect::from_min_size(pos2(0.0, 0.0), vec2(360.0, 900.0)), crate::dock::PanelKind::LumetriColor),
+                Panel::Lumetri => {
+                    crate::panels::lumetri::show(&mut app, ui, Rect::from_min_size(pos2(0.0, 0.0), vec2(360.0, 900.0)), crate::dock::PanelKind::LumetriColor)
+                }
                 Panel::Masks => crate::panels::masks::monitor_overlay(&mut app, ui, pic, frame),
                 Panel::TransformHandles => crate::panels::transform_handles::monitor_overlay(&mut app, ui, pic, frame),
                 Panel::AudioFxEditor => crate::panels::audio_fx_editor::show(&mut app, ui.ctx()),
@@ -2727,6 +2768,7 @@ mod uniform_scale_tests {
         let effects = |app: &FilmcraftApp| app.session.active_sequence().unwrap().find_item(clip).unwrap().1.effects.clone();
         let idx = effects(&app).iter().position(|e| e.effect == effect).unwrap();
         let width = |app: &FilmcraftApp| effects(app)[idx].params["scale_width"].value.as_f64().unwrap();
+        app.ui.expanded_fx.push(format!("ec:{}:{}", clip.0, idx));
         frame(&mut app, vec![]);
         let [x, y, w, h] = app.auto.find(&format!("effectControls.{effect}.{idx}.scale_width.name")).expect("the Scale Width row is drawn").rect;
         // the value starts 6 points right of the name
@@ -2777,6 +2819,7 @@ mod uniform_scale_tests {
         let second = |app: &FilmcraftApp| effects(app)[idx].params["scale_width"].keyframes[1].clone();
         let key = second(&app).time;
         // opened before Uniform Scale was turned on
+        app.ui.expanded_fx.push(format!("ec:{}:{}", clip.0, idx));
         app.ui.expanded_fx.push(graph_key(clip, idx, "scale_width"));
         let ctx = egui::Context::default();
         crate::theme::install(&ctx, &app.tokens);
@@ -2841,6 +2884,7 @@ mod uniform_scale_tests {
             app.session.execute("effects.setParam", uniform(true)).unwrap();
         }
         let (before, mid) = (times(&app, "scale_width"), times(&app, "scale")[1]);
+        app.ui.expanded_fx.push(format!("ec:{}:{}", clip.0, idx));
         let ctx = egui::Context::default();
         crate::theme::install(&ctx, &app.tokens);
         let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 1600.0));

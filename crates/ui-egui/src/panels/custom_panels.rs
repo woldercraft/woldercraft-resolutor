@@ -123,9 +123,7 @@ pub fn show_custom_panel(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
 
             let gear_w = 24.0;
             let gear_rect = Rect::from_min_max(pos2((bar_rect.max.x - gear_w).max(bar_rect.min.x), bar_rect.min.y), bar_rect.max);
-            let gear_resp = ui
-                .interact(gear_rect, egui::Id::unique(("custom-panel-edit", id)), Sense::click())
-                .on_hover_text(tl!("Edit Custom Panels…"));
+            let gear_resp = ui.interact(gear_rect, egui::Id::unique(("custom-panel-edit", id)), Sense::click()).on_hover_text(tl!("Edit Custom Panels…"));
             let gear_col = if gear_resp.hovered() { t.text } else { t.text_dim };
             ui.painter().text(gear_rect.center(), Align2::CENTER_CENTER, "⚙", Tokens::ui(12.0), gear_col);
             if gear_resp.clicked() {
@@ -333,15 +331,21 @@ pub fn dialog(app: &mut FilmcraftApp, ctx: &egui::Context) {
                             });
                         }
                     });
-                    if let Some(i) = move_up && i > 0 {
+                    if let Some(i) = move_up
+                        && i > 0
+                    {
                         def.panels.swap(i - 1, i);
                         changed = true;
                     }
-                    if let Some(i) = move_down && i + 1 < def.panels.len() {
+                    if let Some(i) = move_down
+                        && i + 1 < def.panels.len()
+                    {
                         def.panels.swap(i, i + 1);
                         changed = true;
                     }
-                    if let Some(i) = remove_idx && i < def.panels.len() {
+                    if let Some(i) = remove_idx
+                        && i < def.panels.len()
+                    {
                         def.panels.remove(i);
                         changed = true;
                     }
@@ -351,11 +355,7 @@ pub fn dialog(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     egui::ScrollArea::vertical().id_salt("custom-panel-catalog").max_height(130.0).show(ui, |ui| {
                         for p in PanelKind::ALL {
                             let included = def.panels.contains(&p);
-                            let label = if included {
-                                format!("✓ {}", crate::i18n::t(p.title()))
-                            } else {
-                                format!("+ {}", crate::i18n::t(p.title()))
-                            };
+                            let label = if included { format!("✓ {}", crate::i18n::t(p.title())) } else { format!("+ {}", crate::i18n::t(p.title())) };
                             if ui.selectable_label(included, label).clicked() {
                                 if included {
                                     def.panels.retain(|x| *x != p);

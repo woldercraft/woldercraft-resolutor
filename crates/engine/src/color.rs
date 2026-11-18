@@ -68,11 +68,11 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             "lumetri.applyMatch",
             "Apply Match",
             &[],
-            r#"{"clip":id?,"referenceTime":ticks?|"referenceFrame":n?|"referenceTimecode":str?,"faceDetection":bool=true}"#,
+            r#"{"clip":id?,"group":id?,"referenceTime":ticks?|"referenceFrame":n?|"referenceTimecode":str?,"faceDetection":bool=true}"#,
             has_seq,
             apply_match,
         ),
-        query("lumetri.exportCube", "Export .cube…", r#"{"clip":id?,"path":str,"size":n=33}"#, export_cube),
+        query("lumetri.exportCube", "Export .cube…", r#"{"clip":id?,"group":id?,"path":str,"size":n=33}"#, export_cube),
         spec(
             "lumetri.setSection",
             "Toggle Color Grading Section",
@@ -81,94 +81,24 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             has_seq,
             set_section,
         ),
-        spec(
-            "color.groupCreate",
-            "Create Color Group",
-            &[],
-            r#"{"clips":[id]?,"name":str?,"color":[r,g,b]?}"#,
-            has_seq,
-            group_create,
-        ),
-        spec(
-            "color.groupAssign",
-            "Assign Clips to Color Group",
-            &[],
-            r#"{"clips":[id],"group":id}"#,
-            has_seq,
-            group_assign,
-        ),
-        spec(
-            "color.groupUnassign",
-            "Remove Clips from Color Group",
-            &[],
-            r#"{"clips":[id]}"#,
-            has_seq,
-            group_unassign,
-        ),
-        spec(
-            "color.groupRename",
-            "Rename Color Group",
-            &[],
-            r#"{"group":id,"name":str}"#,
-            has_seq,
-            group_rename,
-        ),
-        spec(
-            "color.groupDelete",
-            "Delete Color Group",
-            &[],
-            r#"{"group":id}"#,
-            has_seq,
-            group_delete,
-        ),
+        spec("color.groupCreate", "Create Color Group", &[], r#"{"clips":[id]?,"name":str?,"color":[r,g,b]?}"#, has_seq, group_create),
+        spec("color.groupAssign", "Assign Clips to Color Group", &[], r#"{"clips":[id],"group":id}"#, has_seq, group_assign),
+        spec("color.groupUnassign", "Remove Clips from Color Group", &[], r#"{"clips":[id]}"#, has_seq, group_unassign),
+        spec("color.groupRename", "Rename Color Group", &[], r#"{"group":id,"name":str}"#, has_seq, group_rename),
+        spec("color.groupDelete", "Delete Color Group", &[], r#"{"group":id}"#, has_seq, group_delete),
         spec(
             "color.groupSetParam",
             "Set Color Group Parameter",
             &[],
-            r#"{"group":id,"param":str,"value":val,"merge":bool?}"#,
+            r#"{"group":id,"param":str,"value":val,"merge":bool|str?,"begin":bool?}"#,
             has_seq,
             group_set_param,
         ),
-        spec(
-            "color.groupToggleBypass",
-            "Toggle Color Group Bypass",
-            &[],
-            r#"{"group":id}"#,
-            has_seq,
-            group_toggle_bypass,
-        ),
-        spec(
-            "color.groupReset",
-            "Reset Color Group",
-            &[],
-            r#"{"group":id}"#,
-            has_seq,
-            group_reset,
-        ),
-        spec(
-            "color.batchPasteGrade",
-            "Paste Color Grade to Clips",
-            &[],
-            r#"{"from":id,"clips":[id]}"#,
-            has_seq,
-            batch_paste_grade,
-        ),
-        spec(
-            "color.batchToggleBypass",
-            "Toggle Color Grade Bypass on Clips",
-            &[],
-            r#"{"clips":[id]}"#,
-            has_seq,
-            batch_toggle_bypass,
-        ),
-        spec(
-            "color.batchResetGrade",
-            "Reset Color Grade on Clips",
-            &[],
-            r#"{"clips":[id]}"#,
-            has_seq,
-            batch_reset_grade,
-        ),
+        spec("color.groupToggleBypass", "Toggle Color Group Bypass", &[], r#"{"group":id}"#, has_seq, group_toggle_bypass),
+        spec("color.groupReset", "Reset Color Group", &[], r#"{"group":id}"#, has_seq, group_reset),
+        spec("color.batchPasteGrade", "Paste Color Grade to Clips", &[], r#"{"from":id,"clips":[id]}"#, has_seq, batch_paste_grade),
+        spec("color.batchToggleBypass", "Toggle Color Grade Bypass on Clips", &[], r#"{"clips":[id]}"#, has_seq, batch_toggle_bypass),
+        spec("color.batchResetGrade", "Reset Color Grade on Clips", &[], r#"{"clips":[id]}"#, has_seq, batch_reset_grade),
     ]
 }
 
@@ -266,6 +196,29 @@ fn export_cube(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad(CMD, "need `path`"))?;
     let size = crate::commands::checked_u32_p(p, "size", CMD)?.unwrap_or(33) as usize;
     let q = s.active_sequence().ok_or_else(|| bad(CMD, "no active sequence"))?;
+    if p.get("group").is_some_and(|v| !v.is_null()) {
+        let gid = group_id_p(p, CMD)?;
+        let g = q.color_group(gid).ok_or_else(|| bad(CMD, "unknown color group"))?;
+        let lumetri: Vec<&filmcraft_project::EffectInstance> = g.effects.iter().filter(|e| e.enabled && e.effect == "lumetri").collect();
+        if lumetri.is_empty() {
+            return Err(bad(CMD, "the color group has no enabled Color Grading to export"));
+        }
+        let title: String = g.name.chars().filter(|c| !c.is_control()).collect();
+        let sample = filmcraft_render::lumetri_cube::sample_lumetri(
+            &lumetri,
+            Some(&s.project),
+            filmcraft_time::Tick(0),
+            q.settings.frame_rate.as_f64(),
+            &q.settings.color,
+            size,
+            &title,
+        )
+        .map_err(|e| bad(CMD, e))?;
+        let left_out: Vec<String> = sample.left_out.iter().map(|n| n.to_string()).collect();
+        let text = sample.lut.to_cube();
+        s.services.write_file(path, text.as_bytes()).map_err(|e| bad(CMD, format!("{path}: {e}")))?;
+        return Ok(json!({"group": gid.0, "path": path, "size": size, "bytes": text.len(), "leftOut": left_out}));
+    }
     let has_lumetri = |c: &ClipId| q.find_item(*c).is_some_and(|(_, it)| it.effects.iter().any(|e| e.enabled && e.effect == "lumetri"));
     let clip = match clip_p(p, "clip") {
         Some(c) => c,
@@ -309,7 +262,18 @@ pub(crate) fn lumetri_clip(s: &mut Session, p: &Value, cmd: &str) -> Result<(Cli
         s.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"}))?;
     }
     let seq = s.active_sequence().ok_or_else(|| bad(cmd, "no active sequence"))?;
-    let idx = seq.find_item(clip).and_then(|(_, it)| it.effects.iter().position(|e| e.effect == "lumetri")).ok_or_else(|| bad(cmd, "no Color Grading"))?;
+    let (_, it) = seq.find_item(clip).ok_or_else(|| bad(cmd, "no Color Grading"))?;
+    let req_idx = p.get("effect").or_else(|| p.get("index")).and_then(|v| v.as_u64()).map(|n| n as usize);
+    let idx = match req_idx {
+        Some(i) => {
+            if it.effects.get(i).is_some_and(|e| e.effect == "lumetri") {
+                i
+            } else {
+                return Err(bad(cmd, format!("effect {i} is not Color Grading")));
+            }
+        }
+        None => it.effects.iter().position(|e| e.effect == "lumetri").ok_or_else(|| bad(cmd, "no Color Grading"))?,
+    };
     Ok((clip, idx))
 }
 
@@ -338,23 +302,45 @@ fn set_lut(s: &mut Session, p: &Value, param: &str) -> Result<Value> {
     if !r.is_empty() && filmcraft_render::luts::resolve(Some(&s.project), &r).is_none() {
         return Err(bad(cmd, format!("unknown LUT `{r}`")));
     }
+    if p.get("group").is_some() {
+        let gid = group_id_p(p, cmd)?;
+        group_set_param(s, &json!({"group": gid.0, "param": param, "value": r}))?;
+        return Ok(json!({"group": gid.0, "lut": r, "name": filmcraft_render::luts::label(Some(&s.project), &r)}));
+    }
     let (clip, idx) = lumetri_clip(s, p, cmd)?;
     set_lumetri_param(s, clip, idx, param, ParamValue::Text(r.clone()), if param == "input_lut" { "Input LUT" } else { "Creative Look" })?;
-    Ok(json!({"clip": clip.0, "lut": r, "name": filmcraft_render::luts::label(Some(&s.project), &r)}))
+    Ok(json!({"clip": clip.0, "effect": idx, "lut": r, "name": filmcraft_render::luts::label(Some(&s.project), &r)}))
+}
+
+fn section_param(cmd: &str, sec: &str) -> Result<&'static str> {
+    match sec.to_ascii_lowercase().as_str() {
+        "basic" | "basic correction" => Ok("basic_on"),
+        "creative" => Ok("creative_on"),
+        "curves" => Ok("curves_on"),
+        "wheels" | "color wheels" | "color wheels & match" => Ok("wheels_on"),
+        "hsl" | "hsl secondary" => Ok("hsl_on"),
+        "vignette" => Ok("vignette_on"),
+        "masks" | "power windows" | "power windows / máscara" => Ok("masks_on"),
+        o => Err(bad(cmd, format!("unknown section `{o}`"))),
+    }
 }
 
 fn set_section(s: &mut Session, p: &Value) -> Result<Value> {
     let sec = str_p(p, "section").ok_or_else(|| bad("lumetri.setSection", "need `section`"))?;
-    let param = match sec.to_ascii_lowercase().as_str() {
-        "basic" | "basic correction" => "basic_on",
-        "creative" => "creative_on",
-        "curves" => "curves_on",
-        "wheels" | "color wheels" | "color wheels & match" => "wheels_on",
-        "hsl" | "hsl secondary" => "hsl_on",
-        "vignette" => "vignette_on",
-        "masks" | "power windows" | "power windows / máscara" => "masks_on",
-        o => return Err(bad("lumetri.setSection", format!("unknown section `{o}`"))),
-    };
+    let param = section_param("lumetri.setSection", sec)?;
+    if p.get("group").is_some() {
+        let gid = group_id_p(p, "lumetri.setSection")?;
+        let cur = s
+            .active_sequence()
+            .and_then(|q| q.color_group(gid))
+            .and_then(|g| g.effects.iter().find(|e| e.effect == "lumetri"))
+            .and_then(|e| e.param(param))
+            .and_then(|v| v.value.as_bool())
+            .unwrap_or(param != "hsl_on");
+        let v = bool_p(p, "on").unwrap_or(!cur);
+        group_set_param(s, &json!({"group": gid.0, "param": param, "value": v}))?;
+        return Ok(json!({"group": gid.0, "param": param, "on": v}));
+    }
     let (clip, idx) = lumetri_clip(s, p, "lumetri.setSection")?;
     let cur = s
         .active_sequence()
@@ -363,7 +349,7 @@ fn set_section(s: &mut Session, p: &Value) -> Result<Value> {
         .unwrap_or(param != "hsl_on");
     let v = bool_p(p, "on").unwrap_or(!cur);
     set_lumetri_param(s, clip, idx, param, ParamValue::Bool(v), "Color Grading Section")?;
-    Ok(json!({"clip": clip.0, "param": param, "on": v}))
+    Ok(json!({"clip": clip.0, "effect": idx, "param": param, "on": v}))
 }
 
 fn color_settings(s: &mut Session, p: &Value) -> Result<Value> {
@@ -574,21 +560,100 @@ fn preset_thumbnails(s: &mut Session, p: &Value) -> Result<Value> {
 /// clip at the playhead to the sequence frame at the reference time. Sets the three wheels, their
 /// lightness and Basic saturation in one undo step.
 fn apply_match(s: &mut Session, p: &Value) -> Result<Value> {
-    let (clip, idx) = lumetri_clip(s, p, "lumetri.applyMatch")?;
     let seq_id = s.state.active_sequence.ok_or_else(|| bad("lumetri.applyMatch", "no active sequence"))?;
     let reference_t = time_p(s, p, "reference").ok_or_else(|| bad("lumetri.applyMatch", "need `referenceTime`, `referenceFrame` or `referenceTimecode`"))?;
     let skin = bool_p(p, "faceDetection").unwrap_or(true);
+    let v2 = |a: [f32; 2]| ParamValue::Vec2(filmcraft_geom::Vec2::new(a[0] as f64, a[1] as f64));
+
+    if p.get("group").is_some_and(|v| !v.is_null()) {
+        let gid = group_id_p(p, "lumetri.applyMatch")?;
+        let q = s.active_sequence().ok_or_else(|| bad("lumetri.applyMatch", "no active sequence"))?;
+        let g = q.color_group(gid).ok_or_else(|| bad("lumetri.applyMatch", "unknown color group"))?;
+        let ph = s.playhead();
+        let clip = g
+            .clips
+            .iter()
+            .copied()
+            .find(|c| q.find_item(*c).is_some_and(|(_, it)| it.range().contains(ph)))
+            .or_else(|| g.clips.iter().copied().find(|c| q.find_item(*c).is_some()))
+            .ok_or_else(|| bad("lumetri.applyMatch", "the color group has no clips to sample"))?;
+        let (_, it) = q.find_item(clip).ok_or_else(|| bad("lumetri.applyMatch", "no such clip"))?;
+        let t = ph.clamp(it.start, (it.end() - filmcraft_time::Tick(1)).max(it.start));
+        if it.range().contains(reference_t) {
+            return Err(bad("lumetri.applyMatch", "the reference frame is inside the clip being matched; pick a frame from another shot"));
+        }
+        let base = g
+            .effects
+            .iter()
+            .find(|e| e.effect == "lumetri")
+            .cloned()
+            .or_else(|| filmcraft_project::find_effect("lumetri").map(|d| d.instance()))
+            .ok_or_else(|| bad("lumetri.applyMatch", "lumetri effect missing"))?;
+        let mut probe = (*s.project).clone();
+        if let Some(pg) = probe.sequence_mut(seq_id).and_then(|q| q.color_group_mut(gid)) {
+            for fx in &mut pg.effects {
+                if fx.effect == "lumetri" {
+                    fx.enabled = false;
+                }
+            }
+        }
+        let provider = s.media.provider(s.project.clone(), s.services.clone());
+        let opts = filmcraft_render::RenderOptions { scale: 0.25, working_output: true, ..Default::default() };
+        let current =
+            filmcraft_render::render_clip(&probe, seq_id, clip, t, opts, &provider).ok_or_else(|| bad("lumetri.applyMatch", "the clip has no picture"))?;
+        let reference = filmcraft_render::render_sequence(&s.project, seq_id, reference_t, opts, &provider);
+        let m = filmcraft_render::color_match::solve(&current, &reference, &base, skin);
+        let values = [
+            ("wheel_shadows", v2(m.shadows)),
+            ("wheel_midtones", v2(m.midtones)),
+            ("wheel_highlights", v2(m.highlights)),
+            ("wheel_shadows_l", ParamValue::Float(m.lightness[0] as f64)),
+            ("wheel_midtones_l", ParamValue::Float(m.lightness[1] as f64)),
+            ("wheel_highlights_l", ParamValue::Float(m.lightness[2] as f64)),
+            ("saturation", ParamValue::Float(m.saturation as f64)),
+            ("wheels_on", ParamValue::Bool(true)),
+        ];
+        let def = filmcraft_project::find_effect("lumetri").ok_or_else(|| bad("lumetri.applyMatch", "lumetri effect missing"))?;
+        s.edit_sequence("Apply Match", |q, _, _| {
+            let g = q.color_group_mut(gid).ok_or_else(|| bad("lumetri.applyMatch", "unknown color group"))?;
+            let idx = match g.effects.iter().position(|e| e.effect == "lumetri") {
+                Some(i) => i,
+                None => {
+                    g.effects.push(def.instance());
+                    g.effects.len() - 1
+                }
+            };
+            let e = g.effects.get_mut(idx).ok_or_else(|| bad("lumetri.applyMatch", "no Color Grading"))?;
+            for (k, v) in &values {
+                let prm = e.params.entry(k.to_string()).or_insert_with(|| filmcraft_project::Param::new(v.clone()));
+                prm.keyframes.clear();
+                prm.value = v.clone();
+            }
+            e.enabled = true;
+            Ok(())
+        })?;
+        return Ok(json!({
+            "group": gid.0,
+            "shadows": m.shadows, "midtones": m.midtones, "highlights": m.highlights,
+            "lightness": m.lightness, "saturation": m.saturation,
+            "distanceBefore": m.before, "distanceAfter": m.after,
+        }));
+    }
+
+    let (clip, idx) = lumetri_clip(s, p, "lumetri.applyMatch")?;
     let q = s.active_sequence().ok_or_else(|| bad("lumetri.applyMatch", "no active sequence"))?;
     let (_, it) = q.find_item(clip).ok_or_else(|| bad("lumetri.applyMatch", "no such clip"))?;
-    let t = s.playhead().clamp(it.start, it.end() - filmcraft_time::Tick(1));
+    let t = s.playhead().clamp(it.start, (it.end() - filmcraft_time::Tick(1)).max(it.start));
     if it.range().contains(reference_t) {
         return Err(bad("lumetri.applyMatch", "the reference frame is inside the clip being matched; pick a frame from another shot"));
     }
-    let base = it.effects[idx].clone();
+    let base = it.effects.get(idx).cloned().ok_or_else(|| bad("lumetri.applyMatch", "no Color Grading"))?;
     // the current shot as Color Grading sees it: the clip with its Color Grading switched off
     let mut probe = (*s.project).clone();
-    if let Some((_, pi)) = probe.sequence_mut(seq_id).and_then(|q| q.find_item_mut(clip)) {
-        pi.effects[idx].enabled = false;
+    if let Some((_, pi)) = probe.sequence_mut(seq_id).and_then(|q| q.find_item_mut(clip))
+        && let Some(fx) = pi.effects.get_mut(idx)
+    {
+        fx.enabled = false;
     }
     let provider = s.media.provider(s.project.clone(), s.services.clone());
     let opts = filmcraft_render::RenderOptions { scale: 0.25, working_output: true, ..Default::default() };
@@ -596,7 +661,6 @@ fn apply_match(s: &mut Session, p: &Value) -> Result<Value> {
         filmcraft_render::render_clip(&probe, seq_id, clip, t, opts, &provider).ok_or_else(|| bad("lumetri.applyMatch", "the clip has no picture"))?;
     let reference = filmcraft_render::render_sequence(&s.project, seq_id, reference_t, opts, &provider);
     let m = filmcraft_render::color_match::solve(&current, &reference, &base, skin);
-    let v2 = |a: [f32; 2]| ParamValue::Vec2(filmcraft_geom::Vec2::new(a[0] as f64, a[1] as f64));
     let values = [
         ("wheel_shadows", v2(m.shadows)),
         ("wheel_midtones", v2(m.midtones)),
@@ -626,16 +690,8 @@ fn apply_match(s: &mut Session, p: &Value) -> Result<Value> {
     }))
 }
 
-const GROUP_PALETTE: [[u8; 3]; 8] = [
-    [72, 152, 235],
-    [235, 165, 52],
-    [92, 196, 118],
-    [186, 108, 228],
-    [228, 98, 128],
-    [76, 198, 198],
-    [220, 200, 72],
-    [156, 168, 232],
-];
+const GROUP_PALETTE: [[u8; 3]; 8] =
+    [[72, 152, 235], [235, 165, 52], [92, 196, 118], [186, 108, 228], [228, 98, 128], [76, 198, 198], [220, 200, 72], [156, 168, 232]];
 
 fn clip_ids_p(p: &Value, key: &str) -> Vec<ClipId> {
     p.get(key).and_then(|v| v.as_array()).map(|arr| arr.iter().filter_map(|x| x.as_u64().map(ClipId)).collect()).unwrap_or_default()
@@ -725,8 +781,13 @@ fn group_set_param(s: &mut Session, p: &Value) -> Result<Value> {
     let def = filmcraft_project::find_effect("lumetri").ok_or_else(|| bad("color.groupSetParam", "lumetri effect missing"))?;
     let pd = def.param(&param).ok_or_else(|| bad("color.groupSetParam", format!("unknown param `{param}`")))?;
     let pv = crate::commands::json_to_param(&pd.default, &val).ok_or_else(|| bad("color.groupSetParam", format!("invalid value for `{param}`")))?;
-    let merge = bool_p(p, "merge").unwrap_or(false);
-    let merge_key = merge.then(|| format!("groupSetParam:{}:{param}", gid.0));
+    let merge_key = match p.get("merge") {
+        Some(Value::String(key)) => Some(format!("groupSetParam:{}:{key}", gid.0)),
+        _ => bool_p(p, "merge").unwrap_or(false).then(|| format!("groupSetParam:{}:{param}", gid.0)),
+    };
+    if bool_p(p, "begin").unwrap_or(false) {
+        s.history.merge_key = None;
+    }
     s.edit_sequence_as("Color Group", merge_key.as_deref(), |q, _, _| {
         let g = q.color_group_mut(gid).ok_or_else(|| bad("color.groupSetParam", "unknown color group"))?;
         let idx = match g.effects.iter().position(|e| e.effect == "lumetri") {
@@ -773,10 +834,8 @@ fn batch_paste_grade(s: &mut Session, p: &Value) -> Result<Value> {
     let from = clip_p(p, "from").ok_or_else(|| bad("color.batchPasteGrade", "need `from`"))?;
     let clips = clip_ids_p(p, "clips");
     s.edit_sequence("Paste Color Grade", |q, _, _| {
-        let grade: Vec<filmcraft_project::EffectInstance> = q
-            .find_item(from)
-            .map(|(_, it)| it.effects.iter().filter(|e| e.effect == "lumetri").cloned().collect())
-            .unwrap_or_default();
+        let grade: Vec<filmcraft_project::EffectInstance> =
+            q.find_item(from).map(|(_, it)| it.effects.iter().filter(|e| e.effect == "lumetri").cloned().collect()).unwrap_or_default();
         for c in &clips {
             if *c == from {
                 continue;

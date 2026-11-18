@@ -18,8 +18,8 @@ use filmcraft_project::EffectInstance;
 use rayon::prelude::*;
 
 use crate::effects::{
-    FxCtx, b, box_blur, choice, color, curve_lut, curve_param, dec, enc, f, gaussian_boxes, grade_space, hsl_key, hue_lut, is_identity_curve,
-    lift_scale, median_filter, on, point, text, vs_sat_lut,
+    FxCtx, b, box_blur, choice, color, curve_lut, curve_param, dec, enc, f, gaussian_boxes, grade_space, hsl_key, hue_lut, is_identity_curve, lift_scale,
+    median_filter, on, point, text, vs_sat_lut,
 };
 use crate::image::Image;
 
@@ -811,23 +811,11 @@ impl FxOp {
                     None
                 };
 
-                let input_lut_3d = if has_input_lut {
-                    crate::luts::resolve_baked_cube(cx.project, text(e, "input_lut"), 33)
-                } else {
-                    None
-                };
-                let look_lut_3d = if has_look_lut {
-                    crate::luts::resolve_baked_cube(cx.project, text(e, "look_lut"), 33)
-                } else {
-                    None
-                };
+                let input_lut_3d = if has_input_lut { crate::luts::resolve_baked_cube(cx.project, text(e, "input_lut"), 33) } else { None };
+                let look_lut_3d = if has_look_lut { crate::luts::resolve_baked_cube(cx.project, text(e, "look_lut"), 33) } else { None };
 
                 let hsl_ok = hsl.as_ref().is_none_or(|h| h.denoise_r <= 3);
-                let gpu_capable = !is_hdr
-                    && (!has_input_lut || input_lut_3d.is_some())
-                    && (!has_look_lut || look_lut_3d.is_some())
-                    && look <= 8
-                    && hsl_ok;
+                let gpu_capable = !is_hdr && (!has_input_lut || input_lut_3d.is_some()) && (!has_look_lut || look_lut_3d.is_some()) && look <= 8 && hsl_ok;
 
                 let bf = |id: &str| if basic_on { f(e, id, cx) } else { 0.0 };
                 let temp = bf("temperature") / 100.0;
@@ -896,11 +884,9 @@ impl FxOp {
     /// Evaluate `e`, wrapping in [`FxOp::Masked`] if `e` carries active masks.
     pub fn eval_masked(e: &EffectInstance, cx: &FxCtx, w: usize, h: usize) -> Option<FxOp> {
         let op = Self::eval(e, cx, w, h)?;
-        if let Some(cov) = crate::mask::effect_coverage(&e.masks, cx.t, cx.px_scale, w, h) {
-            Some(FxOp::Masked {
-                inner: Box::new(op),
-                mask: MaskCoverage { w: w as u32, h: h as u32, cov: Arc::new(cov) },
-            })
+        let masks_on = e.param("masks_on").and_then(|p| p.value.as_bool()).unwrap_or(true);
+        if masks_on && let Some(cov) = crate::mask::effect_coverage(&e.masks, cx.t, cx.px_scale, w, h) {
+            Some(FxOp::Masked { inner: Box::new(op), mask: MaskCoverage { w: w as u32, h: h as u32, cov: Arc::new(cov) } })
         } else {
             Some(op)
         }
@@ -991,9 +977,9 @@ impl FxOp {
                     && fin(wh_rgb)
                     && fin(&[*ls, *lm, *lh])
                     && curves.as_ref().is_none_or(|c| c.texels.len() == LUMETRI_CURVE_LEN * 3)
-                    && hsl.as_ref().is_none_or(|h| {
-                        h.denoise_r <= 3 && fin(&[h.hc, h.hr, h.smin, h.lmin, h.lmax, h.soft, h.htemp, h.htint, h.hsat, h.hshift, h.denoise])
-                    })
+                    && hsl
+                        .as_ref()
+                        .is_none_or(|h| h.denoise_r <= 3 && fin(&[h.hc, h.hr, h.smin, h.lmin, h.lmax, h.soft, h.htemp, h.htint, h.hsat, h.hshift, h.denoise]))
             }
             FxOp::Masked { inner, mask } => {
                 inner.gpu_ok()
@@ -1444,7 +1430,8 @@ impl FxOp {
                         v2 = [v2[0] + (lk[0] - v2[0]) * look_k, v2[1] + (lk[1] - v2[1]) * look_k, v2[2] + (lk[2] - v2[2]) * look_k];
                         v = v2;
                     }
-                    let wheels_active = wheels_on && (ws.iter().chain(&wm).chain(&wh_rgb).any(|val| val.abs() > 1e-5) || (ls.abs() + lm.abs() + lh.abs() > 1e-5));
+                    let wheels_active =
+                        wheels_on && (ws.iter().chain(&wm).chain(&wh_rgb).any(|val| val.abs() > 1e-5) || (ls.abs() + lm.abs() + lh.abs() > 1e-5));
                     if wheels_active {
                         let mut v2 = enc(dec(v));
                         let l = (0.2126 * v2[0] + 0.7152 * v2[1] + 0.0722 * v2[2]).clamp(0.0, 1.0);

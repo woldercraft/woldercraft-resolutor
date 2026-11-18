@@ -28,12 +28,8 @@ impl FilmcraftApp {
         let frames = Arc::new(FrameServer::new(session.media.clone(), session.services.clone(), session.previews.clone(), FrameServer::default_workers()));
         let workspaces =
             session.prefs_path.as_ref().and_then(|p| p.parent()).map(|d| dock::WorkspacePrefs::load(&d.join(dock::WORKSPACES_FILE))).unwrap_or_default();
-        let header_presets = session
-            .prefs_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(|d| dock::WorkspacePrefs::load(&d.join(dock::HEADER_PRESETS_FILE)))
-            .unwrap_or_default();
+        let header_presets =
+            session.prefs_path.as_ref().and_then(|p| p.parent()).map(|d| dock::WorkspacePrefs::load(&d.join(dock::HEADER_PRESETS_FILE))).unwrap_or_default();
         let custom_panels = session
             .prefs_path
             .as_ref()
@@ -316,10 +312,10 @@ impl FilmcraftApp {
                             if let Ok(kb) = rest.trim().trim_end_matches("kB").trim().parse::<u64>() {
                                 mem_total = kb;
                             }
-                        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
-                            if let Ok(kb) = rest.trim().trim_end_matches("kB").trim().parse::<u64>() {
-                                mem_available = kb;
-                            }
+                        } else if let Some(rest) = line.strip_prefix("MemAvailable:")
+                            && let Ok(kb) = rest.trim().trim_end_matches("kB").trim().parse::<u64>()
+                        {
+                            mem_available = kb;
                         }
                         if mem_total > 0 && mem_available > 0 {
                             break;
@@ -364,7 +360,6 @@ impl FilmcraftApp {
             }
         }
     }
-
 
     /// Apply engine events that change the active sequence/view, IME target, toast or project.
     fn logic_session_events(&mut self) {

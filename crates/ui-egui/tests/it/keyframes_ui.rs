@@ -42,7 +42,13 @@ impl Driver {
         let c = &seq["video"][0]["items"][0];
         let clip = Clip { id: c["clip"].as_u64().unwrap(), start: c["start"].as_i64().unwrap(), duration: c["duration"].as_i64().unwrap() };
         d.exec("timeline.select", json!({"clips": [clip.id]}));
-        for panel in ["EffectControls", "Properties"] {
+        for idx in 0..3 {
+            d.harness.state_mut().ui.expanded_fx.push(format!("ec:{}:{idx}", clip.id));
+        }
+        for sec in ["props:Transform", "props:Crop", "props:Speed", "props:Effects"] {
+            d.harness.state_mut().ui.expanded_fx.push(sec.into());
+        }
+        for panel in ["EffectControls", "InspectorVideo"] {
             d.ok("ui.panel.show", json!({"panel": panel}));
         }
         d.frames(3);
@@ -675,6 +681,7 @@ fn graph_keyframes_offer_interpolation_and_clear_in_one_undo_step() {
             for intrinsic in ["motion", "opacity", "time_remap"] {
                 d.click(&format!("effectControls.effect.{intrinsic}.twirl"));
             }
+            d.click("effectControls.effect.transform.twirl");
         }
         for (seconds, value) in [0.5, 2.5].into_iter().zip(values) {
             d.seek(seconds);

@@ -247,10 +247,10 @@ fn effects_panel_lists_the_premiere_transition_folders() {
     d.frames(3);
     let noise = d.ok("ui.elements", json!({"prefix": "effects.folder.Audio Effects/Noise Reduction/Restoration"}));
     assert_eq!(noise[0]["label"], json!("Noise Reduction/Restoration"), "{noise}");
-    // obsolete transitions stay out of the panel
+    // obsolete Premiere transitions stay out of the panel (EffectCraft's active Venetian Blinds stays)
     d.ok("ui.set", json!({"effectsSearch": "venetian"}));
     d.frames(3);
-    assert!(d.element_ids("effects.item.").is_empty());
+    assert!(!d.element_ids("effects.item.").iter().any(|i| i == "effects.item.venetian_blinds"));
     // clicking a sub-folder toggles it
     d.ok("ui.set", json!({"effectsSearch": ""}));
     d.frames(2);
@@ -598,6 +598,8 @@ fn eyedropper_picks_a_key_color_on_a_selected_clip() {
     d.exec("effects.apply", json!({"effect": "Color Key"}));
     d.ok("ui.panel.show", json!({"panel": "EffectControls"}));
     d.frames(4);
+    d.ok("ui.click", json!({"id": "effectControls.effect.color_key.twirl"}));
+    d.frames(2);
     let color = |d: &mut Driver| {
         let seq = d.sequence();
         seq["video"][0]["items"][0]["effects"].as_array().unwrap().iter().find(|e| e["effect"] == "color_key").unwrap()["params"]["color"]["value"].clone()

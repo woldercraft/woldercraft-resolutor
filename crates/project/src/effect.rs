@@ -100,6 +100,7 @@ impl EffectDef {
             post_fader: false,
             essential: false,
             layer: None,
+            label: None,
         }
     }
 }
@@ -121,6 +122,9 @@ pub struct EffectInstance {
     /// ([`crate::graphic_design::LayerExtra`]). Schema v12.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layer: Option<Box<crate::graphic_design::LayerExtra>>,
+    /// Optional user-assigned node/effect label (used by Color Grading nodes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 impl EffectInstance {
@@ -493,6 +497,7 @@ fn build_effects() -> Vec<EffectDef> {
                 grp(f("vignette_midpoint", "Midpoint", 50.0, 0.0, 100.0, ""), "Vignette"),
                 grp(f("vignette_roundness", "Roundness", 0.0, -100.0, 100.0, ""), "Vignette"),
                 grp(f("vignette_feather", "Feather", 50.0, 0.0, 100.0, ""), "Vignette"),
+                grp(b("masks_on", "Power Windows", true), "Power Windows"),
             ],
         ),
         video(

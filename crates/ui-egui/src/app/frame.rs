@@ -124,7 +124,8 @@ impl FilmcraftApp {
         if !self.ui.status.is_empty() {
             let max_w = (start_tab_x - sb.min.x - 20.0).max(100.0);
             let text_rect = egui::Rect::from_min_max(egui::pos2(sb.min.x + 10.0, sb.min.y), egui::pos2(sb.min.x + 10.0 + max_w, sb.max.y));
-            let mut row = ui.new_child(egui::UiBuilder::new().max_rect(text_rect).id_salt("status-text").layout(egui::Layout::left_to_right(egui::Align::Center)));
+            let mut row =
+                ui.new_child(egui::UiBuilder::new().max_rect(text_rect).id_salt("status-text").layout(egui::Layout::left_to_right(egui::Align::Center)));
             let shown = row.add(egui::Label::new(egui::RichText::new(&self.ui.status).font(Tokens::ui(11.0)).color(t.text_dim)).selectable(true).truncate());
             self.auto.add("status.text", shown.rect, &self.ui.status);
         }
@@ -154,7 +155,13 @@ impl FilmcraftApp {
                 );
             }
 
-            let col = if active { t.tab_text_active } else if tresp.hovered() { t.text } else { t.text_dim };
+            let col = if active {
+                t.tab_text_active
+            } else if tresp.hovered() {
+                t.text
+            } else {
+                t.text_dim
+            };
             let icon_r = egui::Rect::from_center_size(egui::pos2(tab_r.min.x + 18.0, tab_r.center().y), egui::vec2(14.0, 14.0));
             crate::icons::paint(ui.painter(), icon_r, icon, col);
             ui.painter().text(egui::pos2(tab_r.min.x + 32.0, tab_r.center().y), egui::Align2::LEFT_CENTER, label, Tokens::ui(12.0), col);

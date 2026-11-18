@@ -10,11 +10,7 @@ impl FilmcraftApp {
     }
 
     fn custom_panels_path(&self) -> Option<std::path::PathBuf> {
-        self.session
-            .prefs_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(|d| d.join(panels::custom_panels::CUSTOM_PANELS_FILE))
+        self.session.prefs_path.as_ref().and_then(|p| p.parent()).map(|d| d.join(panels::custom_panels::CUSTOM_PANELS_FILE))
     }
 
     /// Persist user-defined custom panels to `custom_panels.json`.
@@ -45,7 +41,7 @@ impl FilmcraftApp {
 
     /// Apply a saved top-bar layout preset without modifying `Window ▸ Workspaces`.
     pub fn apply_header_preset(&mut self, name: &str) {
-        if self.workspace_restored {
+        if self.workspace_restored && self.ui.active_preset != name {
             self.save_current_workspace();
         }
         let Some(layout) = dock::saved_preset_docking(&self.header_presets, name) else {
@@ -65,6 +61,20 @@ impl FilmcraftApp {
         }
         self.last_saved_dock = Some((format!("preset:{name}"), self.ui.dock.clone()));
         self.dock_dirty_since = None;
+    }
+
+    pub(crate) fn rename_saved_dock_key(&mut self, from: &str, to: &str) {
+        if let Some((key, _)) = self.last_saved_dock.as_mut()
+            && key == from
+        {
+            *key = to.to_string();
+        }
+    }
+
+    pub(crate) fn switch_workspace_discarding(&mut self, name: &str) {
+        self.last_saved_dock = Some((self.current_dock_save_key(), self.ui.dock.clone()));
+        self.dock_dirty_since = None;
+        self.set_workspace(name);
     }
 
     pub fn set_workspace(&mut self, name: &str) {
@@ -96,11 +106,7 @@ impl FilmcraftApp {
     }
 
     fn current_dock_save_key(&self) -> String {
-        if self.ui.active_preset.is_empty() {
-            self.ui.workspace.clone()
-        } else {
-            format!("preset:{}", self.ui.active_preset)
-        }
+        if self.ui.active_preset.is_empty() { self.ui.workspace.clone() } else { format!("preset:{}", self.ui.active_preset) }
     }
 
     /// Persist the current dock layout for the active workspace or preset when it differs from disk.

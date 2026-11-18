@@ -524,3 +524,86 @@ fn color_batch_paste_toggle_and_reset_grade() {
         assert!(it2.effects.iter().all(|e| e.effect != "lumetri"));
     }
 }
+
+#[test]
+fn multi_node_and_group_section_and_lut_commands() {
+    let mut s = demo();
+    let clip = pick_clip(&mut s);
+    let r0 = s.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"})).unwrap();
+    let r1 = s.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"})).unwrap();
+    let idx0 = r0["applied"][0]["index"].as_u64().unwrap() as usize;
+    let idx1 = r1["applied"][0]["index"].as_u64().unwrap() as usize;
+    assert_ne!(idx0, idx1);
+
+    // Toggle section on the second node only
+    s.execute("lumetri.setSection", json!({"clip": clip.0, "effect": idx1, "section": "creative", "on": false})).unwrap();
+    // Set Input LUT on the second node only
+    s.execute("lumetri.setInputLut", json!({"clip": clip.0, "effect": idx1, "lut": "builtin:slog3-sgamut3cine-to-rec709"})).unwrap();
+    fn as_text<'a>(e: &'a filmcraft_project::EffectInstance, k: &str) -> Option<&'a str> {
+        e.param(k).and_then(|p| match &p.value {
+            filmcraft_project::ParamValue::Text(t) => Some(t.as_str()),
+            _ => None,
+        })
+    }
+    {
+        let q = s.active_sequence().unwrap();
+        let (_, it) = q.find_item(clip).unwrap();
+        assert_eq!(it.effects[idx0].param("creative_on").and_then(|p| p.value.as_bool()), Some(true));
+        assert_eq!(it.effects[idx1].param("creative_on").and_then(|p| p.value.as_bool()), Some(false));
+        assert_eq!(as_text(&it.effects[idx0], "input_lut"), Some(""));
+        assert_eq!(as_text(&it.effects[idx1], "input_lut"), Some("builtin:slog3-sgamut3cine-to-rec709"));
+    }
+
+    // Group mode: setSection and setInputLut target the group
+    let g = s.execute("color.groupCreate", json!({"clips": [clip.0], "name": "TestGroup"})).unwrap();
+    let gid = g["group"].as_u64().unwrap();
+    s.execute("lumetri.setSection", json!({"group": gid, "section": "vignette", "on": false})).unwrap();
+    s.execute("lumetri.setInputLut", json!({"group": gid, "lut": "builtin:slog3-sgamut3cine-to-rec709"})).unwrap();
+    {
+        let q = s.active_sequence().unwrap();
+        let grp = q.color_group(filmcraft_project::ColorGroupId(gid)).unwrap();
+        let fx = grp.effects.iter().find(|e| e.effect == "lumetri").unwrap();
+        assert_eq!(fx.param("vignette_on").and_then(|p| p.value.as_bool()), Some(false));
+        assert_eq!(as_text(fx, "input_lut"), Some("builtin:slog3-sgamut3cine-to-rec709"));
+    }
+}
+
+#[test]
+fn apply_match_export_cube_and_merge_keys_work_on_color_group() {
+    let mut s = demo();
+    let clip = pick_clip(&mut s);
+    let q = s.active_sequence().unwrap();
+    let other = q.video_tracks[0].items.iter().rfind(|i| i.id != clip).unwrap();
+    let reference = other.start + filmcraft_time::Tick(other.duration.0 / 2);
+
+    let g = s.execute("color.groupCreate", json!({"clips": [clip.0], "name": "MatchGroup"})).unwrap();
+    let gid = g["group"].as_u64().unwrap();
+
+    // Group applyMatch writes wheels onto the group in one undo step
+    let r = s.execute("lumetri.applyMatch", json!({"group": gid, "referenceTime": reference.0, "faceDetection": true})).unwrap();
+    assert_eq!(r["group"], gid);
+    let grp = s.active_sequence().unwrap().color_group(filmcraft_project::ColorGroupId(gid)).unwrap();
+    let fx = grp.effects.iter().find(|e| e.effect == "lumetri").unwrap();
+    let moved = ["wheel_shadows", "wheel_midtones", "wheel_highlights"]
+        .iter()
+        .any(|w| fx.param(w).and_then(|p| p.value.as_vec2()).is_some_and(|v| v.x.abs() + v.y.abs() > 1e-3));
+    assert!(moved, "{r}");
+
+    // Export .cube directly from the Color Group
+    let cube_path = std::env::temp_dir().join(format!("filmcraft-group-{}.cube", std::process::id()));
+    let exp = s.execute("lumetri.exportCube", json!({"group": gid, "path": cube_path.to_string_lossy()})).unwrap();
+    assert_eq!(exp["group"], gid);
+    let text = std::fs::read_to_string(&cube_path).unwrap();
+    assert!(text.contains("LUT_3D_SIZE 33"));
+    let _ = std::fs::remove_file(&cube_path);
+
+    // groupSetParam merges consecutive writes with the same string key and splits on `begin: true`
+    let undo_len = |s: &mut Session| s.execute("history.list", json!({})).unwrap()["undo"].as_array().unwrap().len();
+    let undo_before = undo_len(&mut s);
+    s.execute("color.groupSetParam", json!({"group": gid, "param": "temperature", "value": 12.0, "merge": "wheel-offset", "begin": true})).unwrap();
+    s.execute("color.groupSetParam", json!({"group": gid, "param": "tint", "value": -8.0, "merge": "wheel-offset"})).unwrap();
+    assert_eq!(undo_len(&mut s), undo_before + 1, "shared string merge key produces one undo step");
+
+    s.execute("color.groupSetParam", json!({"group": gid, "param": "temperature", "value": 25.0, "merge": "wheel-offset", "begin": true})).unwrap();
+    assert_eq!(undo_len(&mut s), undo_before + 2, "`begin: true` starts a new undo step");
+}

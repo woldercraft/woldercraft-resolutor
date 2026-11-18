@@ -465,6 +465,15 @@ pub enum GuideDialog {
     },
 }
 
+/// What an armed eyedropper does when a pixel is clicked in the Program monitor.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EyedropperKind {
+    ColorParam,
+    LumetriWb,
+    LumetriHsl,
+    LumetriCurve(String),
+}
+
 /// The colour parameter an armed eyedropper fills (`effects.setParam` arguments).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Eyedropper {
@@ -472,6 +481,7 @@ pub struct Eyedropper {
     pub effect: usize,
     pub param: String,
     pub mask: Option<usize>,
+    pub kind: EyedropperKind,
 }
 
 /// A keyframe selected in the Effect Controls keyframe lane: clip, effect index, parameter (of an
@@ -621,6 +631,12 @@ pub struct UiState {
     /// Location of the Lumetri palette tool bar ("top", "bottom", "left").
     #[serde(default = "default_lumetri_bar_pos")]
     pub lumetri_bar_pos: String,
+    /// Color Match reference timecode persisted across panel switches.
+    #[serde(default = "default_lumetri_match_ref")]
+    pub lumetri_match_ref: String,
+    /// Color Match face-detection (skin tone protection) toggle.
+    #[serde(default = "yes")]
+    pub lumetri_match_face: bool,
     /// Text to Speech panel: the script and voice settings being written or edited.
     #[serde(default)]
     pub tts: crate::panels::tts::TtsDraft,
@@ -1147,7 +1163,7 @@ fn default_lumetri_tool_order() -> Vec<String> {
         "Basic Correction".into(),
         "Color Wheels & Match".into(),
         "Curves".into(),
-        "Power Windows / Máscara".into(),
+        "Power Windows".into(),
         "HSL Secondary".into(),
         "Creative".into(),
         "Vignette".into(),
@@ -1156,6 +1172,10 @@ fn default_lumetri_tool_order() -> Vec<String> {
 
 fn default_lumetri_bar_pos() -> String {
     "top".into()
+}
+
+fn default_lumetri_match_ref() -> String {
+    "00:00:00:00".into()
 }
 
 fn yes() -> bool {
@@ -1219,6 +1239,8 @@ impl Default for UiState {
             lumetri_dual_view: false,
             lumetri_tool_order: default_lumetri_tool_order(),
             lumetri_bar_pos: default_lumetri_bar_pos(),
+            lumetri_match_ref: default_lumetri_match_ref(),
+            lumetri_match_face: true,
             tts: Default::default(),
             export: Default::default(),
             project_browser: Default::default(),

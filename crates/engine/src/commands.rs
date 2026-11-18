@@ -3988,6 +3988,20 @@ fn build() -> Vec<CommandSpec> {
             })?;
             Ok(Value::Null)
         }),
+        cmd!("effects.rename", "Rename Effect", [], None, r#"{"clip":id,"index":n,"label":"name"}"#, has_seq, |s, p| {
+            let c = clip_p(p, "clip").ok_or_else(|| bad("effects.rename", "need `clip`"))?;
+            let idx = u64_p(p, "index").unwrap_or(0) as usize;
+            let raw = str_p(p, "label").unwrap_or("");
+            let next = (!raw.trim().is_empty()).then(|| raw.trim().to_string());
+            s.edit_sequence("Rename Effect", |q, _, _| {
+                let (_, it) = q.find_item_mut(c).ok_or(filmcraft_edit::EditError::NoItem(c))?;
+                if let Some(e) = it.effects.get_mut(idx) {
+                    e.label = next.clone();
+                }
+                Ok(())
+            })?;
+            Ok(Value::Null)
+        }),
         cmd!("effects.reset", "Reset Effect", [], None, r#"{"clip":id,"index":n}"#, has_seq, |s, p| {
             let c = clip_p(p, "clip").ok_or_else(|| bad("effects.reset", "need `clip`"))?;
             let idx = u64_p(p, "index").unwrap_or(0) as usize;

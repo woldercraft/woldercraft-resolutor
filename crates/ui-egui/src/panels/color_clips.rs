@@ -85,22 +85,10 @@ pub fn collect_video_clips(app: &FilmcraftApp) -> Vec<ColorClipInfo> {
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     let mut chars = s.chars();
     let collected: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{collected}…")
-    } else {
-        collected
-    }
+    if chars.next().is_some() { format!("{collected}…") } else { collected }
 }
 
-fn draw_header_btn(
-    ui: &mut egui::Ui,
-    p: &egui::Painter,
-    r: Rect,
-    id: &str,
-    label: &str,
-    active: bool,
-    accent: Option<Color32>,
-) -> egui::Response {
+fn draw_header_btn(ui: &mut egui::Ui, p: &egui::Painter, r: Rect, id: &str, label: &str, active: bool, accent: Option<Color32>) -> egui::Response {
     let resp = ui.interact(r, egui::Id::unique(id), Sense::click());
     let bg = if active {
         accent.unwrap_or(Color32::from_rgb(55, 95, 155))
@@ -110,13 +98,7 @@ fn draw_header_btn(
         Color32::from_rgb(30, 34, 42)
     };
     p.rect_filled(r, 3.0, bg);
-    p.text(
-        r.center(),
-        Align2::CENTER_CENTER,
-        label,
-        Tokens::ui(9.5),
-        if active { Color32::WHITE } else { Color32::from_rgb(205, 215, 230) },
-    );
+    p.text(r.center(), Align2::CENTER_CENTER, label, Tokens::ui(9.5), if active { Color32::WHITE } else { Color32::from_rgb(205, 215, 230) });
     resp
 }
 
@@ -151,9 +133,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         .collect();
 
     // Ctrl/Cmd + A selects all filtered clips when ColorClips is focused
-    if app.ui.focused == PanelKind::ColorClips
-        && ui.input(|i| i.modifiers.command && i.key_pressed(Key::A))
-    {
+    if app.ui.focused == PanelKind::ColorClips && ui.input(|i| i.modifiers.command && i.key_pressed(Key::A)) {
         app.ui.selected_color_clips = clips.iter().map(|c| c.id).collect();
     }
 
@@ -163,27 +143,12 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     p.rect_filled(header_rect, 0.0, Color32::from_rgb(24, 28, 34));
 
     let sel_count = app.ui.selected_color_clips.len();
-    let header_text = if sel_count > 1 {
-        format!("CLIPS ({}) · {} sel", clips.len(), sel_count)
-    } else {
-        format!("CLIPS ({})", clips.len())
-    };
-    p.text(
-        pos2(header_rect.min.x + 10.0, header_rect.center().y),
-        Align2::LEFT_CENTER,
-        &header_text,
-        Tokens::semibold(10.0),
-        Color32::from_rgb(165, 180, 200),
-    );
+    let header_text = if sel_count > 1 { format!("CLIPS ({}) · {} sel", clips.len(), sel_count) } else { format!("CLIPS ({})", clips.len()) };
+    p.text(pos2(header_rect.min.x + 10.0, header_rect.center().y), Align2::LEFT_CENTER, &header_text, Tokens::semibold(10.0), Color32::from_rgb(165, 180, 200));
 
     // Filter pills on the left after header text
     let mut lx = header_rect.min.x + 132.0;
-    let filters = [
-        ("", tl!("All")),
-        ("ungrouped", tl!("Ungrouped")),
-        ("graded", tl!("Graded")),
-        ("bypassed", tl!("Bypassed")),
-    ];
+    let filters = [("", tl!("All")), ("ungrouped", tl!("Ungrouped")), ("graded", tl!("Graded")), ("bypassed", tl!("Bypassed"))];
     for (key, label) in filters {
         let w = (label.chars().count() as f32 * 5.8 + 14.0).max(42.0);
         if lx + w < header_rect.max.x - 320.0 {
@@ -241,15 +206,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
         rx -= 76.0;
         let grp_r = Rect::from_min_size(pos2(rx, header_rect.min.y + 3.0), vec2(72.0, 18.0));
-        let grp_resp = draw_header_btn(
-            ui,
-            &p,
-            grp_r,
-            "cc_batch_group",
-            tl!("+ Group"),
-            false,
-            Some(Color32::from_rgb(70, 115, 180)),
-        );
+        let grp_resp = draw_header_btn(ui, &p, grp_r, "cc_batch_group", tl!("+ Group"), false, Some(Color32::from_rgb(70, 115, 180)));
         app.auto.add("color_clips.groupSelection", grp_r, "Group Selection");
         if grp_resp.clicked() {
             pending_cmd = Some(("color.groupCreate", json!({ "clips": batch_ids })));
@@ -278,266 +235,211 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     let playhead = app.session.playhead();
     let project = app.session.project.clone();
-    let groups_snapshot: Vec<(ColorGroupId, String, [u8; 3])> = app
-        .session
-        .active_sequence()
-        .map(|s| s.color_groups.iter().map(|g| (g.id, g.name.clone(), g.color)).collect())
-        .unwrap_or_default();
+    let groups_snapshot: Vec<(ColorGroupId, String, [u8; 3])> =
+        app.session.active_sequence().map(|s| s.color_groups.iter().map(|g| (g.id, g.name.clone(), g.color)).collect()).unwrap_or_default();
 
-    let mut scroll_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(strip_rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
+    let mut scroll_ui = ui.new_child(egui::UiBuilder::new().max_rect(strip_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
 
     let mut clicked_clip: Option<(usize, ColorClipInfo, bool, bool)> = None;
     let mut copy_grade_from: Option<ClipId> = None;
 
-    egui::ScrollArea::horizontal()
-        .auto_shrink([false, false])
-        .show(&mut scroll_ui, |ui| {
-            ui.add_space(8.0);
-            for (i, clip) in clips.iter().enumerate() {
-                let (card_r, resp) = ui.allocate_exact_size(vec2(card_w, card_h), Sense::click());
-                let cp = ui.painter();
+    egui::ScrollArea::horizontal().auto_shrink([false, false]).show(&mut scroll_ui, |ui| {
+        ui.add_space(8.0);
+        for (i, clip) in clips.iter().enumerate() {
+            let (card_r, resp) = ui.allocate_exact_size(vec2(card_w, card_h), Sense::click());
+            let cp = ui.painter();
 
-                let is_hovered = resp.hovered();
-                let is_multi_selected = app.ui.selected_color_clips.contains(&clip.id);
-                let is_active_clip = clip.is_active && app.ui.active_color_group.is_none();
-                let is_active_group_member = app
-                    .ui
-                    .active_color_group
-                    .is_some_and(|ag| clip.group.as_ref().is_some_and(|(gid, _, _)| *gid == ag));
+            let is_hovered = resp.hovered();
+            let is_multi_selected = app.ui.selected_color_clips.contains(&clip.id);
+            let is_active_clip = clip.is_active && app.ui.active_color_group.is_none();
+            let is_active_group_member = app.ui.active_color_group.is_some_and(|ag| clip.group.as_ref().is_some_and(|(gid, _, _)| *gid == ag));
 
-                let bg_color = if is_active_clip || is_active_group_member {
-                    Color32::from_rgb(32, 38, 48)
-                } else if is_multi_selected {
-                    Color32::from_rgb(28, 36, 50)
-                } else if is_hovered {
-                    Color32::from_rgb(28, 33, 42)
+            let bg_color = if is_active_clip || is_active_group_member {
+                Color32::from_rgb(32, 38, 48)
+            } else if is_multi_selected {
+                Color32::from_rgb(28, 36, 50)
+            } else if is_hovered {
+                Color32::from_rgb(28, 33, 42)
+            } else {
+                Color32::from_rgb(22, 25, 32)
+            };
+
+            let border_stroke = if is_active_clip {
+                Stroke::new(2.0, Color32::from_rgb(255, 175, 40))
+            } else if is_active_group_member {
+                let rgb = clip.group.as_ref().map(|(_, _, c)| *c).unwrap_or([255, 175, 40]);
+                Stroke::new(2.0, Color32::from_rgb(rgb[0], rgb[1], rgb[2]))
+            } else if is_multi_selected {
+                Stroke::new(2.0, Color32::from_rgb(80, 155, 255))
+            } else if is_hovered {
+                Stroke::new(1.0, Color32::from_rgb(70, 140, 230))
+            } else {
+                Stroke::new(1.0, Color32::from_rgb(42, 48, 58))
+            };
+
+            cp.rect_filled(card_r, 4.0, bg_color);
+
+            // Left group stripe if clip belongs to a group
+            if let Some((_, _, rgb)) = &clip.group {
+                let stripe_r = Rect::from_min_size(card_r.min, vec2(3.5, card_r.height()));
+                cp.rect_filled(stripe_r, CornerRadius { nw: 4, ne: 0, sw: 4, se: 0 }, Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+            }
+
+            // Top banner: Number and Track badge
+            let banner_r = Rect::from_min_size(card_r.min, vec2(card_r.width(), banner_h));
+            cp.rect_filled(banner_r, CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, Color32::from_rgb(18, 20, 26));
+
+            let num_str = format!("{:02}", i + 1);
+            cp.text(
+                pos2(banner_r.min.x + 7.0, banner_r.center().y),
+                Align2::LEFT_CENTER,
+                &num_str,
+                Tokens::semibold(10.0),
+                if is_active_clip { Color32::from_rgb(255, 185, 60) } else { Color32::from_rgb(190, 200, 215) },
+            );
+
+            cp.text(pos2(banner_r.max.x - 6.0, banner_r.center().y), Align2::RIGHT_CENTER, &clip.track_name, Tokens::ui(9.0), Color32::from_rgb(120, 135, 155));
+
+            // Middle area: Thumbnail box
+            let thumb_r = Rect::from_min_max(pos2(card_r.min.x + 4.0, card_r.min.y + banner_h + 2.0), pos2(card_r.max.x - 4.0, card_r.max.y - footer_h - 2.0));
+            cp.rect_filled(thumb_r, 2.0, Color32::from_rgb(14, 16, 20));
+
+            let mut drew_thumb = false;
+            if let Some(src_id) = clip.source {
+                let scale = crate::panels::monitor::quantize_scale((thumb_r.width() * ui.ctx().pixels_per_point() / 1920.0).clamp(1.0 / 32.0, 0.25));
+                let key = FrameKey { target: Target::Item(src_id), frame: 0, size: (scale * 1000.0) as u32, revision: 0, draft: true, bypass: false };
+                app.frames.request(key, clip.source_mid, scale, &project, 5);
+                if let Some(img) = app.frames.get(&key) {
+                    let tex = app.texture_for(ui.ctx(), &format!("color-clip-{}", clip.id.0), key, &img);
+                    cp.image(tex, thumb_r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    drew_thumb = true;
+                }
+            }
+            if !drew_thumb {
+                let icon_r = Rect::from_center_size(thumb_r.center(), vec2(16.0, 16.0));
+                icons::paint(cp, icon_r, Icon::Film, Color32::from_rgba_unmultiplied(120, 140, 170, 60));
+            }
+
+            // Badges on thumbnail: Group pill, Node badge, VFX badge
+            let mut badge_x = thumb_r.min.x + 3.0;
+            if let Some((_, gname, rgb)) = &clip.group {
+                let short = truncate_chars(gname, 8);
+                let bw = (short.chars().count() as f32 * 5.0 + 8.0).clamp(24.0, 56.0);
+                let badge_r = Rect::from_min_size(pos2(badge_x, thumb_r.min.y + 3.0), vec2(bw, 12.0));
+                cp.rect_filled(badge_r, 2.0, Color32::from_rgba_unmultiplied(rgb[0], rgb[1], rgb[2], 215));
+                cp.text(badge_r.center(), Align2::CENTER_CENTER, &short, Tokens::semibold(8.0), Color32::from_rgb(16, 18, 22));
+                badge_x += bw + 3.0;
+            }
+            if clip.is_graded {
+                let badge_r = Rect::from_min_size(pos2(badge_x, thumb_r.min.y + 3.0), vec2(32.0, 12.0));
+                let col = if clip.is_bypassed { Color32::from_rgba_unmultiplied(165, 115, 35, 215) } else { Color32::from_rgba_unmultiplied(40, 140, 70, 215) };
+                cp.rect_filled(badge_r, 2.0, col);
+                cp.text(badge_r.center(), Align2::CENTER_CENTER, format!("{} nod", clip.node_count), Tokens::semibold(8.0), Color32::WHITE);
+                badge_x += 35.0;
+            }
+            if clip.vfx_count > 0 && badge_x + 30.0 < thumb_r.max.x {
+                let badge_r = Rect::from_min_size(pos2(badge_x, thumb_r.min.y + 3.0), vec2(30.0, 12.0));
+                cp.rect_filled(badge_r, 2.0, Color32::from_rgba_unmultiplied(115, 75, 225, 220));
+                cp.text(badge_r.center(), Align2::CENTER_CENTER, format!("{} FX", clip.vfx_count), Tokens::semibold(8.0), Color32::WHITE);
+            }
+
+            // Playhead needle across thumbnail
+            if playhead >= clip.start && playhead < clip.start + clip.duration && clip.duration.0 > 0 {
+                let prog = (playhead.0 - clip.start.0) as f32 / clip.duration.0 as f32;
+                let nx = thumb_r.min.x + prog.clamp(0.0, 1.0) * thumb_r.width();
+                cp.line_segment([pos2(nx, thumb_r.min.y), pos2(nx, thumb_r.max.y)], Stroke::new(1.5, Color32::from_rgb(255, 170, 30)));
+            }
+
+            // Bottom footer: Clip Name (clipped cleanly) and Duration
+            let footer_y = card_r.max.y - footer_h * 0.5;
+            let dur_str = format!("{:.1}s", clip.duration.seconds());
+            let dur_reserved = 36.0;
+            let max_name_chars = ((card_w - dur_reserved - 12.0) / 5.5).max(5.0) as usize;
+            let display_name = truncate_chars(&clip.name, max_name_chars);
+            let name_clip_r = Rect::from_min_max(pos2(card_r.min.x + 6.0, card_r.max.y - footer_h), pos2(card_r.max.x - dur_reserved - 4.0, card_r.max.y));
+            cp.with_clip_rect(name_clip_r).text(
+                pos2(card_r.min.x + 6.0, footer_y),
+                Align2::LEFT_CENTER,
+                &display_name,
+                Tokens::ui(9.5),
+                Color32::from_rgb(210, 220, 235),
+            );
+            cp.text(pos2(card_r.max.x - 6.0, footer_y), Align2::RIGHT_CENTER, &dur_str, Tokens::ui(8.5), Color32::from_rgb(130, 140, 160));
+
+            cp.rect_stroke(card_r, 4.0, border_stroke, StrokeKind::Inside);
+
+            // Automation IDs
+            app.auto.add(&format!("color_clips.clip.{}", clip.id.0), card_r, &clip.name);
+            app.auto.add(&format!("color_clips.index.{i}"), card_r, &format!("Clip {}", i + 1));
+
+            if resp.clicked() {
+                let mods = ui.input(|inp| inp.modifiers);
+                clicked_clip = Some((i, clip.clone(), mods.command || mods.ctrl, mods.shift));
+            }
+
+            resp.context_menu(|ui| {
+                let target_ids: Vec<u64> = if app.ui.selected_color_clips.contains(&clip.id) && !app.ui.selected_color_clips.is_empty() {
+                    app.ui.selected_color_clips.iter().map(|c| c.0).collect()
                 } else {
-                    Color32::from_rgb(22, 25, 32)
+                    vec![clip.id.0]
                 };
 
-                let border_stroke = if is_active_clip {
-                    Stroke::new(2.0, Color32::from_rgb(255, 175, 40))
-                } else if is_active_group_member {
-                    let rgb = clip.group.as_ref().map(|(_, _, c)| *c).unwrap_or([255, 175, 40]);
-                    Stroke::new(2.0, Color32::from_rgb(rgb[0], rgb[1], rgb[2]))
-                } else if is_multi_selected {
-                    Stroke::new(2.0, Color32::from_rgb(80, 155, 255))
-                } else if is_hovered {
-                    Stroke::new(1.0, Color32::from_rgb(70, 140, 230))
-                } else {
-                    Stroke::new(1.0, Color32::from_rgb(42, 48, 58))
-                };
-
-                cp.rect_filled(card_r, 4.0, bg_color);
-
-                // Left group stripe if clip belongs to a group
-                if let Some((_, _, rgb)) = &clip.group {
-                    let stripe_r = Rect::from_min_size(card_r.min, vec2(3.5, card_r.height()));
-                    cp.rect_filled(
-                        stripe_r,
-                        CornerRadius { nw: 4, ne: 0, sw: 4, se: 0 },
-                        Color32::from_rgb(rgb[0], rgb[1], rgb[2]),
-                    );
+                let create_lbl = if target_ids.len() > 1 { tlf!("Create New Group ({n})", n = target_ids.len()) } else { tl!("Create New Group").to_string() };
+                if ui.button(create_lbl).clicked() {
+                    pending_cmd = Some(("color.groupCreate", json!({ "clips": target_ids })));
+                    select_new_group = true;
+                    ui.close();
                 }
 
-                // Top banner: Number and Track badge
-                let banner_r = Rect::from_min_size(card_r.min, vec2(card_r.width(), banner_h));
-                cp.rect_filled(
-                    banner_r,
-                    CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 },
-                    Color32::from_rgb(18, 20, 26),
-                );
-
-                let num_str = format!("{:02}", i + 1);
-                cp.text(
-                    pos2(banner_r.min.x + 7.0, banner_r.center().y),
-                    Align2::LEFT_CENTER,
-                    &num_str,
-                    Tokens::semibold(10.0),
-                    if is_active_clip { Color32::from_rgb(255, 185, 60) } else { Color32::from_rgb(190, 200, 215) },
-                );
-
-                cp.text(
-                    pos2(banner_r.max.x - 6.0, banner_r.center().y),
-                    Align2::RIGHT_CENTER,
-                    &clip.track_name,
-                    Tokens::ui(9.0),
-                    Color32::from_rgb(120, 135, 155),
-                );
-
-                // Middle area: Thumbnail box
-                let thumb_r = Rect::from_min_max(
-                    pos2(card_r.min.x + 4.0, card_r.min.y + banner_h + 2.0),
-                    pos2(card_r.max.x - 4.0, card_r.max.y - footer_h - 2.0),
-                );
-                cp.rect_filled(thumb_r, 2.0, Color32::from_rgb(14, 16, 20));
-
-                let mut drew_thumb = false;
-                if let Some(src_id) = clip.source {
-                    let scale = crate::panels::monitor::quantize_scale(
-                        (thumb_r.width() * ui.ctx().pixels_per_point() / 1920.0).clamp(1.0 / 32.0, 0.25),
-                    );
-                    let key = FrameKey {
-                        target: Target::Item(src_id),
-                        frame: 0,
-                        size: (scale * 1000.0) as u32,
-                        revision: 0,
-                        draft: true,
-                        bypass: false,
-                    };
-                    app.frames.request(key, clip.source_mid, scale, &project, 5);
-                    if let Some(img) = app.frames.get(&key) {
-                        let tex = app.texture_for(ui.ctx(), &format!("color-clip-{}", clip.id.0), key, &img);
-                        cp.image(tex, thumb_r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-                        drew_thumb = true;
-                    }
-                }
-                if !drew_thumb {
-                    let icon_r = Rect::from_center_size(thumb_r.center(), vec2(16.0, 16.0));
-                    icons::paint(cp, icon_r, Icon::Film, Color32::from_rgba_unmultiplied(120, 140, 170, 60));
-                }
-
-                // Badges on thumbnail: Group pill, Node badge, VFX badge
-                let mut badge_x = thumb_r.min.x + 3.0;
-                if let Some((_, gname, rgb)) = &clip.group {
-                    let short = truncate_chars(gname, 8);
-                    let bw = (short.chars().count() as f32 * 5.0 + 8.0).clamp(24.0, 56.0);
-                    let badge_r = Rect::from_min_size(pos2(badge_x, thumb_r.min.y + 3.0), vec2(bw, 12.0));
-                    cp.rect_filled(badge_r, 2.0, Color32::from_rgba_unmultiplied(rgb[0], rgb[1], rgb[2], 215));
-                    cp.text(badge_r.center(), Align2::CENTER_CENTER, &short, Tokens::semibold(8.0), Color32::from_rgb(16, 18, 22));
-                    badge_x += bw + 3.0;
-                }
-                if clip.is_graded {
-                    let badge_r = Rect::from_min_size(pos2(badge_x, thumb_r.min.y + 3.0), vec2(32.0, 12.0));
-                    let col = if clip.is_bypassed {
-                        Color32::from_rgba_unmultiplied(165, 115, 35, 215)
+                ui.menu_button(tl!("Add to Group"), |ui| {
+                    if groups_snapshot.is_empty() {
+                        ui.add_enabled(false, egui::Button::new(tl!("(No groups yet)")));
+                        if ui.button(tl!("+ Create New Group")).clicked() {
+                            pending_cmd = Some(("color.groupCreate", json!({ "clips": target_ids })));
+                            select_new_group = true;
+                            ui.close();
+                        }
                     } else {
-                        Color32::from_rgba_unmultiplied(40, 140, 70, 215)
-                    };
-                    cp.rect_filled(badge_r, 2.0, col);
-                    cp.text(badge_r.center(), Align2::CENTER_CENTER, format!("{} nod", clip.node_count), Tokens::semibold(8.0), Color32::WHITE);
-                    badge_x += 35.0;
-                }
-                if clip.vfx_count > 0 && badge_x + 30.0 < thumb_r.max.x {
-                    let badge_r = Rect::from_min_size(pos2(badge_x, thumb_r.min.y + 3.0), vec2(30.0, 12.0));
-                    cp.rect_filled(badge_r, 2.0, Color32::from_rgba_unmultiplied(115, 75, 225, 220));
-                    cp.text(badge_r.center(), Align2::CENTER_CENTER, format!("{} FX", clip.vfx_count), Tokens::semibold(8.0), Color32::WHITE);
-                }
-
-                // Playhead needle across thumbnail
-                if playhead >= clip.start && playhead < clip.start + clip.duration && clip.duration.0 > 0 {
-                    let prog = (playhead.0 - clip.start.0) as f32 / clip.duration.0 as f32;
-                    let nx = thumb_r.min.x + prog.clamp(0.0, 1.0) * thumb_r.width();
-                    cp.line_segment([pos2(nx, thumb_r.min.y), pos2(nx, thumb_r.max.y)], Stroke::new(1.5, Color32::from_rgb(255, 170, 30)));
-                }
-
-                // Bottom footer: Clip Name (clipped cleanly) and Duration
-                let footer_y = card_r.max.y - footer_h * 0.5;
-                let dur_str = format!("{:.1}s", clip.duration.seconds());
-                let dur_reserved = 36.0;
-                let max_name_chars = ((card_w - dur_reserved - 12.0) / 5.5).max(5.0) as usize;
-                let display_name = truncate_chars(&clip.name, max_name_chars);
-                let name_clip_r = Rect::from_min_max(
-                    pos2(card_r.min.x + 6.0, card_r.max.y - footer_h),
-                    pos2(card_r.max.x - dur_reserved - 4.0, card_r.max.y),
-                );
-                cp.with_clip_rect(name_clip_r).text(
-                    pos2(card_r.min.x + 6.0, footer_y),
-                    Align2::LEFT_CENTER,
-                    &display_name,
-                    Tokens::ui(9.5),
-                    Color32::from_rgb(210, 220, 235),
-                );
-                cp.text(
-                    pos2(card_r.max.x - 6.0, footer_y),
-                    Align2::RIGHT_CENTER,
-                    &dur_str,
-                    Tokens::ui(8.5),
-                    Color32::from_rgb(130, 140, 160),
-                );
-
-                cp.rect_stroke(card_r, 4.0, border_stroke, StrokeKind::Inside);
-
-                // Automation IDs
-                app.auto.add(&format!("color_clips.clip.{}", clip.id.0), card_r, &clip.name);
-                app.auto.add(&format!("color_clips.index.{i}"), card_r, &format!("Clip {}", i + 1));
-
-                if resp.clicked() {
-                    let mods = ui.input(|inp| inp.modifiers);
-                    clicked_clip = Some((i, clip.clone(), mods.command || mods.ctrl, mods.shift));
-                }
-
-                resp.context_menu(|ui| {
-                    let target_ids: Vec<u64> = if app.ui.selected_color_clips.contains(&clip.id) && !app.ui.selected_color_clips.is_empty() {
-                        app.ui.selected_color_clips.iter().map(|c| c.0).collect()
-                    } else {
-                        vec![clip.id.0]
-                    };
-
-                    let create_lbl = if target_ids.len() > 1 {
-                        tlf!("Create New Group ({n})", n = target_ids.len())
-                    } else {
-                        tl!("Create New Group").to_string()
-                    };
-                    if ui.button(create_lbl).clicked() {
-                        pending_cmd = Some(("color.groupCreate", json!({ "clips": target_ids })));
-                        select_new_group = true;
-                        ui.close();
-                    }
-
-                    ui.menu_button(tl!("Add to Group"), |ui| {
-                        if groups_snapshot.is_empty() {
-                            ui.add_enabled(false, egui::Button::new(tl!("(No groups yet)")));
-                            if ui.button(tl!("+ Create New Group")).clicked() {
-                                pending_cmd = Some(("color.groupCreate", json!({ "clips": target_ids })));
-                                select_new_group = true;
+                        for (gid, gname, rgb) in &groups_snapshot {
+                            let label = egui::RichText::new(format!("● {gname}")).color(Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+                            if ui.button(label).clicked() {
+                                pending_cmd = Some(("color.groupAssign", json!({ "clips": target_ids, "group": gid.0 })));
                                 ui.close();
                             }
-                        } else {
-                            for (gid, gname, rgb) in &groups_snapshot {
-                                let label = egui::RichText::new(format!("● {gname}")).color(Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
-                                if ui.button(label).clicked() {
-                                    pending_cmd = Some(("color.groupAssign", json!({ "clips": target_ids, "group": gid.0 })));
-                                    ui.close();
-                                }
-                            }
                         }
-                    });
-
-                    if (clip.group.is_some() || target_ids.len() > 1) && ui.button(tl!("Remove from Group")).clicked() {
-                        pending_cmd = Some(("color.groupUnassign", json!({ "clips": target_ids })));
-                        ui.close();
-                    }
-
-                    ui.separator();
-                    if ui.button(tl!("Copy Grade")).clicked() {
-                        copy_grade_from = Some(clip.id);
-                        ui.close();
-                    }
-                    if let Some(src_clip) = app.ui.copied_color_clip
-                        && ui.button(tl!("Paste Grade")).clicked()
-                    {
-                        pending_cmd = Some(("color.batchPasteGrade", json!({ "from": src_clip.0, "clips": target_ids })));
-                        ui.close();
-                    }
-                    if ui.button(tl!("Toggle Bypass")).clicked() {
-                        pending_cmd = Some(("color.batchToggleBypass", json!({ "clips": target_ids })));
-                        ui.close();
-                    }
-                    if ui.button(tl!("Reset Grade")).clicked() {
-                        pending_cmd = Some(("color.batchResetGrade", json!({ "clips": target_ids })));
-                        ui.close();
                     }
                 });
 
-                ui.add_space(6.0);
-            }
-            ui.add_space(8.0);
-        });
+                if (clip.group.is_some() || target_ids.len() > 1) && ui.button(tl!("Remove from Group")).clicked() {
+                    pending_cmd = Some(("color.groupUnassign", json!({ "clips": target_ids })));
+                    ui.close();
+                }
+
+                ui.separator();
+                if ui.button(tl!("Copy Grade")).clicked() {
+                    copy_grade_from = Some(clip.id);
+                    ui.close();
+                }
+                if let Some(src_clip) = app.ui.copied_color_clip
+                    && ui.button(tl!("Paste Grade")).clicked()
+                {
+                    pending_cmd = Some(("color.batchPasteGrade", json!({ "from": src_clip.0, "clips": target_ids })));
+                    ui.close();
+                }
+                if ui.button(tl!("Toggle Bypass")).clicked() {
+                    pending_cmd = Some(("color.batchToggleBypass", json!({ "clips": target_ids })));
+                    ui.close();
+                }
+                if ui.button(tl!("Reset Grade")).clicked() {
+                    pending_cmd = Some(("color.batchResetGrade", json!({ "clips": target_ids })));
+                    ui.close();
+                }
+            });
+
+            ui.add_space(6.0);
+        }
+        ui.add_space(8.0);
+    });
 
     if let Some(src_id) = copy_grade_from {
         app.ui.copied_color_clip = Some(src_id);
@@ -547,9 +449,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if let Some((cmd, args)) = pending_cmd {
         match app.session.execute(cmd, args) {
             Ok(val) => {
-                if select_new_group
-                    && let Some(gid) = val.get("group").and_then(|v| v.as_u64())
-                {
+                if select_new_group && let Some(gid) = val.get("group").and_then(|v| v.as_u64()) {
                     app.ui.active_color_group = Some(ColorGroupId(gid));
                 }
             }
@@ -567,12 +467,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 app.ui.selected_color_clips.push(target.id);
             }
         } else if shift {
-            let anchor_idx = app
-                .ui
-                .selected_color_clips
-                .last()
-                .and_then(|last_id| clips.iter().position(|c| c.id == *last_id))
-                .unwrap_or(active_idx);
+            let anchor_idx = app.ui.selected_color_clips.last().and_then(|last_id| clips.iter().position(|c| c.id == *last_id)).unwrap_or(active_idx);
             let (lo, hi) = if anchor_idx <= idx { (anchor_idx, idx) } else { (idx, anchor_idx) };
             app.ui.selected_color_clips = clips[lo..=hi].iter().map(|c| c.id).collect();
         } else {

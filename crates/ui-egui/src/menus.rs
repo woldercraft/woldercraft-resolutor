@@ -1270,10 +1270,8 @@ pub fn menu_bar(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     egui::MenuBar::new().style(crate::theme::menu_style).config(egui::containers::menu::MenuConfig::new().style(crate::theme::menu_style)).ui(ui, |ui| {
         let mut titles = Vec::with_capacity(MENUS.len());
         for top in MENUS {
-            let mine: Vec<&MenuItem> = items
-                .iter()
-                .filter(|i| i.path.first().map(String::as_str) == Some(top) && i.path.get(1).map(String::as_str) != Some("Workspaces"))
-                .collect();
+            let mine: Vec<&MenuItem> =
+                items.iter().filter(|i| i.path.first().map(String::as_str) == Some(top) && i.path.get(1).map(String::as_str) != Some("Workspaces")).collect();
             let r = ui.menu_button(app.ui.language.tr(top), |ui| {
                 ui.set_min_width(260.0);
                 if mine.is_empty() {
@@ -1338,7 +1336,7 @@ fn menu_level(
     };
     if items.len() > 20 {
         let max_h = (ui.ctx().content_rect().height() - 64.0).max(200.0);
-        egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+        egui::ScrollArea::vertical().min_scrolled_height(max_h).max_height(max_h).show(ui, |ui| {
             draw_items(ui, clicked, auto);
         });
     } else {

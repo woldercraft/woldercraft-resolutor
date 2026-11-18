@@ -587,6 +587,7 @@ pub(crate) fn effect_instance(id: &str) -> EffectInstance {
         post_fader: false,
         essential: false,
         layer: None,
+        label: None,
     })
 }
 

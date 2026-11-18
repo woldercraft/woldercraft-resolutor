@@ -193,7 +193,8 @@ fn a_right_click_on_a_tab_shows_it_and_opens_its_menu() {
     d.frames(3);
     d.ok("ui.click", json!({"id": format!("timeline.tab.{main}"), "button": "right"}));
     d.frames(3);
-    assert!(d.has("panel.menu.Timeline.close") && d.active() == main);
+    assert!(d.has("panel.menu.Timeline.close"));
+    assert_eq!(d.active(), main);
     d.click("panel.Program");
     // Close Panel from the menu closes the tab it was opened on
     d.show(main);

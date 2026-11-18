@@ -434,7 +434,7 @@ fn alt_click_isolates_already_selected_linked_clip_before_delete() {
 }
 
 #[test]
-fn shift_alt_click_toggles_only_the_clicked_linked_side() {
+fn cmd_alt_click_toggles_only_the_clicked_linked_side() {
     for audio in [false, true] {
         let mut d = Driver::new();
         d.focus("Timeline");
@@ -445,13 +445,13 @@ fn shift_alt_click_toggles_only_the_clicked_linked_side() {
         d.exec("timeline.select", json!({"clips": [clicked.0]}));
         let before = d.app().session.project.clone();
         let r = d.app().auto.find(&format!("timeline.clip.{}", clicked.0)).unwrap().rect;
-        let params = json!({"x": r[0] + r[2] * 0.5, "y": r[1] + r[3] * 0.3, "modifiers": {"alt": true, "shift": true}});
+        let params = json!({"x": r[0] + r[2] * 0.5, "y": r[1] + r[3] * 0.3, "modifiers": {"alt": true, "command": true}});
         d.ok("ui.click", params.clone());
         d.frames(3);
-        assert_eq!(d.app().session.state.selection, vec![partner], "Shift+Alt removes only the clicked side");
+        assert_eq!(d.app().session.state.selection, vec![partner], "Cmd+Alt removes only the clicked side");
         d.ok("ui.click", params);
         d.frames(3);
-        assert_eq!(d.app().session.state.selection, vec![partner, clicked], "Shift+Alt adds that side back");
+        assert_eq!(d.app().session.state.selection, vec![partner, clicked], "Cmd+Alt adds that side back");
         assert!(d.app().session.state.linked_selection);
         assert_eq!(*d.app().session.project, *before, "selection does not edit the document");
     }
