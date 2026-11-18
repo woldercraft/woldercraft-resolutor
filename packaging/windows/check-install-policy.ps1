@@ -88,7 +88,7 @@ try {
     $directories[$row[0]] = @($row[1], $row[2])
   }
   if ($directories['INSTALLFOLDER'][0] -ne 'CraftSuiteFolder' -or
-      $directories['CraftSuiteFolder'][1] -ne 'WolderCraft') { throw 'Expected the app under the WolderCraft suite folder.' }
+      ($directories['CraftSuiteFolder'][1] -split '\|')[-1] -ne 'WolderCraft') { throw 'Expected the app under the WolderCraft suite folder.' }
   $programs = $directories['CraftSuiteFolder'][0]
   if ($programs -eq 'ProgramFiles6432Folder') { $programs = $directories[$programs][0] }
   if ($programs -notin 'ProgramFilesFolder', 'ProgramFiles64Folder') {
@@ -341,7 +341,7 @@ try {
       if ((Test-ControlVisible $text) -ne ($scope -eq '1')) { throw 'The welcome-page scope text must follow the selected scope.' }
     }
   }
-  if ($policy.id -in 'deckcraft','filmcraft','soundcraft') {
+  if ($policy.id -in 'deckcraft','filmcraft','resolutor','soundcraft') {
     foreach ($route in @(@('WelcomeDlg','Next','InstallDirDlg'),@('InstallDirDlg','Back','WelcomeDlg'))) {
       $dialog = $route[0]; $control = $route[1]
       $routes = @(Read-Rows $database "SELECT ``Argument``, ``Condition`` FROM ``ControlEvent`` WHERE ``Dialog_`` = '$dialog' AND ``Control_`` = '$control' AND ``Event`` = 'NewDialog' ORDER BY ``Ordering``" 2)
