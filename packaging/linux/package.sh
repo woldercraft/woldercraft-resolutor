@@ -59,7 +59,11 @@ STAGE="$WORK/root"
 rm -rf "$WORK"
 
 # ---- stage an FHS tree (shared by every format) -------------------------------------------------
-install -Dm755 "$BIN/filmcraft" "$STAGE/usr/bin/filmcraft"
+APP_BIN="$BIN/resolutor"
+if [[ ! -f "$APP_BIN" ]]; then
+  APP_BIN="$BIN/filmcraft"
+fi
+install -Dm755 "$APP_BIN" "$STAGE/usr/bin/filmcraft"
 install -Dm755 "$BIN/filmcraft-cli" "$STAGE/usr/bin/filmcraft-cli"
 "${CROSS_COMPILE:-}strip" "$STAGE/usr/bin/filmcraft" "$STAGE/usr/bin/filmcraft-cli" 2>/dev/null || true
 install -Dm644 "$HERE/$APP_ID.desktop" "$STAGE/usr/share/applications/$APP_ID.desktop"
