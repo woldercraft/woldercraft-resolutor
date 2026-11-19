@@ -41,10 +41,10 @@ case "$ARCH" in
   aarch64 | arm64) ARCH=aarch64; DEB_ARCH=arm64 ;;
   *) echo "unsupported architecture $ARCH" >&2; exit 2 ;;
 esac
-export FILMCRAFT_MAINTAINER="${FILMCRAFT_MAINTAINER:-FilmCraft maintainers <filmcraft@storyteller.ai>}"
-BASENAME="filmcraft-$VERSION-linux-$ARCH"
+export FILMCRAFT_MAINTAINER="${FILMCRAFT_MAINTAINER:-Resolutor maintainers <filmcraft@storyteller.ai>}"
+BASENAME="resolutor-$VERSION-linux-$ARCH"
 
-echo "==> FilmCraft $VERSION for Linux $ARCH ($FORMATS)"
+echo "==> Resolutor $VERSION for Linux $ARCH ($FORMATS)"
 
 if [[ "$SKIP_BUILD" = 0 ]]; then
   if [[ -n "${CROSS_TARGET:-}" ]]; then
@@ -122,7 +122,7 @@ if has appimage; then
       ;;
     *) APPIMAGETOOL_SHA256='' RUNTIME_SHA256='' ;;
   esac
-  APPDIR="$WORK/FilmCraft.AppDir"
+  APPDIR="$WORK/Resolutor.AppDir"
   cp -R "$STAGE" "$APPDIR"
   ln -s usr/bin/filmcraft "$APPDIR/AppRun"
   cp "$HERE/$APP_ID.desktop" "$APPDIR/$APP_ID.desktop"
@@ -173,7 +173,7 @@ if has appimage; then
   # each AppImage on GitHub Releases. `latest` is the newest published release that is not a
   # pre-release. A fork's builds point at its own releases through GITHUB_REPOSITORY.
   REPO="${GITHUB_REPOSITORY:-woldercraft/woldercraft-resolutor}"
-  UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|filmcraft-*-linux-$ARCH.AppImage.zsync"
+  UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|resolutor-*-linux-$ARCH.AppImage.zsync"
   # Extract-and-run: works without FUSE (containers, CI). The output embeds the static runtime,
   # so users don't need libfuse2 either. With zsyncmake on the host (CI installs the zsync
   # package) appimagetool also writes the .zsync, into its working directory, hence the cd.
