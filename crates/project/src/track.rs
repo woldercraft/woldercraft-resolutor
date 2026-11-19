@@ -127,6 +127,10 @@ pub struct TrackItem {
     /// ([`GraphicMeta`]). Schema v12.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphic: Option<Box<GraphicMeta>>,
+    /// Non-linear Color Grading Node Graph (`Clip` scope). When `None`, any `"lumetri"` effects in
+    /// `effects` form an implicit serial graph. Schema v18.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_graph: Option<Box<crate::ColorGraph>>,
 }
 
 /// Time interpolation for speed-changed clips (Clip ▸ Video Options ▸ Time Interpolation).
@@ -233,6 +237,47 @@ impl TrackItem {
     }
     pub fn has_standard_effects(&self) -> bool {
         self.effects.iter().any(|e| e.def().is_some_and(|d| !d.intrinsic) && !graphic::is_layer(e))
+            || self.color_graph.as_ref().is_some_and(|g| g.has_enabled_nodes())
+    }
+    /// Effective clip-level [`crate::ColorGraph`]: returns the explicit DAG when present, or
+    /// synthesizes a serial chain from `"lumetri"` instances in `effects`.
+    pub fn effective_color_graph(&self) -> std::borrow::Cow<'_, crate::ColorGraph> {
+        if let Some(g) = &self.color_graph {
+            std::borrow::Cow::Borrowed(g)
+        } else {
+            std::borrow::Cow::Owned(crate::ColorGraph::from_serial_effects(&self.effects))
+        }
+    }
+    /// Synchronize `"lumetri"` effects in `self.effects` from `self.color_graph`'s corrector nodes
+    /// so legacy parameter/mask commands and Effect Controls stay consistent.
+    pub fn sync_lumetri_effects_from_graph(&mut self) {
+        let Some(g) = &self.color_graph else { return };
+        let correctors = g.corrector_effects();
+        let first_lum = self.effects.iter().position(|e| e.effect == "lumetri");
+        self.effects.retain(|e| e.effect != "lumetri");
+        let insert_at = first_lum.unwrap_or(self.effects.len()).min(self.effects.len());
+        self.effects.splice(insert_at..insert_at, correctors);
+    }
+    /// Push updated `"lumetri"` instances from `self.effects` back into `self.color_graph`'s
+    /// corrector/outside nodes (in topological order) so legacy `effects.*` and `masks.*`
+    /// commands stay in sync with an explicit `ColorGraph`.
+    pub fn sync_color_graph_from_lumetri_effects(&mut self) {
+        let Some(g) = &mut self.color_graph else { return };
+        let lums: Vec<EffectInstance> = self.effects.iter().filter(|e| e.effect == "lumetri").cloned().collect();
+        let order = g.topo_order().unwrap_or_else(|_| g.nodes.iter().map(|n| n.id).collect());
+        let mut lum_iter = lums.into_iter();
+        for id in order {
+            if let Some(n) = g.node_mut(id)
+                && n.kind.effect().is_some()
+                && let Some(fx) = lum_iter.next()
+            {
+                n.enabled = fx.enabled;
+                n.label = fx.label.clone();
+                if let Some(dst_fx) = n.kind.effect_mut() {
+                    *dst_fx = fx;
+                }
+            }
+        }
     }
     /// The graphic layers (text / shape) of a graphic clip, in paint order (first = back).
     pub fn graphic_layers(&self) -> impl Iterator<Item = &EffectInstance> {
@@ -386,6 +431,9 @@ impl Track {
         for item in &self.items {
             if !bounded_time_range(item.start, item.duration) {
                 return Err(format!("{}: item {:?} is outside supported time bounds", self.name, item.id));
+            }
+            if let Some(g) = &item.color_graph {
+                g.validate()?;
             }
         }
         for transition in &self.transitions {

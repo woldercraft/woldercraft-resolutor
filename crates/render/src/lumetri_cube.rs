@@ -46,6 +46,10 @@ fn tabulable(e: &EffectInstance, t: Tick, left_out: &mut Vec<&'static str>) -> E
         note("Vignette");
     }
     set(&mut e, "vignette_on", ParamValue::Bool(false));
+    if on(&e, "basic_on", true) && param_f(&e, "midtone_detail", t).abs() > 1e-3 {
+        note("Midtone Detail");
+    }
+    set(&mut e, "midtone_detail", ParamValue::Float(0.0));
     if on(&e, "creative_on", true) && param_f(&e, "sharpen", t).abs() > 1e-3 {
         note("Sharpen");
     }

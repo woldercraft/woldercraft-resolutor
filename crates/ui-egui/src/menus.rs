@@ -109,6 +109,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("view.compare.setReference", "Set Comparison Reference", [], None),
     uic!("view.dynamicAudioWaveforms", "Dynamic Audio Waveforms", ["View"], None),
     uic!("view.toggleGlobalBypass", "Bypass Color Grades & Effects", ["View"], None),
+    uic!("color.toggleHighlight", "Highlight Key Matte", ["View"], Some("Shift+H")),
     uic!("multicam.toggleView", "Multi-Camera View", ["View"], Some("Shift+0")),
     uic!("multicam.recordToggle", "Multi-Camera Record On/Off Toggle", [], Some("0")),
     uic!("multicam.editCamerasDialog", "Edit Cameras…", [], None),
@@ -651,6 +652,21 @@ pub fn invoke_command(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut
         ctx.request_repaint();
         return Ok(json!({"globalBypass": app.ui.global_bypass}));
     }
+    if id == "color.toggleHighlight" {
+        if let Some(m) = params.get("mode").and_then(|v| v.as_u64()) {
+            let m = (m as u8).clamp(0, 3);
+            if m > 0 {
+                app.ui.color_highlight_style = m;
+            }
+            app.ui.color_highlight = m;
+        } else if let Some(on) = params.get("enabled").and_then(|v| v.as_bool()) {
+            app.ui.color_highlight = if on { app.ui.color_highlight_style.clamp(1, 3) } else { 0 };
+        } else {
+            app.ui.color_highlight = if app.ui.color_highlight > 0 { 0 } else { app.ui.color_highlight_style.clamp(1, 3) };
+        }
+        ctx.request_repaint();
+        return Ok(json!({"highlight": app.ui.color_highlight, "style": app.ui.color_highlight_style}));
+    }
     if id == "view.appearanceMode.next" {
         crate::panels::settings::cycle_appearance(app, ctx);
         return Ok(json!({"appearanceMode": app.session.prefs.appearance.appearance_mode}));
@@ -971,6 +987,9 @@ pub fn menu_items(app: &FilmcraftApp) -> Vec<MenuItem> {
         }
         if let Some(on) = engine_toggle(&app.session, &it.id) {
             it.checked = Some(on);
+        }
+        if it.id == "color.toggleHighlight" {
+            it.checked = Some(app.ui.color_highlight > 0);
         }
         if it.id.starts_with("view.") {
             it.checked = if it.id == "view.toggleGlobalBypass" {

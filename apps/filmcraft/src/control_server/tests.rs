@@ -110,14 +110,7 @@ fn extra_connections_are_refused() {
     let addr = listener.local_addr().unwrap();
     let (tx, _rx) = channel::<ControlRequest>();
     std::thread::spawn(move || {
-        accept_loop(
-            listener,
-            tx,
-            egui::Context::default(),
-            TOKEN.into(),
-            Arc::new(AtomicBool::new(true)),
-            Arc::new(AtomicBool::new(false)),
-        )
+        accept_loop(listener, tx, egui::Context::default(), TOKEN.into(), Arc::new(AtomicBool::new(true)), Arc::new(AtomicBool::new(false)))
     });
     // Idle connections are accepted in order and held open.
     let held: Vec<TcpStream> = (0..16).map(|_| TcpStream::connect(addr).unwrap()).collect();
@@ -394,6 +387,9 @@ fn manager_hot_toggles_and_frees_port_without_restarting() {
 
     let (rx, status) = mgr.start_live_with_token(port, TOKEN.into());
     assert_eq!(status, filmcraft_ui_egui::AiControlStatus::Listening { port });
+    let info = mgr.info();
+    assert_eq!(info.token.as_deref(), Some(TOKEN));
+    assert_eq!(info.token_path.as_deref(), Some(dir.join("control_token").to_string_lossy().as_ref()));
     let rx = rx.expect("live server receiver");
 
     let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -414,6 +410,7 @@ fn manager_hot_toggles_and_frees_port_without_restarting() {
     let new_token = std::fs::read_to_string(dir.join("control_token")).unwrap().trim().to_string();
     assert_eq!(new_token.len(), 64);
     assert_ne!(new_token, TOKEN);
+    assert_eq!(mgr.info().token.as_deref(), Some(new_token.as_str()));
 
     // Stopping closes the listener cleanly so the port can be bound again immediately.
     let (rx_off, status_off) = mgr.configure(false, port);

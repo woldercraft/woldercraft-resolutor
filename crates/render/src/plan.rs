@@ -248,34 +248,98 @@ fn simple_transition(id: &str) -> bool {
     matches!(id, "cross_dissolve" | "dip_to_black" | "dip_to_white")
 }
 
-/// The standard effects of a media clip if the GPU can draw it (any blend mode, no opacity masks,
-/// every enabled standard effect unmasked and with a GPU implementation; empty without effects or
-/// with effects off). None: the clip is rendered on the CPU.
-fn gpu_chain<'a>(project: &Project, seq: &'a Sequence, item: &'a TrackItem, opts: RenderOptions) -> Option<Vec<&'a filmcraft_project::EffectInstance>> {
+/// Whether a media clip's effects and color graphs can be evaluated by the GPU effect stage.
+/// Returns `Some(true)` if there are active effects/nodes to evaluate, `Some(false)` if plain with no
+/// active effects, or `None` if the clip must fall back to CPU rendering.
+fn gpu_chain_status(project: &Project, seq: &Sequence, item: &TrackItem, opts: RenderOptions) -> Option<bool> {
     let is_media = project.item(item.item).is_some_and(|p| matches!(p.kind, ItemKind::Media(_) | ItemKind::Subclip { .. }));
     if !is_media || item.has_opacity_masks() {
         return None;
     }
     if !opts.effects {
-        return Some(Vec::new());
+        return Some(false);
     }
-    let mut chain = Vec::new();
-    let group_effects = seq.color_group_of(item.id).into_iter().flat_map(|g| g.effects.iter());
-    for e in item
-        .effects
-        .iter()
-        .chain(group_effects)
-        .filter(|e| e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e))
+    let mut has_any = false;
+    if let Some(g) = seq.color_group_of(item.id)
+        && (g.pre_clip.has_enabled_nodes() || g.effective_post_clip().has_enabled_nodes())
     {
+        has_any = true;
+    }
+    if item.color_graph.as_ref().is_some_and(|cg| cg.has_enabled_nodes()) {
+        has_any = true;
+    }
+    for e in item.effects.iter().filter(|e| e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e)) {
         if !e.enabled {
             continue;
         }
         if !crate::gpufx::GPU_EFFECTS.contains(&e.effect.as_str()) {
             return None;
         }
-        chain.push(e);
+        has_any = true;
     }
-    Some(chain)
+    Some(has_any)
+}
+
+fn eval_clip_gpu_ops(project: &Project, seq: &Sequence, item: &TrackItem, cx: &crate::effects::FxCtx, lw: usize, lh: usize) -> Option<Vec<FxOp>> {
+    let mut ops = Vec::new();
+    let grp = seq.color_group_of(item.id);
+    if let Some(g) = grp
+        && g.pre_clip.has_enabled_nodes()
+    {
+        ops.extend(crate::color_graph::compile_color_graph(&g.pre_clip, &project.shared_color_nodes, cx, lw, lh)?);
+    }
+    if let Some(cg) = &item.color_graph {
+        let mut applied_cg = false;
+        for e in item.effects.iter().filter(|e| e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e)) {
+            if !e.enabled {
+                continue;
+            }
+            if e.effect == "lumetri" {
+                if !applied_cg {
+                    ops.extend(crate::color_graph::compile_color_graph(cg, &project.shared_color_nodes, cx, lw, lh)?);
+                    applied_cg = true;
+                }
+            } else {
+                ops.push(FxOp::eval_masked(e, cx, lw, lh).filter(FxOp::gpu_ok)?);
+            }
+        }
+        if !applied_cg && cg.has_enabled_nodes() {
+            ops.extend(crate::color_graph::compile_color_graph(cg, &project.shared_color_nodes, cx, lw, lh)?);
+        }
+    } else {
+        for e in item.effects.iter().filter(|e| e.enabled && e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e)) {
+            ops.push(FxOp::eval_masked(e, cx, lw, lh).filter(FxOp::gpu_ok)?);
+        }
+    }
+    if let Some(g) = grp {
+        let post = g.effective_post_clip();
+        if post.has_enabled_nodes() {
+            ops.extend(crate::color_graph::compile_color_graph(&post, &project.shared_color_nodes, cx, lw, lh)?);
+        }
+    }
+    Some(ops)
+}
+
+fn timeline_color_ops(project: &Project, seq: &Sequence, t: Tick, scale: f32, caps: DeviceCaps) -> Option<Vec<FxOp>> {
+    if !seq.timeline_color.has_enabled_nodes() {
+        return Some(Vec::new());
+    }
+    let (w, h) = output_size(seq, scale);
+    if !caps.adjusts(w, h) {
+        return None;
+    }
+    let cx = crate::effects::FxCtx {
+        t,
+        px_scale: scale,
+        seconds: t.seconds(),
+        timecode: "",
+        clip_name: "Timeline",
+        project: Some(project),
+        env: None,
+        frame_rate: seq.settings.frame_rate.as_f64(),
+        working: seq.settings.color.working,
+    };
+    crate::color_graph::compile_color_graph(&seq.timeline_color, &project.shared_color_nodes, &cx, w, h)
 }
 
 /// Plan the frame at timeline `t` for a device that runs `caps`.
@@ -287,6 +351,13 @@ pub fn plan_frame(project: &Project, seq_id: ItemId, t: Tick, opts: RenderOption
     }
     let mut layers = PlanStack::default();
     push_tracks(Scene { project, seq, t, opts, caps, sources, nest: 0 }, &mut layers);
+    if opts.effects && seq.timeline_color.has_enabled_nodes() && !layers.exhausted && !layers.cpu_only {
+        match timeline_color_ops(project, seq, t, opts.scale, caps) {
+            Some(ops) if !ops.is_empty() => layers.push_adjust(ops),
+            Some(_) => {}
+            None => layers.cpu_only = true,
+        }
+    }
     if layers.exhausted || layers.cpu_only {
         return FramePlan::Image(crate::render_sequence(project, seq_id, t, opts, sources));
     }
@@ -368,6 +439,9 @@ fn adjustment_ops(project: &Project, seq: &Sequence, it: &TrackItem, t: Tick, sc
 /// compositor cannot mix itself is showing (a transition into or out of an adjustment layer counts,
 /// also on the side of the cut where the other clip is).
 pub(crate) fn layered_at(project: &Project, seq: &Sequence, t: Tick, scale: f32, caps: DeviceCaps) -> bool {
+    if seq.timeline_color.has_enabled_nodes() && timeline_color_ops(project, seq, t, scale, caps).is_none() {
+        return false;
+    }
     let adjustment = |it: &TrackItem| is_adjustment(project, it);
     for tr in &seq.video_tracks {
         if !tr.enabled {
@@ -580,7 +654,7 @@ fn push_item(sc: Scene, item: &TrackItem, extra_opacity: f32, blend: Option<Blen
         }
         return;
     }
-    if let Some(chain) = gpu_chain(project, seq, item, opts) {
+    if let Some(has_fx) = gpu_chain_status(project, seq, item, opts) {
         let Some(src) = sources.source(item.item) else { return };
         let Some(size) = crate::source_size(project, item.item) else { return };
         let motion = motion_matrix(seq, item, size, crate::source_par(project, item.item), mt);
@@ -599,7 +673,7 @@ fn push_item(sc: Scene, item: &TrackItem, extra_opacity: f32, blend: Option<Blen
         let input = if crate::colorman::needs_management(pipe, cs, &frame) { crate::colorman::gpu_input(project, item.item, pipe, cs, &frame) } else { None };
         let plain = (input.is_some() || !crate::colorman::needs_management(pipe, cs, &frame))
             && crate::media_interpolation(item, t, &src, seq.settings.frame_rate).is_none();
-        if plain && !chain.is_empty() {
+        if plain && has_fx {
             // GPU effect stage: the working image the CPU would decode (`base_layer`), the
             // effects evaluated for it, placed as `item_layer` places it
             let (fw, fh) = upright(&frame);
@@ -618,8 +692,7 @@ fn push_item(sc: Scene, item: &TrackItem, extra_opacity: f32, blend: Option<Blen
                 frame_rate: seq.settings.frame_rate.as_f64(),
                 working: seq.settings.color.working,
             };
-            let ops: Option<Vec<FxOp>> = chain.iter().map(|e| FxOp::eval_masked(e, &cx, lw, lh).filter(FxOp::gpu_ok)).collect();
-            if let Some(ops) = ops {
+            if let Some(ops) = eval_clip_gpu_ops(project, seq, item, &cx, lw, lh) {
                 let m = Affine::scale(opts.scale as f64, opts.scale as f64)
                     .then_apply(&motion)
                     .then_apply(&Affine::scale(1.0 / px_scale as f64, 1.0 / px_scale as f64));

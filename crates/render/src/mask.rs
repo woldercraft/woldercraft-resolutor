@@ -20,7 +20,7 @@
 //! premultiplied working image: a masked effect is `lerp(original, effected, coverage)` per
 //! channel, an opacity mask scales the layer's premultiplied pixels.
 
-use filmcraft_project::{EffectInstance, Mask, MaskMode};
+use filmcraft_project::{EffectInstance, Mask, MaskKind, MaskMode};
 use filmcraft_time::Tick;
 use rayon::prelude::*;
 
@@ -32,9 +32,12 @@ pub const FLATTEN_TOLERANCE: f64 = 0.05;
 /// One mask ready for rasterizing, in working-image pixels.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlatMask {
-    /// Closed polygon (last vertex connects to the first).
+    /// Closed polygon (last vertex connects to the first), or 2 endpoints for [`MaskKind::Gradient`].
     pub pts: Vec<[f32; 2]>,
+    pub kind: MaskKind,
     pub feather: f32,
+    /// -1.0 (inside) .. 0.0 (centered) .. +1.0 (outside).
+    pub feather_balance: f32,
     pub expansion: f32,
     /// 0..1.
     pub opacity: f32,
@@ -50,10 +53,15 @@ pub fn prepare(masks: &[Mask], t: Tick, px_scale: f32) -> Vec<FlatMask> {
         .filter(|m| m.mode != MaskMode::None)
         .map(|m| {
             let path = m.path_at(t);
-            let pts = path.flatten(FLATTEN_TOLERANCE / s.max(1e-6)).into_iter().map(|p| [(p.x * s) as f32, (p.y * s) as f32]).collect();
+            let pts = match m.kind {
+                MaskKind::Gradient => path.vertices.iter().take(2).map(|v| [(v.p.x * s) as f32, (v.p.y * s) as f32]).collect(),
+                MaskKind::Path => path.flatten(FLATTEN_TOLERANCE / s.max(1e-6)).into_iter().map(|p| [(p.x * s) as f32, (p.y * s) as f32]).collect(),
+            };
             FlatMask {
                 pts,
+                kind: m.kind,
                 feather: (m.feather.f64_at(t).max(0.0) * s) as f32,
+                feather_balance: (m.feather_balance.f64_at(t) / 100.0).clamp(-1.0, 1.0) as f32,
                 expansion: (m.expansion.f64_at(t) * s) as f32,
                 opacity: (m.opacity.f64_at(t) / 100.0).clamp(0.0, 1.0) as f32,
                 inverted: m.inverted,
@@ -63,18 +71,34 @@ pub fn prepare(masks: &[Mask], t: Tick, px_scale: f32) -> Vec<FlatMask> {
         .collect()
 }
 
-/// The falloff of a signed (expanded) distance for a feather width.
+/// The falloff of a signed (expanded) distance for a feather width (centered).
 #[inline]
 pub fn falloff(s: f32, feather: f32) -> f32 {
+    falloff_balanced(s, feather, 0.0)
+}
+
+/// The falloff of a signed (expanded) distance with directional inside/outside bias (`-1..1`).
+#[inline]
+pub fn falloff_balanced(s: f32, feather: f32, balance: f32) -> f32 {
     let w = feather.max(1.0);
-    let u = (s / w + 0.5).clamp(0.0, 1.0);
+    let shift = -balance.clamp(-1.0, 1.0) * (w * 0.5);
+    let u = ((s - shift) / w + 0.5).clamp(0.0, 1.0);
     let smooth = u * u * (3.0 - 2.0 * u);
     u + (smooth - u) * feather.min(1.0)
 }
 
+#[inline]
+fn gradient_sd(pts: &[[f32; 2]], px: f32, py: f32) -> Option<f32> {
+    let (a, b) = (pts.first()?, pts.get(1)?);
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len > 1e-4 { Some(((a[0] - px) * dx + (a[1] - py) * dy) / len) } else { None }
+}
+
 /// Distance band beyond which coverage is saturated (0 or 1).
 fn band(m: &FlatMask) -> f32 {
-    m.expansion.abs() + m.feather.max(1.0) * 0.5 + 1.0
+    let w = m.feather.max(1.0);
+    m.expansion.abs() + w * 0.5 * (1.0 + m.feather_balance.abs()) + 1.0
 }
 
 #[inline]
@@ -94,9 +118,17 @@ fn mask_row(m: &FlatMask, y: usize, out: &mut [f32]) {
     let py = y as f32 + 0.5;
     let b = band(m);
     let value = |sd: f32| {
-        let c = falloff(sd + m.expansion, m.feather);
+        let c = falloff_balanced(sd + m.expansion, m.feather, m.feather_balance);
         m.opacity * if m.inverted { 1.0 - c } else { c }
     };
+    if m.kind == MaskKind::Gradient {
+        for (x, o) in out.iter_mut().enumerate() {
+            let px = x as f32 + 0.5;
+            let sd = gradient_sd(&m.pts, px, py).unwrap_or(-b);
+            *o = value(sd);
+        }
+        return;
+    }
     if n < 3 {
         out.fill(value(-b));
         return;
@@ -196,6 +228,10 @@ pub fn apply_effect(img: &mut Image, e: &EffectInstance, cx: &crate::effects::Fx
         crate::effects::apply(img, e, cx);
         return;
     };
+    if e.effect == "lumetri" {
+        crate::effects::lumetri_masked(img, e, cx, &cov);
+        return;
+    }
     let original = img.clone();
     crate::effects::apply(img, e, cx);
     mix(img, &original, &cov);
@@ -215,23 +251,27 @@ pub fn coverage_at(masks: &[FlatMask], x: f32, y: f32) -> Option<f32> {
     let first = masks.iter().find(|m| m.mode != MaskMode::None)?;
     let mut acc = first.mode.start();
     for m in masks.iter().filter(|m| m.mode != MaskMode::None) {
-        let n = m.pts.len();
-        let mut wind = 0;
-        let mut d2 = f32::INFINITY;
-        for i in 0..n {
-            let a = m.pts[i];
-            let c = m.pts[(i + 1) % n];
-            if (a[1] <= y) != (c[1] <= y) {
-                let t = (y - a[1]) / (c[1] - a[1]);
-                if a[0] + (c[0] - a[0]) * t < x {
-                    wind += if c[1] > a[1] { 1 } else { -1 };
+        let sd = if m.kind == MaskKind::Gradient {
+            gradient_sd(&m.pts, x, y).unwrap_or(-band(m))
+        } else {
+            let n = m.pts.len();
+            let mut wind = 0;
+            let mut d2 = f32::INFINITY;
+            for i in 0..n {
+                let a = m.pts[i];
+                let c = m.pts[(i + 1) % n];
+                if (a[1] <= y) != (c[1] <= y) {
+                    let t = (y - a[1]) / (c[1] - a[1]);
+                    if a[0] + (c[0] - a[0]) * t < x {
+                        wind += if c[1] > a[1] { 1 } else { -1 };
+                    }
                 }
+                d2 = d2.min(seg_dist2(x, y, a, c));
             }
-            d2 = d2.min(seg_dist2(x, y, a, c));
-        }
-        let d = if n < 3 { band(m) } else { d2.sqrt().min(band(m)) };
-        let sd = if wind != 0 && n >= 3 { d } else { -d };
-        let c = falloff(sd + m.expansion, m.feather);
+            let d = if n < 3 { band(m) } else { d2.sqrt().min(band(m)) };
+            if wind != 0 && n >= 3 { d } else { -d }
+        };
+        let c = falloff_balanced(sd + m.expansion, m.feather, m.feather_balance);
         let v = m.opacity * if m.inverted { 1.0 - c } else { c };
         acc = m.mode.combine(acc, v).clamp(0.0, 1.0);
     }
@@ -322,5 +362,29 @@ mod tests {
                 assert!((r - c[y * w + x]).abs() < 1e-5, "({x},{y}) {r} vs {}", c[y * w + x]);
             }
         }
+    }
+
+    #[test]
+    fn gradient_mask_and_inside_outside_feather_balance() {
+        // Horizontal split at y = 20 pointing downward -> y < 20 is covered, y > 20 fades out
+        let mut grad = Mask::gradient("Grad (1)", Vec2::new(10.0, 20.0), Vec2::new(10.0, 40.0), 10.0);
+        grad.feather_balance.value = filmcraft_project::ParamValue::Float(0.0);
+        let c = effect_coverage(&[grad.clone()], Tick(0), 1.0, 20, 40).unwrap();
+        assert!(c[5 * 20 + 5] > 0.99, "above split line is opaque: {}", c[5 * 20 + 5]);
+        assert!((c[19 * 20 + 5] + c[20 * 20 + 5] - 1.0).abs() < 1e-4, "symmetric at split");
+        assert!(c[30 * 20 + 5] < 0.01, "far below split line is 0: {}", c[30 * 20 + 5]);
+
+        // Inside-only feather balance (-100): outside edge (y >= 20) is 0.0
+        let mut inside_rect = mask(MaskPath::rect(10.0, 10.0, 30.0, 30.0), 8.0);
+        inside_rect.feather_balance.value = filmcraft_project::ParamValue::Float(-100.0);
+        let ci = effect_coverage(&[inside_rect], Tick(0), 1.0, 40, 40).unwrap();
+        assert!(ci[20 * 40 + 8] < 1e-5, "outside stays 0 with inside-only feather: {}", ci[20 * 40 + 8]);
+        assert!(ci[20 * 40 + 20] > 0.99, "deep center stays 1: {}", ci[20 * 40 + 20]);
+
+        // Outside-only feather balance (+100): interior just inside edge (x = 11) stays 1.0
+        let mut outside_rect = mask(MaskPath::rect(10.0, 10.0, 30.0, 30.0), 8.0);
+        outside_rect.feather_balance.value = filmcraft_project::ParamValue::Float(100.0);
+        let co = effect_coverage(&[outside_rect], Tick(0), 1.0, 40, 40).unwrap();
+        assert!(co[20 * 40 + 11] > 0.99, "interior stays 1 up to contour: {}", co[20 * 40 + 11]);
     }
 }

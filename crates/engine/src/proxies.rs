@@ -523,7 +523,15 @@ pub fn create(s: &mut Session, p: &Value) -> Result<Value> {
         _ => RenderBuffer::Auto,
     };
     let concurrency = u64_p(p, "concurrency").map(|c| (c as usize).clamp(1, 4)).unwrap_or(2);
-    let job = start_job(s, label, work, if attach { OnDone::AttachProxies } else { OnDone::Nothing }, bool_p(p, "wait").unwrap_or(false), render_buffer, concurrency)?;
+    let job = start_job(
+        s,
+        label,
+        work,
+        if attach { OnDone::AttachProxies } else { OnDone::Nothing },
+        bool_p(p, "wait").unwrap_or(false),
+        render_buffer,
+        concurrency,
+    )?;
     Ok(json!({"job": job, "preset": pr.id, "outputs": outputs, "skipped": skipped}))
 }
 

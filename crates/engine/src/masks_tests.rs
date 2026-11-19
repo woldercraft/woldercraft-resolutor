@@ -518,3 +518,30 @@ fn every_project_replacing_path_drops_pending_tracking_jobs() {
     }
     let _ = std::fs::remove_file(&tpl);
 }
+
+#[test]
+fn power_windows_hexagon_gradient_and_feather_balance() {
+    let (mut s, clip) = demo();
+    s.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"})).unwrap();
+
+    // 6-sided polygon Power Window + feather_balance
+    s.execute("masks.add", json!({"clip": clip.0, "effect": "lumetri", "shape": "hexagon"})).unwrap();
+    s.execute("masks.set", json!({"clip": clip.0, "effect": "lumetri", "mask": 0, "feather_balance": -75.0})).unwrap();
+
+    // Linear Gradient Power Window + moving its end vertex
+    s.execute("masks.add", json!({"clip": clip.0, "effect": "lumetri", "shape": "gradient"})).unwrap();
+    s.execute("masks.moveVertex", json!({"clip": clip.0, "effect": "lumetri", "mask": 1, "vertex": 1, "to": [100.0, 200.0]})).unwrap();
+
+    let (_, it) = s.active_sequence().unwrap().find_item(clip).unwrap();
+    let lum = it.effects.iter().find(|e| e.effect == "lumetri").unwrap();
+    assert_eq!(lum.masks.len(), 2);
+    assert_eq!(lum.masks[0].kind, filmcraft_project::MaskKind::Path);
+    assert_eq!(lum.masks[0].path_at(Tick(0)).vertices.len(), 6);
+    assert!((lum.masks[0].feather_balance.f64_at(Tick(0)) - (-75.0)).abs() < 1e-6);
+
+    assert_eq!(lum.masks[1].kind, filmcraft_project::MaskKind::Gradient);
+    let gpath = lum.masks[1].path_at(Tick(0));
+    assert_eq!(gpath.vertices.len(), 2);
+    assert!((gpath.vertices[1].p.x - 100.0).abs() < 1e-6);
+    assert!((gpath.vertices[1].p.y - 200.0).abs() < 1e-6);
+}

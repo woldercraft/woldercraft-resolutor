@@ -261,6 +261,42 @@ pub(super) fn render_palette_toolbar(
         });
     } else {
         let avail_w = ui.available_width().max(120.0);
+        if avail_w < 1100.0 {
+            ui.vertical(|ui| {
+                ui.set_max_width(avail_w);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let dual_text = if app.ui.lumetri_dual_view { tl!("Dual ✓") } else { tl!("Dual") };
+                        let r_dual = ui.selectable_label(app.ui.lumetri_dual_view, dual_text).on_hover_text(tl!("Dual view (two tools)"));
+                        app.auto.add("lumetri.bar.dual", r_dual.rect, "Dual");
+                        if r_dual.clicked() {
+                            app.ui.lumetri_dual_view = !app.ui.lumetri_dual_view;
+                        }
+                        let mut cur_pos = app.ui.lumetri_bar_pos.clone();
+                        let r_left = ui.selectable_label(cur_pos == "left", tl!("Left")).on_hover_text(tl!("Left sidebar"));
+                        app.auto.add("lumetri.bar.left", r_left.rect, "Left");
+                        if r_left.clicked() {
+                            cur_pos = "left".into();
+                        }
+                        let r_bot = ui.selectable_label(cur_pos == "bottom", tl!("Bottom")).on_hover_text(tl!("Bottom bar"));
+                        app.auto.add("lumetri.bar.bottom", r_bot.rect, "Bottom");
+                        if r_bot.clicked() {
+                            cur_pos = "bottom".into();
+                        }
+                        let r_top = ui.selectable_label(cur_pos == "top", tl!("Top")).on_hover_text(tl!("Top bar"));
+                        app.auto.add("lumetri.bar.top", r_top.rect, "Top");
+                        if r_top.clicked() {
+                            cur_pos = "top".into();
+                        }
+                        app.ui.lumetri_bar_pos = cur_pos;
+                    });
+                });
+                ui.horizontal_wrapped(|ui| {
+                    render_tool_buttons(ui, app, e, current_panel, false, sections);
+                });
+            });
+            return;
+        }
         ui.allocate_ui_with_layout(vec2(avail_w, 30.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.set_max_width(avail_w);
             let dual_text = if app.ui.lumetri_dual_view { tl!("Dual ✓") } else { tl!("Dual") };

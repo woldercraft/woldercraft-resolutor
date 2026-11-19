@@ -46,10 +46,14 @@ pub enum LogCurve {
     FLog,
     /// Fujifilm F-Log2 (also the curve of F-Log2 C).
     FLog2,
+    /// DaVinci Intermediate (DaVinci Wide Gamut Intermediate).
+    DaVinciIntermediate,
+    /// ACEScct (SMPTE / AMPAS S-2016-001 quasi-log).
+    AcesCct,
 }
 
 impl LogCurve {
-    pub const ALL: [LogCurve; 10] = [
+    pub const ALL: [LogCurve; 12] = [
         LogCurve::SLog3,
         LogCurve::VLog,
         LogCurve::CLog2,
@@ -60,6 +64,8 @@ impl LogCurve {
         LogCurve::DLog,
         LogCurve::FLog,
         LogCurve::FLog2,
+        LogCurve::DaVinciIntermediate,
+        LogCurve::AcesCct,
     ];
 
     pub fn domain(self) -> Domain {
@@ -81,6 +87,8 @@ impl LogCurve {
             LogCurve::DLog => "DJI D-Log",
             LogCurve::FLog => "Fujifilm F-Log",
             LogCurve::FLog2 => "Fujifilm F-Log2",
+            LogCurve::DaVinciIntermediate => "DaVinci Intermediate",
+            LogCurve::AcesCct => "ACEScct",
         }
     }
 
@@ -97,6 +105,8 @@ impl LogCurve {
             LogCurve::DLog => dlog_encode(x),
             LogCurve::FLog => fujifilm_encode(&FLOG, x),
             LogCurve::FLog2 => fujifilm_encode(&FLOG2, x),
+            LogCurve::DaVinciIntermediate => davinci_intermediate_encode(x),
+            LogCurve::AcesCct => acescct_encode(x),
         }
     }
 
@@ -113,6 +123,8 @@ impl LogCurve {
             LogCurve::DLog => dlog_decode(y),
             LogCurve::FLog => fujifilm_decode(&FLOG, y),
             LogCurve::FLog2 => fujifilm_decode(&FLOG2, y),
+            LogCurve::DaVinciIntermediate => davinci_intermediate_decode(y),
+            LogCurve::AcesCct => acescct_decode(y),
         }
     }
 
@@ -311,6 +323,39 @@ fn fujifilm_decode(k: &Fujifilm, y: f64) -> f64 {
     if y >= k.cut2 { 10f64.powf((y - k.d) / k.c) / k.a - k.b / k.a } else { (y - k.f) / k.e }
 }
 
+// ---------------------------------------------------------------- DaVinci Intermediate
+// Blackmagic Design, "DaVinci Wide Gamut Intermediate Color Space" (2020).
+
+const DI_A: f64 = 0.0075;
+const DI_B: f64 = 7.0;
+const DI_C: f64 = 0.073_292_48;
+const DI_M: f64 = 10.444_268_55;
+const DI_LIN_CUT: f64 = 0.002_624_09;
+const DI_LOG_CUT: f64 = 0.027_406_68;
+
+pub fn davinci_intermediate_encode(x: f64) -> f64 {
+    if x <= DI_LIN_CUT { x * DI_M } else { ((x + DI_A).log2() + DI_B) * DI_C }
+}
+
+pub fn davinci_intermediate_decode(y: f64) -> f64 {
+    if y <= DI_LOG_CUT { y / DI_M } else { 2f64.powf(y / DI_C - DI_B) - DI_A }
+}
+
+// ---------------------------------------------------------------- ACEScct (AMPAS S-2016-001)
+
+const ACESCCT_A: f64 = 10.540_237_741_654_5;
+const ACESCCT_B: f64 = 0.072_905_534_195_835_5;
+const ACESCCT_CUT_LIN: f64 = 0.007_812_5;
+const ACESCCT_CUT_LOG: f64 = 0.155_251_141_552_511;
+
+pub fn acescct_encode(x: f64) -> f64 {
+    if x <= ACESCCT_CUT_LIN { ACESCCT_A * x + ACESCCT_B } else { (x.log2() + 9.72) / 17.52 }
+}
+
+pub fn acescct_decode(y: f64) -> f64 {
+    if y <= ACESCCT_CUT_LOG { (y - ACESCCT_B) / ACESCCT_A } else { 2f64.powf(y * 17.52 - 9.72).min(65504.0) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +421,11 @@ mod tests {
         // the decoding cut is where the encoding's two pieces meet (within the published rounding)
         close(LogCurve::FLog.encode(0.000_89), 0.100_537_775_223_865, 2e-4, "F-Log cut");
         close(LogCurve::FLog2.encode(0.000_889), 0.100_686_685_370_811, 2e-4, "F-Log2 cut");
+        // DaVinci Intermediate: 0 → 0.0, 18% → 0.3360, cut continuity
+        close(LogCurve::DaVinciIntermediate.encode(0.0), 0.0, 1e-9, "DI 0");
+        close(LogCurve::DaVinciIntermediate.encode(0.18), 0.336_043, 1e-4, "DI 18%");
+        // ACEScct (S-2016-001): 18% → 0.413588
+        close(LogCurve::AcesCct.encode(0.18), 0.413_588_4, 1e-4, "ACEScct 18%");
     }
 
     #[test]

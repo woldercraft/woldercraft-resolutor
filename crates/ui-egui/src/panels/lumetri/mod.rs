@@ -8,9 +8,14 @@
 //! `hsl_blur`); Color Match: `lumetri.match.comparisonView` (toggles the Program monitor's
 //! Comparison View, whose reference frame Apply Match then uses).
 
+mod color_slice;
+mod color_warper;
+mod cst;
 mod curves;
 mod knobs;
 mod match_view;
+mod rgb_mixer;
+mod sizing;
 mod toolbar;
 mod wheels;
 
@@ -78,7 +83,7 @@ pub struct LumetriToolDef {
     pub sec: &'static str,
 }
 
-pub const ALL_TOOLS: [LumetriToolDef; 7] = [
+pub const ALL_TOOLS: [LumetriToolDef; 12] = [
     LumetriToolDef {
         id: "Basic Correction",
         icon: "⬡",
@@ -96,10 +101,50 @@ pub const ALL_TOOLS: [LumetriToolDef; 7] = [
         sec: "wheels",
     },
     LumetriToolDef { id: "Curves", icon: "∿", label: "Curves", tooltip: "Custom RGB and Hue/Sat/Lum curves", param: "curves_on", sec: "curves" },
+    LumetriToolDef {
+        id: "ColorSlice",
+        icon: "◈",
+        label: "ColorSlice",
+        tooltip: "Six-vector subtractive saturation, density and hue",
+        param: "cs_on",
+        sec: "colorslice",
+    },
+    LumetriToolDef {
+        id: "Color Warper",
+        icon: "🕸",
+        label: "Warper",
+        tooltip: "Hue-Saturation spiderweb and Chroma-Luma 2D warper",
+        param: "cw_on",
+        sec: "colorwarper",
+    },
+    LumetriToolDef {
+        id: "RGB Mixer",
+        icon: "⊞",
+        label: "RGB Mixer",
+        tooltip: "3x3 RGB channel mixer with monochrome and luminance preservation",
+        param: "rgb_mix_on",
+        sec: "rgbmixer",
+    },
     LumetriToolDef { id: "Power Windows", icon: "⬚", label: "Power Windows", tooltip: "Geometric and Bezier shape masks", param: "masks_on", sec: "masks" },
     LumetriToolDef { id: "HSL Secondary", icon: "✑", label: "Qualifier", tooltip: "HSL secondary color isolator", param: "hsl_on", sec: "hsl" },
     LumetriToolDef { id: "Creative", icon: "🎞", label: "Creative & LUTs", tooltip: "Film looks, LUTs and intensity", param: "creative_on", sec: "creative" },
     LumetriToolDef { id: "Vignette", icon: "◐", label: "Vignette", tooltip: "Edge vignette adjustments", param: "vignette_on", sec: "vignette" },
+    LumetriToolDef {
+        id: "Color Space Transform",
+        icon: "⇄",
+        label: "Color Management (CST)",
+        tooltip: "Input/output color space, gamma, and tone/gamut mapping",
+        param: "cst_on",
+        sec: "cst",
+    },
+    LumetriToolDef {
+        id: "Sizing",
+        icon: "⊡",
+        label: "Sizing",
+        tooltip: "Node pan, tilt, zoom, aspect, rotate, flip, and cinema blanking",
+        param: "sizing_on",
+        sec: "sizing",
+    },
 ];
 
 pub(super) fn normalize_tool_id(id: &str) -> &str {
@@ -115,10 +160,15 @@ impl LumetriToolDef {
             "Basic Correction" => crate::dock::PanelKind::ColorPrimaries,
             "Color Wheels & Match" => crate::dock::PanelKind::ColorWheels,
             "Curves" => crate::dock::PanelKind::ColorCurves,
+            "ColorSlice" => crate::dock::PanelKind::ColorSlice,
+            "Color Warper" => crate::dock::PanelKind::ColorWarper,
+            "RGB Mixer" => crate::dock::PanelKind::ColorRgbMixer,
             "Power Windows" => crate::dock::PanelKind::ColorMasks,
             "HSL Secondary" => crate::dock::PanelKind::ColorQualifier,
             "Creative" => crate::dock::PanelKind::ColorCreative,
             "Vignette" => crate::dock::PanelKind::ColorVignette,
+            "Color Space Transform" => crate::dock::PanelKind::ColorCst,
+            "Sizing" => crate::dock::PanelKind::ColorSizing,
             _ => crate::dock::PanelKind::LumetriColor,
         }
     }
@@ -129,10 +179,15 @@ pub fn tool_for_panel(panel: crate::dock::PanelKind) -> Option<&'static str> {
         crate::dock::PanelKind::ColorPrimaries => Some("Basic Correction"),
         crate::dock::PanelKind::ColorWheels => Some("Color Wheels & Match"),
         crate::dock::PanelKind::ColorCurves => Some("Curves"),
+        crate::dock::PanelKind::ColorSlice => Some("ColorSlice"),
+        crate::dock::PanelKind::ColorWarper => Some("Color Warper"),
+        crate::dock::PanelKind::ColorRgbMixer => Some("RGB Mixer"),
         crate::dock::PanelKind::ColorMasks => Some("Power Windows"),
         crate::dock::PanelKind::ColorQualifier => Some("HSL Secondary"),
         crate::dock::PanelKind::ColorCreative => Some("Creative"),
         crate::dock::PanelKind::ColorVignette => Some("Vignette"),
+        crate::dock::PanelKind::ColorCst => Some("Color Space Transform"),
+        crate::dock::PanelKind::ColorSizing => Some("Sizing"),
         _ => None,
     }
 }
@@ -185,6 +240,38 @@ pub fn draw_tool_icon(painter: &egui::Painter, center: Pos2, tool_id: &str, colo
         "Vignette" => {
             painter.circle_stroke(center, 5.5, Stroke::new(1.0, color.gamma_multiply(0.6)));
             painter.circle_filled(center, 3.2, color);
+        }
+        "ColorSlice" => {
+            for k in 0..3 {
+                let x = center.x + (k as f32 - 1.0) * 4.0;
+                let h = if k == 1 { 5.0 } else { 3.5 };
+                painter.line_segment([pos2(x, center.y - h), pos2(x, center.y + h)], Stroke::new(2.0, color));
+            }
+        }
+        "Color Warper" => {
+            painter.circle_stroke(center, 5.2, Stroke::new(1.0, color));
+            painter.circle_stroke(center, 2.4, Stroke::new(0.8, color.gamma_multiply(0.7)));
+            painter.line_segment([pos2(center.x - 5.2, center.y), pos2(center.x + 5.2, center.y)], Stroke::new(0.8, color.gamma_multiply(0.7)));
+            painter.line_segment([pos2(center.x, center.y - 5.2), pos2(center.x, center.y + 5.2)], Stroke::new(0.8, color.gamma_multiply(0.7)));
+        }
+        "RGB Mixer" => {
+            let cols = [Color32::from_rgb(230, 88, 88), Color32::from_rgb(92, 204, 118), Color32::from_rgb(92, 152, 240)];
+            for (k, c) in cols.into_iter().enumerate() {
+                let y = center.y + (k as f32 - 1.0) * 3.8;
+                painter.line_segment([pos2(center.x - 5.0, y), pos2(center.x + 5.0, y)], Stroke::new(1.1, color.gamma_multiply(0.55)));
+                let px = center.x + (k as f32 - 1.0) * 2.5;
+                painter.circle_filled(pos2(px, y), 1.6, c);
+            }
+        }
+        "Color Space Transform" => {
+            painter.circle_stroke(pos2(center.x - 2.2, center.y), 4.2, Stroke::new(1.1, color));
+            painter.circle_stroke(pos2(center.x + 2.2, center.y), 4.2, Stroke::new(1.1, color.gamma_multiply(0.7)));
+        }
+        "Sizing" => {
+            let outer = Rect::from_center_size(center, vec2(11.0, 9.0));
+            painter.rect_stroke(outer, 1.0, Stroke::new(1.1, color), StrokeKind::Inside);
+            let inner = Rect::from_center_size(center, vec2(5.5, 4.5));
+            painter.rect_stroke(inner, 0.5, Stroke::new(1.0, color.gamma_multiply(0.75)), StrokeKind::Inside);
         }
         _ => {
             painter.circle_filled(center, 3.0, color);
@@ -391,7 +478,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, current_panel
     let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(10.0, 4.0))).id_salt(("lumetri2", current_panel)));
     bui.set_clip_rect(rect.intersect(ui.clip_rect()));
 
-    let (clip, scope_id, it_name, mt, idx, e, is_group_mode, group_hdr, lumetri_effects_len, node_list_meta, needs_apply_clip) =
+    let (clip, clip_item, scope_id, it_name, mt, idx, e, is_group_mode, group_hdr, lumetri_effects_len, node_list_meta, needs_apply_clip) =
         if let Some((gid, gname, gcol, geffects)) = active_group_info {
             let inst = geffects.iter().find(|fx| fx.effect == "lumetri").cloned().or_else(|| filmcraft_project::find_effect("lumetri").map(|d| d.instance()));
             let Some(inst) = inst else {
@@ -399,7 +486,20 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, current_panel
                 return;
             };
             let grp_badges = crate::panels::color_nodes::detect_node_badges(&inst);
-            (ClipId(0), gid.0, gname.clone(), Tick(0), 0usize, inst, true, Some((gid, gname, gcol)), 1usize, vec![(0usize, true, None, grp_badges)], false)
+            (
+                ClipId(0),
+                None,
+                gid.0,
+                gname.clone(),
+                Tick(0),
+                0usize,
+                inst,
+                true,
+                Some((gid, gname, gcol)),
+                1usize,
+                vec![(0usize, true, None, grp_badges)],
+                false,
+            )
         } else {
             let Some((clip, it)) = clip_info else {
                 return;
@@ -413,7 +513,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, current_panel
                     return;
                 };
                 app.ui.active_color_node = 0;
-                (clip, clip.0, it.name, mt, 0usize, default_inst, false, None, 1usize, vec![(0usize, true, None, Vec::new())], true)
+                (clip, Some(it.clone()), clip.0, it.name, mt, 0usize, default_inst, false, None, 1usize, vec![(0usize, true, None, Vec::new())], true)
             } else {
                 let active_node = app.ui.active_color_node.min(lumetri_effects.len().saturating_sub(1));
                 app.ui.active_color_node = active_node;
@@ -424,7 +524,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, current_panel
                     lumetri_effects.iter().map(|&(i, fx)| (i, fx.enabled, fx.label.clone(), crate::panels::color_nodes::detect_node_badges(fx))).collect();
                 let len = lumetri_effects.len();
                 let cloned = e_ref.clone();
-                (clip, clip.0, it.name, mt, idx, cloned, false, None, len, meta, false)
+                (clip, Some(it.clone()), clip.0, it.name, mt, idx, cloned, false, None, len, meta, false)
             }
         };
     let active_node = if is_group_mode { 0 } else { app.ui.active_color_node };
@@ -439,6 +539,18 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, current_panel
                 .add(egui::Button::new(egui::RichText::new("fx").italics().color(if e.enabled { t.accent } else { t.text_faint })).frame(false))
                 .on_hover_text(tl!("Bypass Color Grading (on/off)"));
             app.auto.add("lumetri.bypass", fx.rect, "Bypass Color Grading");
+            let hl_on = app.ui.color_highlight > 0;
+            let hl_col = if hl_on { Color32::from_rgb(240, 185, 65) } else { t.text_dim };
+            let hl_btn = ui
+                .add(egui::Button::new(egui::RichText::new(tl!("HL")).small().color(hl_col)).frame(hl_on))
+                .on_hover_text(tl!("Highlight Key Matte (Shift+H)"));
+            app.auto.add("lumetri.highlight", hl_btn.rect, "Highlight Key Matte");
+            if hl_btn.clicked() {
+                let _ = crate::menus::invoke(app, ui.ctx(), "color.toggleHighlight", json!({}));
+            }
+            if !is_group_mode {
+                render_color_keyframe_nav(app, ui, &t, clip, clip_item.as_ref(), idx, mt, &e, needs_apply_clip, current_panel);
+            }
             if fx.clicked() {
                 let res = if let Some((gid, _, _)) = &group_hdr {
                     app.session.execute("color.groupToggleBypass", json!({"group": gid.0}))
@@ -566,10 +678,34 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, current_panel
     let mut reset_sections: Vec<&'static str> = Vec::new();
     let mut reset_wheels: Vec<&'static str> = Vec::new();
 
-    let bar_pos = app.ui.lumetri_bar_pos.clone();
+    let bar_pos = if current_panel == crate::dock::PanelKind::LumetriColor { app.ui.lumetri_bar_pos.clone() } else { "dedicated".to_string() };
     let panel_w = bui.available_width().max(120.0);
     bui.set_max_width(panel_w);
     match bar_pos.as_str() {
+        "dedicated" => {
+            bui.add_space(2.0);
+            render_scroll_content(
+                &mut bui,
+                app,
+                current_panel,
+                panel_w,
+                None,
+                &e,
+                clip,
+                scope_id,
+                idx,
+                mt,
+                hdr,
+                &t,
+                &mut actions,
+                &mut lut_actions,
+                &mut mask_actions,
+                &mut reset_sections,
+                &mut reset_wheels,
+                &mut auto_rows,
+                &mut sections,
+            );
+        }
         "bottom" => {
             let content_h = (bui.available_height() - 36.0).max(60.0);
             render_scroll_content(
@@ -1059,7 +1195,8 @@ fn render_single_palette(tool_id: &str, current_panel: crate::dock::PanelKind, u
                 ui.add_space(2.0);
             }
             if !ctx.is_group_mode {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
                     ui.label(egui::RichText::new(tl!("WB Selector:")).color(t.text_dim).small());
                     let armed = app
                         .ui
@@ -1078,12 +1215,16 @@ fn render_single_palette(tool_id: &str, current_panel: crate::dock::PanelKind, u
                     if drop.clicked() {
                         arm_lumetri_eyedropper(app, ctx, "temperature", crate::state::EyedropperKind::LumetriWb);
                     }
+                    if mode == 0 {
+                        ui.separator();
+                        wheels::draw_wheels_mode_bar(ui, &mut app.ui.lumetri_wheels_mode, ctx);
+                    }
                 });
             }
 
             match mode {
                 0 => {
-                    wheels::resolve_wheels_grid(ui, current_panel, ctx);
+                    wheels::resolve_wheels_grid(ui, current_panel, &mut app.ui.lumetri_wheels_mode, ctx.is_group_mode, ctx);
                     ui.add_space(2.0);
                     ui.separator();
                     ui.add_space(2.0);
@@ -1101,6 +1242,9 @@ fn render_single_palette(tool_id: &str, current_panel: crate::dock::PanelKind, u
                                 ("temperature", tl!("Temperature"), Some(Gradient::Temp)),
                                 ("tint", tl!("Tint"), Some(Gradient::Tint)),
                                 ("saturation", tl!("Saturation"), None),
+                                ("color_boost", tl!("Color Boost"), None),
+                                ("primary_hue", tl!("Hue"), Some(Gradient::Hue)),
+                                ("lum_mix", tl!("Lum Mix"), None),
                             ] {
                                 let r = slider(ui, current_panel, id, label, grad, ctx);
                                 ctx.auto_rows.push((format!("lumetri.param.{id}"), r, label));
@@ -1111,6 +1255,8 @@ fn render_single_palette(tool_id: &str, current_panel: crate::dock::PanelKind, u
                             for (id, label) in [
                                 ("exposure", tl!("Exposure")),
                                 ("contrast", tl!("Contrast")),
+                                ("contrast_pivot", tl!("Pivot")),
+                                ("midtone_detail", tl!("Midtone Detail")),
                                 ("highlights", tl!("Highlights")),
                                 ("shadows", tl!("Shadows")),
                                 ("whites", tl!("Whites")),
@@ -1182,10 +1328,17 @@ fn render_single_palette(tool_id: &str, current_panel: crate::dock::PanelKind, u
                 ("Hue vs Lum", true, "hue_vs_luma"),
                 ("Lum vs Sat", true, "luma_vs_sat"),
                 ("Sat vs Sat", true, "sat_vs_sat"),
+                ("Sat vs Lum", true, "sat_vs_luma"),
             ];
             let key = egui::Id::unique(("lumetri-curve-channel", current_panel, ctx.is_secondary));
+            let overlay_key = egui::Id::unique(("lumetri-curve-overlay", current_panel, ctx.is_secondary));
+            let gang_key = egui::Id::unique(("lumetri-curve-gang", current_panel, ctx.is_secondary));
+            let hist_key = egui::Id::unique(("lumetri-curve-hist-on", current_panel, ctx.is_secondary));
             let ch_raw: usize = ui.data(|d| d.get_temp(key)).unwrap_or(0);
             let mut ch = ch_raw.min(3);
+            let mut overlay_all: bool = ui.data(|d| d.get_temp(overlay_key)).unwrap_or(true);
+            let mut gang_rgb: bool = ui.data(|d| d.get_temp(gang_key)).unwrap_or(false);
+            let mut show_hist: bool = ui.data(|d| d.get_temp(hist_key)).unwrap_or(true);
             let channels = [
                 ("curve_luma", Color32::WHITE),
                 ("curve_red", Color32::from_rgb(230, 70, 70)),
@@ -1224,10 +1377,27 @@ fn render_single_palette(tool_id: &str, current_panel: crate::dock::PanelKind, u
                             ch = i;
                         }
                     }
+                    let ov_resp = ui.selectable_label(overlay_all, egui::RichText::new(tl!("All")).small()).on_hover_text(tl!("Show all RGBY curves overlaid"));
+                    ctx.auto_rows.push(("lumetri.curve.overlay".into(), ov_resp.rect, "Overlay All Curves"));
+                    if ov_resp.clicked() {
+                        overlay_all = !overlay_all;
+                    }
+                    let g_resp =
+                        ui.selectable_label(gang_rgb, egui::RichText::new(tl!("Gang")).small()).on_hover_text(tl!("Link Red, Green, and Blue curves together"));
+                    ctx.auto_rows.push(("lumetri.curve.gang".into(), g_resp.rect, "Gang RGB Curves"));
+                    if g_resp.clicked() {
+                        gang_rgb = !gang_rgb;
+                    }
                     let rst_resp = wheels::paint_reset_icon_button(ui, t.text_dim, tl!("Reset curve"));
                     ctx.auto_rows.push(("lumetri.curve.reset".into(), rst_resp.rect, "Reset curve"));
                     if rst_resp.clicked() {
-                        ctx.actions.push(json!({"clip": ctx.clip.0, "effect": ctx.idx, "param": id, "value": [[0.0, 0.0], [1.0, 1.0]]}));
+                        if gang_rgb && matches!(id, "curve_red" | "curve_green" | "curve_blue") {
+                            for cid in ["curve_red", "curve_green", "curve_blue"] {
+                                ctx.actions.push(json!({"clip": ctx.clip.0, "effect": ctx.idx, "param": cid, "value": [[0.0, 0.0], [1.0, 1.0]]}));
+                            }
+                        } else {
+                            ctx.actions.push(json!({"clip": ctx.clip.0, "effect": ctx.idx, "param": id, "value": [[0.0, 0.0], [1.0, 1.0]]}));
+                        }
                     }
                     if !ctx.is_group_mode {
                         let armed = app.ui.eyedropper.as_ref().is_some_and(|ed| {
@@ -1259,21 +1429,58 @@ fn render_single_palette(tool_id: &str, current_panel: crate::dock::PanelKind, u
                         }
                     }
                 }
+                let h_resp = ui.selectable_label(show_hist, egui::RichText::new(tl!("Hist")).small()).on_hover_text(tl!("Toggle background histogram"));
+                ctx.auto_rows.push(("lumetri.curve.hist".into(), h_resp.rect, "Toggle Histogram"));
+                if h_resp.clicked() {
+                    show_hist = !show_hist;
+                }
             });
-            ui.data_mut(|d| d.insert_temp(tab_key, curve_tab));
-            ui.data_mut(|d| d.insert_temp(key, ch));
+            ui.data_mut(|d| {
+                d.insert_temp(tab_key, curve_tab);
+                d.insert_temp(key, ch);
+                d.insert_temp(overlay_key, overlay_all);
+                d.insert_temp(gang_key, gang_rgb);
+                d.insert_temp(hist_key, show_hist);
+            });
 
             if curve_tab == 0 {
-                let hist = curve_histogram(app, ui);
-                let r = curves::curve_editor(ui, current_panel, id, false, col, hist.as_ref(), ctx);
+                let hist = show_hist.then(|| curve_histogram(app, ui)).flatten();
+                let ov = overlay_all.then_some(channels.as_slice());
+                let r = curves::curve_editor(
+                    ui,
+                    current_panel,
+                    id,
+                    false,
+                    col,
+                    hist.as_ref().map(|h| &h.rgba),
+                    None,
+                    ch,
+                    ov,
+                    gang_rgb,
+                    show_hist,
+                    ctx,
+                    |ui, ctx| {
+                        ui.label(egui::RichText::new(tl!("Soft Clip")).strong().small().color(ctx.t.text_dim));
+                        for (sid, slbl) in [("curve_low_soft", tl!("Low Soft")), ("curve_high_soft", tl!("High Soft"))] {
+                            let sr = slider(ui, current_panel, sid, slbl, None, ctx);
+                            ctx.auto_rows.push((format!("lumetri.param.{sid}"), sr, slbl));
+                        }
+                        if ctx.hdr {
+                            let r = slider(ui, current_panel, "curves_hdr_range", tl!("HDR Range"), None, ctx);
+                            ctx.auto_rows.push(("lumetri.param.curves_hdr_range".into(), r, "HDR Range"));
+                        }
+                    },
+                );
                 ctx.auto_rows.push((format!("lumetri.curve.{id}"), r, "Curve"));
-                if ctx.hdr {
-                    let r = slider(ui, current_panel, "curves_hdr_range", tl!("HDR Range"), None, ctx);
-                    ctx.auto_rows.push(("lumetri.param.curves_hdr_range".into(), r, "HDR Range"));
-                }
             } else {
                 let (lbl, _, cid) = curve_tabs.get(curve_tab).copied().unwrap_or(("Hue vs Hue", true, "hue_vs_hue"));
-                let r = curves::curve_editor(ui, current_panel, cid, true, Color32::WHITE, None, ctx);
+                let hist = show_hist.then(|| curve_histogram(app, ui)).flatten();
+                let dom_hist = hist.as_ref().map(|h| match cid {
+                    "luma_vs_sat" => &h.luma,
+                    "sat_vs_sat" | "sat_vs_luma" => &h.sat,
+                    _ => &h.hue,
+                });
+                let r = curves::curve_editor(ui, current_panel, cid, true, Color32::WHITE, None, dom_hist, 0, None, false, show_hist, ctx, |_, _| {});
                 ctx.auto_rows.push((format!("lumetri.curve.{cid}"), r, lbl));
             }
         }
@@ -1281,14 +1488,14 @@ fn render_single_palette(tool_id: &str, current_panel: crate::dock::PanelKind, u
             if ui.available_width() >= 920.0 {
                 ui.columns(2, |cols| {
                     cols[0].vertical(|ui| {
-                        wheels::resolve_wheels_grid(ui, current_panel, ctx);
+                        wheels::resolve_wheels_grid(ui, current_panel, &mut app.ui.lumetri_wheels_mode, true, ctx);
                     });
                     cols[1].vertical(|ui| {
                         match_view::match_controls(ui, app, current_panel, ctx.lut_actions, ctx.auto_rows);
                     });
                 });
             } else {
-                wheels::resolve_wheels_grid(ui, current_panel, ctx);
+                wheels::resolve_wheels_grid(ui, current_panel, &mut app.ui.lumetri_wheels_mode, true, ctx);
                 ui.add_space(6.0);
                 ui.separator();
                 ui.add_space(4.0);
@@ -1323,6 +1530,18 @@ fn render_single_palette(tool_id: &str, current_panel: crate::dock::PanelKind, u
                     ctx.mask_actions.push(("masks.add".into(), json!({"clip": ctx.clip.0, "effect": ctx.idx, "shape": "ellipse"})));
                 }
 
+                let poly_btn = ui.button(egui::RichText::new(tl!("Polygon")).small()).on_hover_text(tl!("Add 6-point polygon mask (Polygon Window)"));
+                ctx.auto_rows.push(("lumetri.mask.add_polygon".into(), poly_btn.rect, "Add Polygon Window"));
+                if poly_btn.clicked() {
+                    ctx.mask_actions.push(("masks.add".into(), json!({"clip": ctx.clip.0, "effect": ctx.idx, "shape": "hexagon"})));
+                }
+
+                let grad_btn = ui.button(egui::RichText::new(tl!("Gradient")).small()).on_hover_text(tl!("Add directional linear gradient mask"));
+                ctx.auto_rows.push(("lumetri.mask.add_gradient".into(), grad_btn.rect, "Add Gradient Window"));
+                if grad_btn.clicked() {
+                    ctx.mask_actions.push(("masks.add".into(), json!({"clip": ctx.clip.0, "effect": ctx.idx, "shape": "gradient"})));
+                }
+
                 let mut pen_btn = egui::Button::new(egui::RichText::new(tl!("Pen")).small());
                 if pen_on {
                     pen_btn = pen_btn.fill(t.accent.gamma_multiply(0.25)).stroke(egui::Stroke::new(1.0, t.accent));
@@ -1344,7 +1563,9 @@ fn render_single_palette(tool_id: &str, current_panel: crate::dock::PanelKind, u
 
             if ctx.e.masks.is_empty() {
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new(tl!("No masks on this node. Click Linear, Circle, or Pen to create one.")).color(t.text_dim).small());
+                ui.label(
+                    egui::RichText::new(tl!("No masks on this node. Click Linear, Circle, Polygon, Gradient, or Pen to create one.")).color(t.text_dim).small(),
+                );
             } else {
                 let sel_mask_idx = app
                     .session
@@ -1360,7 +1581,9 @@ fn render_single_palette(tool_id: &str, current_panel: crate::dock::PanelKind, u
                 ui.horizontal_wrapped(|ui| {
                     for (mi, mk) in ctx.e.masks.iter().enumerate() {
                         let mpath = mk.path_at(ctx.mt);
-                        let shape_tag = if !mpath.vertices.is_empty() && mpath.vertices.iter().all(|v| !v.is_corner()) {
+                        let shape_tag = if mk.kind == filmcraft_project::MaskKind::Gradient {
+                            "[G]"
+                        } else if !mpath.vertices.is_empty() && mpath.vertices.iter().all(|v| !v.is_corner()) {
                             "[C]"
                         } else if mpath.vertices.len() == 4 {
                             "[L]"
@@ -1497,6 +1720,35 @@ fn render_single_palette(tool_id: &str, current_panel: crate::dock::PanelKind, u
                         "lumetri.mask.expansion",
                         "Mask Expansion",
                     );
+                    if m.kind != filmcraft_project::MaskKind::Gradient {
+                        let cur_balance = m.feather_balance.f64_at(ctx.mt);
+                        mask_drag_param(
+                            ui,
+                            current_panel,
+                            ctx,
+                            sel_mask_idx,
+                            "feather_balance",
+                            tl!("Soft Balance:"),
+                            cur_balance,
+                            0.0,
+                            -100.0..=100.0,
+                            " %",
+                            &m.feather_balance,
+                            "lumetri.mask.feather_balance",
+                            "Feather Balance",
+                        );
+                        for (lbl, target_v, id_sfx) in [(tl!("In"), -100.0, "in"), (tl!("Ctr"), 0.0, "center"), (tl!("Out"), 100.0, "out")] {
+                            let active_b = (cur_balance - target_v).abs() < 1.0;
+                            let pill = ui.selectable_label(active_b, egui::RichText::new(lbl).small());
+                            ctx.auto_rows.push((format!("lumetri.mask.feather_{id_sfx}"), pill.rect, "Feather Balance Preset"));
+                            if pill.clicked() {
+                                ctx.mask_actions.push((
+                                    "masks.set".into(),
+                                    json!({"clip": ctx.clip.0, "effect": ctx.idx, "mask": sel_mask_idx, "feather_balance": target_v, "merge": false}),
+                                ));
+                            }
+                        }
+                    }
                 });
 
                 ui.horizontal_wrapped(|ui| {
@@ -1519,75 +1771,7 @@ fn render_single_palette(tool_id: &str, current_panel: crate::dock::PanelKind, u
             }
         }
         "HSL Secondary" => {
-            ui.horizontal(|ui| {
-                sub(ui, t, tl!("Key"));
-                if !ctx.is_group_mode {
-                    let armed = app
-                        .ui
-                        .eyedropper
-                        .as_ref()
-                        .is_some_and(|ed| ed.clip == ctx.clip.0 && ed.effect == ctx.idx && ed.kind == crate::state::EyedropperKind::LumetriHsl);
-                    let drop = crate::icons::button(
-                        ui,
-                        crate::icons::Icon::Eyedropper,
-                        16.0,
-                        armed,
-                        t,
-                        tl!("Key Eyedropper (pick target color from Program monitor)"),
-                    );
-                    ctx.auto_rows.push(("lumetri.eyedropper.hsl".into(), drop.rect, "HSL Eyedropper"));
-                    if drop.clicked() {
-                        arm_lumetri_eyedropper(app, ctx, "hsl_hue", crate::state::EyedropperKind::LumetriHsl);
-                    }
-                }
-            });
-            draw_hsl_range_bar(ui, current_panel, ctx);
-            let r_hue = slider(ui, current_panel, "hsl_hue", tl!("Hue"), Some(Gradient::Hue), ctx);
-            ctx.auto_rows.push(("lumetri.param.hsl_hue".into(), r_hue, "Hue"));
-            for (id, label) in [
-                ("hsl_hue_range", tl!("Hue Range")),
-                ("hsl_sat_min", tl!("Saturation Min")),
-                ("hsl_luma_min", tl!("Luma Min")),
-                ("hsl_luma_max", tl!("Luma Max")),
-                ("hsl_soft", tl!("Soften")),
-            ] {
-                let r = slider(ui, current_panel, id, label, None, ctx);
-                ctx.auto_rows.push((format!("lumetri.param.{id}"), r, label));
-            }
-            let mask = match ctx.e.param("hsl_show_mask").map(|p| &p.value) {
-                Some(ParamValue::Choice(c)) => *c as usize,
-                _ => 0,
-            };
-            ui.horizontal(|ui| {
-                ui.add_sized(vec2(110.0, 20.0), egui::Label::new(egui::RichText::new(tl!("Show Mask")).color(t.text_dim)));
-                let mut sel = mask;
-                let modes = [tl!("Off"), tl!("Color/Gray"), tl!("Color/Black"), tl!("White/Black")];
-                let cb = craft_ui::ComboBox::from_id_salt(("hsl-mask", current_panel, ctx.is_secondary, ctx.is_group_mode, ctx.scope_id, ctx.idx))
-                    .selected_text(modes.get(mask).copied().unwrap_or(modes[0]))
-                    .show_ui(ui, |ui| {
-                        for (i, o) in modes.iter().enumerate() {
-                            if ui.selectable_value(&mut sel, i, *o).changed() {
-                                ctx.actions.push(json!({"clip": ctx.clip.0, "effect": ctx.idx, "param": "hsl_show_mask", "value": i}));
-                            }
-                        }
-                    });
-                ctx.auto_rows.push(("lumetri.param.hsl_show_mask".into(), cb.response.rect, "Show Mask"));
-            });
-            sub(ui, t, tl!("Refine"));
-            for (id, label) in [("hsl_denoise", tl!("Denoise")), ("hsl_blur", tl!("Blur"))] {
-                let r = slider(ui, current_panel, id, label, None, ctx);
-                ctx.auto_rows.push((format!("lumetri.param.{id}"), r, label));
-            }
-            sub(ui, t, tl!("Correction"));
-            for (id, label, grad) in [
-                ("hsl_temp", tl!("Temperature"), Some(Gradient::Temp)),
-                ("hsl_tint", tl!("Tint"), Some(Gradient::Tint)),
-                ("hsl_sat", tl!("Saturation"), None),
-                ("hsl_hue_shift", tl!("Hue Shift"), Some(Gradient::Hue)),
-            ] {
-                let r = slider(ui, current_panel, id, label, grad, ctx);
-                ctx.auto_rows.push((format!("lumetri.param.{id}"), r, label));
-            }
+            draw_qualifier_section(app, ui, current_panel, ctx);
         }
         "Vignette" => {
             for (id, label) in [
@@ -1599,6 +1783,21 @@ fn render_single_palette(tool_id: &str, current_panel: crate::dock::PanelKind, u
                 let r = slider(ui, current_panel, id, label, None, ctx);
                 ctx.auto_rows.push((format!("lumetri.param.{id}"), r, label));
             }
+        }
+        "ColorSlice" => {
+            color_slice::show(ui, current_panel, ctx);
+        }
+        "Color Warper" => {
+            color_warper::show(ui, current_panel, ctx);
+        }
+        "RGB Mixer" => {
+            rgb_mixer::show(ui, current_panel, ctx);
+        }
+        "Color Space Transform" => {
+            cst::show(ui, current_panel, ctx);
+        }
+        "Sizing" => {
+            sizing::show(ui, current_panel, ctx);
         }
         _ => {}
     }
@@ -1919,8 +2118,18 @@ fn apply_color_resets(
                     "lift" => &[("wheel_shadows", json!([0.0, 0.0])), ("wheel_shadows_l", json!(0.0))],
                     "gamma" => &[("wheel_midtones", json!([0.0, 0.0])), ("wheel_midtones_l", json!(0.0))],
                     "gain" => &[("wheel_highlights", json!([0.0, 0.0])), ("wheel_highlights_l", json!(0.0))],
-                    "offset" => &[("temperature", json!(0.0)), ("tint", json!(0.0)), ("exposure", json!(0.0))],
-                    "offset_2d" => &[("temperature", json!(0.0)), ("tint", json!(0.0))],
+                    "offset" => &[("wheel_offset", json!([0.0, 0.0])), ("wheel_offset_l", json!(0.0))],
+                    "log_shadows" => &[("log_shadows", json!([0.0, 0.0])), ("log_shadows_l", json!(0.0))],
+                    "log_midtones" => &[("log_midtones", json!([0.0, 0.0])), ("log_midtones_l", json!(0.0))],
+                    "log_highlights" => &[("log_highlights", json!([0.0, 0.0])), ("log_highlights_l", json!(0.0))],
+                    "log_offset" => &[("log_offset", json!([0.0, 0.0])), ("log_offset_l", json!(0.0))],
+                    "hdr_black" => &[("hdr_w_black", json!([0.0, 0.0])), ("hdr_w_black_exp", json!(0.0))],
+                    "hdr_dark" => &[("hdr_w_dark", json!([0.0, 0.0])), ("hdr_w_dark_exp", json!(0.0))],
+                    "hdr_shadow" => &[("hdr_w_shadow", json!([0.0, 0.0])), ("hdr_w_shadow_exp", json!(0.0))],
+                    "hdr_light" => &[("hdr_w_light", json!([0.0, 0.0])), ("hdr_w_light_exp", json!(0.0))],
+                    "hdr_highlight" => &[("hdr_w_highlight", json!([0.0, 0.0])), ("hdr_w_highlight_exp", json!(0.0))],
+                    "hdr_specular" => &[("hdr_w_specular", json!([0.0, 0.0])), ("hdr_w_specular_exp", json!(0.0))],
+                    "hdr_global" => &[("hdr_w_global", json!([0.0, 0.0])), ("hdr_w_global_exp", json!(0.0))],
                     _ => &[],
                 };
                 for (param, val) in pairs {
@@ -1976,7 +2185,15 @@ fn arm_lumetri_eyedropper(app: &mut FilmcraftApp, ctx: &ColorPanelCtx<'_>, param
     app.ui.eyedropper = if same { None } else { Some(next) };
 }
 
-fn curve_histogram(app: &mut FilmcraftApp, ui: &egui::Ui) -> Option<[f32; 64]> {
+#[derive(Clone)]
+pub(super) struct CurveHistograms {
+    pub rgba: [[f32; 64]; 4],
+    pub hue: [f32; 64],
+    pub luma: [f32; 64],
+    pub sat: [f32; 64],
+}
+
+fn curve_histogram(app: &mut FilmcraftApp, ui: &egui::Ui) -> Option<CurveHistograms> {
     let seq_id = app.session.state.active_sequence?;
     let seq = app.session.active_sequence()?;
     let rate = seq.settings.frame_rate;
@@ -1989,29 +2206,49 @@ fn curve_histogram(app: &mut FilmcraftApp, ui: &egui::Ui) -> Option<[f32; 64]> {
         draft: false,
         bypass: app.ui.global_bypass,
     };
-    let cache_id = egui::Id::unique("lumetri-curve-hist-cache");
+    let cache_id = egui::Id::unique("lumetri-curve-hist-all-cache");
     let dragging_now = ui.ctx().input(|i| i.pointer.any_down());
-    if let Some((cached_key, bins)) = ui.data(|d| d.get_temp::<(crate::frames::FrameKey, [f32; 64])>(cache_id))
+    if let Some((cached_key, hist)) = ui.data(|d| d.get_temp::<(crate::frames::FrameKey, CurveHistograms)>(cache_id))
         && (cached_key == fkey || (dragging_now && cached_key.target == fkey.target && cached_key.frame == fkey.frame && cached_key.bypass == fkey.bypass))
     {
-        return Some(bins);
+        return Some(hist);
     }
     let project = app.session.project.clone();
     app.frames.request(fkey, rate.tick_of(frame), 0.25, &project, 90);
     let img = app.frames.get(&fkey)?;
-    let mut counts = [0u32; 64];
+    let mut counts = [[0u32; 64]; 4];
+    let mut hue_counts = [0u32; 64];
+    let mut sat_counts = [0u32; 64];
     for px in img.px.as_chunks::<4>().0 {
-        let luma = (0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32) / 255.0;
-        let bin = ((luma * 63.0).round() as usize).min(63);
-        counts[bin] += 1;
+        let rf = px[0] as f32 / 255.0;
+        let gf = px[1] as f32 / 255.0;
+        let bf = px[2] as f32 / 255.0;
+        let luma = 0.2126 * rf + 0.7152 * gf + 0.0722 * bf;
+        counts[0][((luma * 63.0).round() as usize).min(63)] += 1;
+        counts[1][((rf * 63.0).round() as usize).min(63)] += 1;
+        counts[2][((gf * 63.0).round() as usize).min(63)] += 1;
+        counts[3][((bf * 63.0).round() as usize).min(63)] += 1;
+        let [h, s, _l] = filmcraft_color::rgb_to_hsl(rf, gf, bf);
+        sat_counts[((s.clamp(0.0, 1.0) * 63.0).round() as usize).min(63)] += 1;
+        if s > 0.04 {
+            hue_counts[((h.rem_euclid(1.0) * 63.0).round() as usize).min(63)] += 1;
+        }
     }
-    let max_c = counts.iter().copied().max().unwrap_or(1).max(1) as f32;
-    let mut bins = [0.0f32; 64];
-    for (b, c) in bins.iter_mut().zip(counts) {
-        *b = c as f32 / max_c;
-    }
-    ui.data_mut(|d| d.insert_temp(cache_id, (fkey, bins)));
-    Some(bins)
+    let norm = |src: &[u32; 64]| -> [f32; 64] {
+        let max_c = src.iter().copied().max().unwrap_or(1).max(1) as f32;
+        let mut out = [0.0f32; 64];
+        for (dst, &c) in out.iter_mut().zip(src) {
+            *dst = c as f32 / max_c;
+        }
+        out
+    };
+    let rgba = [norm(&counts[0]), norm(&counts[1]), norm(&counts[2]), norm(&counts[3])];
+    let luma = rgba[0];
+    let hue = norm(&hue_counts);
+    let sat = norm(&sat_counts);
+    let hist = CurveHistograms { rgba, hue, luma, sat };
+    ui.data_mut(|d| d.insert_temp(cache_id, (fkey, hist.clone())));
+    Some(hist)
 }
 
 fn push_hsl_bar_param(ctx: &mut ColorPanelCtx<'_>, param: &str, value: f64, merge: Option<&str>, begin: bool) {
@@ -2030,6 +2267,7 @@ fn draw_hsl_range_bar(ui: &mut egui::Ui, current_panel: crate::dock::PanelKind, 
     let hue = ctx.e.param("hsl_hue").map(|p| p.f64_at(ctx.mt)).unwrap_or(0.0) as f32;
     let range = ctx.e.param("hsl_hue_range").map(|p| p.f64_at(ctx.mt)).unwrap_or(30.0) as f32;
     let sat_min = (ctx.e.param("hsl_sat_min").map(|p| p.f64_at(ctx.mt)).unwrap_or(10.0) / 100.0).clamp(0.0, 1.0) as f32;
+    let sat_max = (ctx.e.param("hsl_sat_max").map(|p| p.f64_at(ctx.mt)).unwrap_or(100.0) / 100.0).clamp(0.0, 1.0) as f32;
     let luma_min = (ctx.e.param("hsl_luma_min").map(|p| p.f64_at(ctx.mt)).unwrap_or(5.0) / 100.0).clamp(0.0, 1.0) as f32;
     let luma_max = (ctx.e.param("hsl_luma_max").map(|p| p.f64_at(ctx.mt)).unwrap_or(95.0) / 100.0).clamp(0.0, 1.0) as f32;
 
@@ -2075,9 +2313,12 @@ fn draw_hsl_range_bar(ui: &mut egui::Ui, current_panel: crate::dock::PanelKind, 
     p.line_segment([pos2(hc, hue_r.min.y), pos2(hc, hue_r.max.y)], Stroke::new(1.8, Color32::WHITE));
 
     p.rect_filled(sat_r, 1.0, Color32::from_rgb(28, 30, 36));
-    let sat_x = sat_r.min.x + sat_r.width() * sat_min;
-    p.rect_filled(Rect::from_min_max(pos2(sat_x, sat_r.min.y), sat_r.max), 1.0, Color32::from_rgb(70, 170, 130));
-    p.line_segment([pos2(sat_x, sat_r.min.y), pos2(sat_x, sat_r.max.y)], Stroke::new(1.5, Color32::WHITE));
+    let (s0, s1) = (sat_min.min(sat_max), sat_min.max(sat_max));
+    let sat_x0 = sat_r.min.x + sat_r.width() * s0;
+    let sat_x1 = sat_r.min.x + sat_r.width() * s1;
+    p.rect_filled(Rect::from_min_max(pos2(sat_x0, sat_r.min.y), pos2(sat_x1, sat_r.max.y)), 1.0, Color32::from_rgb(70, 170, 130));
+    p.line_segment([pos2(sat_x0, sat_r.min.y), pos2(sat_x0, sat_r.max.y)], Stroke::new(1.5, Color32::WHITE));
+    p.line_segment([pos2(sat_x1, sat_r.min.y), pos2(sat_x1, sat_r.max.y)], Stroke::new(1.5, Color32::WHITE));
 
     p.rect_filled(lum_r, 1.0, Color32::from_rgb(28, 30, 36));
     let (l0, l1) = (luma_min.min(luma_max), luma_min.max(luma_max));
@@ -2186,4 +2427,375 @@ fn lerp_col(a: Color32, b: Color32, f: f32) -> Color32 {
     let f = f.clamp(0.0, 1.0);
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * f) as u8;
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
+fn draw_qualifier_section(app: &mut FilmcraftApp, ui: &mut egui::Ui, current_panel: crate::dock::PanelKind, ctx: &mut ColorPanelCtx<'_>) {
+    let t = ctx.t;
+    let q_mode = match ctx.e.param("hsl_mode").map(|p| &p.value) {
+        Some(ParamValue::Choice(c)) => *c,
+        _ => 0,
+    };
+    let key_scope = match ctx.e.param("hsl_key_scope").map(|p| &p.value) {
+        Some(ParamValue::Choice(c)) => *c,
+        _ => 0,
+    };
+    let invert_key = matches!(ctx.e.param("hsl_invert_key").map(|p| &p.value), Some(ParamValue::Bool(true)));
+
+    // Header strip: mode tabs (HSL / RGB / Luma / 3D) + Key Scope + Invert + Highlight toggle
+    ui.horizontal_wrapped(|ui| {
+        sub(ui, t, tl!("Key"));
+        for (mi, mlbl) in [(0u32, "HSL"), (1, "RGB"), (2, "Luma"), (3, "3D")] {
+            let resp = ui.selectable_label(q_mode == mi, egui::RichText::new(mlbl).small());
+            ctx.auto_rows.push((format!("lumetri.hsl.mode.{mi}"), resp.rect, "Qualifier Mode"));
+            if resp.clicked() {
+                ctx.actions.push(json!({"clip": ctx.clip.0, "effect": ctx.idx, "param": "hsl_mode", "value": mi}));
+            }
+        }
+        ui.separator();
+        let scope_lbl = if key_scope == 0 { tl!("Node Key") } else { tl!("Secondary Only") };
+        let scope_resp = ui
+            .selectable_label(key_scope == 0, egui::RichText::new(scope_lbl).small())
+            .on_hover_text(tl!("Toggle Node Key (masks whole node) vs Secondary Only"));
+        ctx.auto_rows.push(("lumetri.hsl.key_scope".into(), scope_resp.rect, "Key Scope"));
+        if scope_resp.clicked() {
+            let next = if key_scope == 0 { 1 } else { 0 };
+            ctx.actions.push(json!({"clip": ctx.clip.0, "effect": ctx.idx, "param": "hsl_key_scope", "value": next}));
+        }
+        let inv_resp = ui.selectable_label(invert_key, egui::RichText::new(tl!("Invert")).small()).on_hover_text(tl!("Invert Key Matte"));
+        ctx.auto_rows.push(("lumetri.hsl.invert_key".into(), inv_resp.rect, "Invert Key"));
+        if inv_resp.clicked() {
+            ctx.actions.push(json!({"clip": ctx.clip.0, "effect": ctx.idx, "param": "hsl_invert_key", "value": !invert_key}));
+        }
+        let hl_on = app.ui.color_highlight > 0;
+        let hl_resp = ui.selectable_label(hl_on, egui::RichText::new(tl!("Highlight")).small()).on_hover_text(tl!("Highlight Key Matte (Shift+H)"));
+        ctx.auto_rows.push(("lumetri.hsl.highlight".into(), hl_resp.rect, "Highlight Key Matte"));
+        if hl_resp.clicked() {
+            let _ = crate::menus::invoke(app, ui.ctx(), "color.toggleHighlight", json!({}));
+        }
+    });
+
+    // Eyedropper strip
+    if !ctx.is_group_mode {
+        ui.horizontal_wrapped(|ui| {
+            if q_mode == 3 {
+                let armed_add = app
+                    .ui
+                    .eyedropper
+                    .as_ref()
+                    .is_some_and(|ed| ed.clip == ctx.clip.0 && ed.effect == ctx.idx && ed.kind == crate::state::EyedropperKind::Lumetri3d(false));
+                let armed_sub = app
+                    .ui
+                    .eyedropper
+                    .as_ref()
+                    .is_some_and(|ed| ed.clip == ctx.clip.0 && ed.effect == ctx.idx && ed.kind == crate::state::EyedropperKind::Lumetri3d(true));
+                let mut add_btn = egui::Button::new(egui::RichText::new(tl!("+ Pick")).small());
+                if armed_add {
+                    add_btn = add_btn.fill(t.accent.gamma_multiply(0.25)).stroke(egui::Stroke::new(1.0, t.accent));
+                }
+                let add_resp = ui.add(add_btn).on_hover_text(tl!("Pick 3D positive sample from Program monitor"));
+                ctx.auto_rows.push(("lumetri.eyedropper.3d_add".into(), add_resp.rect, "3D Add Eyedropper"));
+                if add_resp.clicked() {
+                    arm_lumetri_eyedropper(app, ctx, "hsl_3d_samples", crate::state::EyedropperKind::Lumetri3d(false));
+                }
+
+                let mut sub_btn = egui::Button::new(egui::RichText::new(tl!("- Exclude")).small());
+                if armed_sub {
+                    sub_btn = sub_btn.fill(t.accent.gamma_multiply(0.25)).stroke(egui::Stroke::new(1.0, t.accent));
+                }
+                let sub_resp = ui.add(sub_btn).on_hover_text(tl!("Pick 3D subtract sample from Program monitor"));
+                ctx.auto_rows.push(("lumetri.eyedropper.3d_sub".into(), sub_resp.rect, "3D Subtract Eyedropper"));
+                if sub_resp.clicked() {
+                    arm_lumetri_eyedropper(app, ctx, "hsl_3d_samples", crate::state::EyedropperKind::Lumetri3d(true));
+                }
+
+                let raw = ctx.e.param("hsl_3d_samples").and_then(|p| match &p.value {
+                    ParamValue::Text(s) => Some(s.as_str()),
+                    _ => None,
+                });
+                let count = raw.and_then(|s| serde_json::from_str::<Vec<[f32; 4]>>(s).ok()).map_or(0, |v| v.len().min(64));
+                let clr_resp = ui.add_enabled(count > 0, egui::Button::new(egui::RichText::new(tl!("Clear")).small()));
+                ctx.auto_rows.push(("lumetri.hsl.3d_clear".into(), clr_resp.rect, "Clear 3D Samples"));
+                if clr_resp.clicked() {
+                    ctx.actions.push(json!({"clip": ctx.clip.0, "effect": ctx.idx, "param": "hsl_3d_samples", "value": "[]"}));
+                }
+                ui.label(egui::RichText::new(format!("{count}/64")).color(t.text_dim).small());
+            } else {
+                let armed = app
+                    .ui
+                    .eyedropper
+                    .as_ref()
+                    .is_some_and(|ed| ed.clip == ctx.clip.0 && ed.effect == ctx.idx && ed.kind == crate::state::EyedropperKind::LumetriHsl);
+                let drop =
+                    crate::icons::button(ui, crate::icons::Icon::Eyedropper, 16.0, armed, t, tl!("Key Eyedropper (pick target color from Program monitor)"));
+                ctx.auto_rows.push(("lumetri.eyedropper.hsl".into(), drop.rect, "HSL Eyedropper"));
+                if drop.clicked() {
+                    arm_lumetri_eyedropper(app, ctx, "hsl_hue", crate::state::EyedropperKind::LumetriHsl);
+                }
+            }
+        });
+    }
+
+    // Mode-specific range controls
+    match q_mode {
+        1 => {
+            for (id, label) in [
+                ("hsl_r_min", tl!("Red Min")),
+                ("hsl_r_max", tl!("Red Max")),
+                ("hsl_g_min", tl!("Green Min")),
+                ("hsl_g_max", tl!("Green Max")),
+                ("hsl_b_min", tl!("Blue Min")),
+                ("hsl_b_max", tl!("Blue Max")),
+                ("hsl_rgb_soft", tl!("RGB Soften")),
+            ] {
+                let r = slider(ui, current_panel, id, label, None, ctx);
+                ctx.auto_rows.push((format!("lumetri.param.{id}"), r, label));
+            }
+        }
+        2 => {
+            for (id, label) in [("hsl_luma_min", tl!("Luma Min")), ("hsl_luma_max", tl!("Luma Max")), ("hsl_luma_soft", tl!("Luma Soften"))] {
+                let r = slider(ui, current_panel, id, label, None, ctx);
+                ctx.auto_rows.push((format!("lumetri.param.{id}"), r, label));
+            }
+        }
+        3 => {
+            let r_soft = slider(ui, current_panel, "hsl_rgb_soft", tl!("3D Soften"), None, ctx);
+            ctx.auto_rows.push(("lumetri.param.hsl_rgb_soft".into(), r_soft, "3D Soften"));
+        }
+        _ => {
+            draw_hsl_range_bar(ui, current_panel, ctx);
+            let r_hue = slider(ui, current_panel, "hsl_hue", tl!("Hue"), Some(Gradient::Hue), ctx);
+            ctx.auto_rows.push(("lumetri.param.hsl_hue".into(), r_hue, "Hue"));
+            for (id, label) in [
+                ("hsl_hue_range", tl!("Hue Range")),
+                ("hsl_sat_min", tl!("Saturation Min")),
+                ("hsl_sat_max", tl!("Saturation Max")),
+                ("hsl_sat_soft", tl!("Sat Soften")),
+                ("hsl_luma_min", tl!("Luma Min")),
+                ("hsl_luma_max", tl!("Luma Max")),
+                ("hsl_luma_soft", tl!("Luma Soften")),
+                ("hsl_soft", tl!("Soften")),
+            ] {
+                let r = slider(ui, current_panel, id, label, None, ctx);
+                ctx.auto_rows.push((format!("lumetri.param.{id}"), r, label));
+            }
+        }
+    }
+
+    let mask = match ctx.e.param("hsl_show_mask").map(|p| &p.value) {
+        Some(ParamValue::Choice(c)) => *c as usize,
+        _ => 0,
+    };
+    ui.horizontal(|ui| {
+        ui.add_sized(vec2(110.0, 20.0), egui::Label::new(egui::RichText::new(tl!("Show Mask")).color(t.text_dim)));
+        let mut sel = mask;
+        let modes = [tl!("Off"), tl!("Color/Gray"), tl!("Color/Black"), tl!("White/Black")];
+        let cb = craft_ui::ComboBox::from_id_salt(("hsl-mask", current_panel, ctx.is_secondary, ctx.is_group_mode, ctx.scope_id, ctx.idx))
+            .selected_text(modes.get(mask).copied().unwrap_or(modes[0]))
+            .show_ui(ui, |ui| {
+                for (i, o) in modes.iter().enumerate() {
+                    if ui.selectable_value(&mut sel, i, *o).changed() {
+                        ctx.actions.push(json!({"clip": ctx.clip.0, "effect": ctx.idx, "param": "hsl_show_mask", "value": i}));
+                    }
+                }
+            });
+        ctx.auto_rows.push(("lumetri.param.hsl_show_mask".into(), cb.response.rect, "Show Mask"));
+    });
+    let r_gain = slider(ui, current_panel, "key_gain", tl!("Key Output"), None, ctx);
+    ctx.auto_rows.push(("lumetri.param.key_gain".into(), r_gain, "Key Output"));
+
+    // Node Key Routing (DAG Key Input / Output Gain / Outside Node shortcut)
+    draw_dag_key_routing(app, ui, ctx);
+
+    sub(ui, t, tl!("Matte Finesse"));
+    for (id, label) in [
+        ("hsl_clean_black", tl!("Clean Black")),
+        ("hsl_clean_white", tl!("Clean White")),
+        ("hsl_in_out", tl!("In/Out Ratio")),
+        ("hsl_denoise", tl!("Denoise")),
+        ("hsl_blur", tl!("Blur")),
+    ] {
+        let r = slider(ui, current_panel, id, label, None, ctx);
+        ctx.auto_rows.push((format!("lumetri.param.{id}"), r, label));
+    }
+
+    sub(ui, t, tl!("Correction"));
+    for (id, label, grad) in [
+        ("hsl_temp", tl!("Temperature"), Some(Gradient::Temp)),
+        ("hsl_tint", tl!("Tint"), Some(Gradient::Tint)),
+        ("hsl_sat", tl!("Saturation"), None),
+        ("hsl_hue_shift", tl!("Hue Shift"), Some(Gradient::Hue)),
+    ] {
+        let r = slider(ui, current_panel, id, label, grad, ctx);
+        ctx.auto_rows.push((format!("lumetri.param.{id}"), r, label));
+    }
+}
+
+fn draw_dag_key_routing(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &mut ColorPanelCtx<'_>) {
+    let t = ctx.t;
+    let scope = app.ui.active_color_scope;
+    let active_idx = app.ui.active_color_node;
+    let graph_opt = app.session.active_sequence().and_then(|seq| match scope {
+        filmcraft_project::ColorScopeKind::Timeline => Some(seq.timeline_color.clone()),
+        filmcraft_project::ColorScopeKind::PreClip => app.ui.active_color_group.and_then(|gid| seq.color_group(gid)).map(|g| g.pre_clip.clone()),
+        filmcraft_project::ColorScopeKind::PostClip => {
+            app.ui.active_color_group.and_then(|gid| seq.color_group(gid)).map(|g| g.effective_post_clip().into_owned())
+        }
+        filmcraft_project::ColorScopeKind::Clip => seq.find_item(ctx.clip).map(|(_, it)| it.effective_color_graph().into_owned()),
+    });
+    let Some(graph) = graph_opt else { return };
+    let Some(node) = graph.nodes.get(active_idx) else { return };
+    let Some((in_gain, out_gain, k_inv)) = node.kind.key_params() else { return };
+    let nid = node.id.0;
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new(tl!("Node Key:")).color(t.text_dim).small());
+        let mut ig_pct = (in_gain * 100.0).round() as f64;
+        ui.label(egui::RichText::new(tl!("In Gain")).small());
+        let ig_resp = ui.add(egui::DragValue::new(&mut ig_pct).range(0.0..=200.0).speed(1.0).suffix(" %"));
+        ctx.auto_rows.push(("lumetri.dag.key_input_gain".into(), ig_resp.rect, "Node Key Input Gain"));
+        if ig_resp.changed() {
+            let _ = app
+                .session
+                .execute("color.graph.setKeyParams", json!({"scope": scope.id(), "clip": ctx.clip.0, "node": nid, "inputGain": ig_pct / 100.0, "merge": true}));
+        }
+
+        let mut og_pct = (out_gain * 100.0).round() as f64;
+        ui.label(egui::RichText::new(tl!("Out Gain")).small());
+        let og_resp = ui.add(egui::DragValue::new(&mut og_pct).range(0.0..=100.0).speed(1.0).suffix(" %"));
+        ctx.auto_rows.push(("lumetri.dag.key_output_gain".into(), og_resp.rect, "Node Key Output Gain"));
+        if og_resp.changed() {
+            let _ = app.session.execute(
+                "color.graph.setKeyParams",
+                json!({"scope": scope.id(), "clip": ctx.clip.0, "node": nid, "outputGain": og_pct / 100.0, "merge": true}),
+            );
+        }
+
+        let inv_resp = ui.selectable_label(k_inv, egui::RichText::new(tl!("Invert Out")).small());
+        ctx.auto_rows.push(("lumetri.dag.key_invert".into(), inv_resp.rect, "Invert Node Key Output"));
+        if inv_resp.clicked() {
+            let _ = app.session.execute("color.graph.setKeyParams", json!({"scope": scope.id(), "clip": ctx.clip.0, "node": nid, "invert": !k_inv}));
+        }
+
+        let out_btn = ui.button(egui::RichText::new(tl!("+ Outside")).small()).on_hover_text(tl!("Add Outside Node receiving inverted Key (Alt+O)"));
+        ctx.auto_rows.push(("lumetri.dag.add_outside".into(), out_btn.rect, "Add Outside Node"));
+        if out_btn.clicked() {
+            let _ = app.session.execute("color.graph.addNode", json!({"scope": scope.id(), "clip": ctx.clip.0, "kind": "outside", "after": nid}));
+            app.ui.active_color_node = graph.nodes.len();
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_color_keyframe_nav(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    t: &Tokens,
+    clip: ClipId,
+    clip_item: Option<&filmcraft_project::TrackItem>,
+    idx: usize,
+    mt: Tick,
+    e: &EffectInstance,
+    needs_apply_clip: bool,
+    current_panel: crate::dock::PanelKind,
+) {
+    let active_group = tool_for_panel(current_panel).or_else(|| {
+        let active_norm = normalize_tool_id(&app.ui.lumetri_active_tool);
+        get_tool_def(active_norm).map(|d| d.id)
+    });
+    let Some(edef) = filmcraft_project::find_effect("lumetri") else { return };
+
+    let mut group_params: Vec<&'static str> = edef
+        .params
+        .iter()
+        .filter(|pd| {
+            let matches_grp = active_group.is_none_or(|g| pd.group == Some(g));
+            let animatable = matches!(pd.default, ParamValue::Float(_) | ParamValue::Color(_) | ParamValue::Vec2(_));
+            matches_grp && animatable
+        })
+        .map(|pd| pd.id)
+        .collect();
+    if group_params.is_empty() {
+        group_params = vec!["exposure"];
+    }
+
+    let mut kf_times: Vec<Tick> = Vec::new();
+    for &pid in &group_params {
+        if let Some(p) = e.param(pid) {
+            for kf in &p.keyframes {
+                kf_times.push(kf.time);
+            }
+        }
+    }
+    kf_times.sort();
+    kf_times.dedup();
+
+    let prev_kf = kf_times.iter().copied().rev().find(|&k| k < mt);
+    let next_kf = kf_times.iter().copied().find(|&k| k > mt);
+    let at_kf = kf_times.contains(&mt);
+
+    let next_btn = ui
+        .add_enabled(next_kf.is_some() && clip_item.is_some(), egui::Button::new(egui::RichText::new("▶").small()).frame(false))
+        .on_hover_text(tl!("Next Color Keyframe"));
+    app.auto.add("lumetri.keyframe.next", next_btn.rect, "Next Color Keyframe");
+    if next_btn.clicked()
+        && let (Some(k), Some(it)) = (next_kf, clip_item)
+    {
+        let seq_t = crate::panels::effect_controls::timeline_time_of(it, k);
+        let _ = app.session.execute("playhead.set", json!({"time": seq_t.0}));
+    }
+
+    let mark_col = if at_kf { t.hot_text } else { t.text_dim };
+    let mark_btn = ui.add(egui::Button::new(egui::RichText::new(if at_kf { "◆" } else { "◇" }).small().color(mark_col)).frame(at_kf)).on_hover_text(if at_kf {
+        tl!("Remove Color Keyframe at Playhead")
+    } else {
+        tl!("Add Color Keyframe (Dynamics) at Playhead")
+    });
+    app.auto.add("lumetri.keyframe.mark", mark_btn.rect, "Toggle Color Keyframe");
+    if mark_btn.clicked() {
+        let mut target_params: Vec<&'static str> = if at_kf {
+            group_params.iter().copied().filter(|pid| e.param(pid).is_some_and(|p| p.keyframes.iter().any(|k| k.time == mt))).collect()
+        } else {
+            group_params
+                .iter()
+                .copied()
+                .filter(|pid| {
+                    e.param(pid).is_some_and(|p| {
+                        let def_val = edef.param(pid).map(|d| &d.default);
+                        !p.keyframes.is_empty() || def_val.is_some_and(|dv| &p.value != dv)
+                    })
+                })
+                .collect()
+        };
+        if target_params.is_empty()
+            && let Some(first) = group_params.first().copied()
+        {
+            target_params.push(first);
+        }
+        let res = app.session.edit_group("Color Keyframe", |s| {
+            let eff_idx = if needs_apply_clip {
+                let applied = s.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"}))?;
+                applied.get("applied").and_then(|a| a.get(0)).and_then(|o| o.get("index")).and_then(|v| v.as_u64()).unwrap_or(idx as u64) as usize
+            } else {
+                idx
+            };
+            for pid in target_params {
+                s.execute("effects.addKeyframe", json!({"clip": clip.0, "effect": eff_idx, "param": pid}))?;
+            }
+            Ok(Value::Null)
+        });
+        if let Err(err) = res {
+            app.ui.status = err.to_string();
+        }
+    }
+
+    let prev_btn = ui
+        .add_enabled(prev_kf.is_some() && clip_item.is_some(), egui::Button::new(egui::RichText::new("◀").small()).frame(false))
+        .on_hover_text(tl!("Previous Color Keyframe"));
+    app.auto.add("lumetri.keyframe.prev", prev_btn.rect, "Previous Color Keyframe");
+    if prev_btn.clicked()
+        && let (Some(k), Some(it)) = (prev_kf, clip_item)
+    {
+        let seq_t = crate::panels::effect_controls::timeline_time_of(it, k);
+        let _ = app.session.execute("playhead.set", json!({"time": seq_t.0}));
+    }
 }

@@ -191,7 +191,9 @@ fn edit_mask<R>(s: &mut Session, p: &Value, label: &str, f: impl FnOnce(&mut Mas
         let e = &mut it.effects[ei];
         let mi = mask_i.ok_or_else(|| bad(label, "need `mask`"))?;
         let m = e.masks.get_mut(mi).ok_or_else(|| bad(label, format!("no mask {mi}")))?;
-        f(m, mt)
+        let res = f(m, mt)?;
+        it.sync_color_graph_from_lumetri_effects();
+        Ok(res)
     };
     match str_p(p, "merge") {
         Some(k) => {
@@ -213,8 +215,18 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
     let center = p.get("center").and_then(pt).unwrap_or(Vec2::new(w / 2.0, h / 2.0));
     let r = w.min(h) * 0.2;
     let size = p.get("size").and_then(pt).unwrap_or(Vec2::new(r * 2.0, r * 2.0));
+    let mut is_gradient = shape == "gradient";
     let path = match p.get("path") {
-        Some(v) => path_from_json(v).ok_or_else(|| bad("masks.add", "bad `path`"))?,
+        Some(v) => {
+            let parsed = path_from_json(v).ok_or_else(|| bad("masks.add", "bad `path`"))?;
+            if is_gradient && parsed.len() != 2 {
+                return Err(bad("masks.add", "gradient mask needs 2 vertices [split, end]"));
+            }
+            if !parsed.closed && parsed.len() == 2 {
+                is_gradient = true;
+            }
+            parsed
+        }
         None => match shape.as_str() {
             "ellipse" => MaskPath::ellipse(center, size * 0.5),
             "polygon" | "rectangle" | "rect" | "4-point" => {
@@ -225,10 +237,19 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
                     None => MaskPath::rect(x0, y0, x1, y1),
                 }
             }
+            "hexagon" | "hex" | "resolve_polygon" => {
+                let sides = u64_p(p, "sides").unwrap_or(6) as usize;
+                MaskPath::regular_polygon(center, size * 0.5, sides)
+            }
+            "gradient" => MaskPath::gradient(center, center + Vec2::new(0.0, (size.y * 0.6).max(20.0))),
             _ => return Err(bad("masks.add", "a bezier mask needs `path` (pen points)")),
         },
     };
-    if path.len() < 3 && path.closed {
+    if is_gradient {
+        if path.len() != 2 {
+            return Err(bad("masks.add", "a gradient mask needs 2 vertices"));
+        }
+    } else if path.len() < 3 && path.closed {
         return Err(bad("masks.add", "a mask needs at least 3 vertices"));
     }
     let eff = p.get("effect").cloned();
@@ -246,8 +267,16 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
         }
         let n = e.masks.iter().filter_map(|m| m.name.strip_prefix("Mask (")?.strip_suffix(')')?.parse::<usize>().ok()).max().unwrap_or(0) + 1;
         let name = format!("Mask ({n})");
-        e.masks.push(Mask::new(name.clone(), path));
+        let new_mask = if is_gradient {
+            let p0 = path.vertices.first().map_or(center, |v| v.p);
+            let p1 = path.vertices.get(1).map_or(center + Vec2::new(0.0, (size.y * 0.6).max(20.0)), |v| v.p);
+            Mask::gradient(name.clone(), p0, p1, (p1 - p0).length().max(20.0))
+        } else {
+            Mask::new(name.clone(), path)
+        };
+        e.masks.push(new_mask);
         let mi = e.masks.len() - 1;
+        it.sync_color_graph_from_lumetri_effects();
         st.selected_mask = Some(MaskSel { clip, effect: ei, mask: mi });
         st.selected_effect = None;
         Ok((ei, mi, name))
@@ -270,6 +299,7 @@ fn remove(s: &mut Session, p: &Value) -> Result<Value> {
             return Err(bad("masks.remove", format!("no mask {mask_i}")));
         }
         e.masks.remove(mask_i);
+        it.sync_color_graph_from_lumetri_effects();
         if st.selected_mask.is_some_and(|x| x.clip == clip && x.effect == ei) {
             st.selected_mask = None;
         }
@@ -293,7 +323,12 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let name = str_p(p, "name").map(str::to_string);
     let inverted = bool_p(p, "inverted");
-    let nums: Vec<(&str, f64)> = ["feather", "opacity", "expansion"].into_iter().filter_map(|k| f64_p(p, k).map(|v| (k, v))).collect();
+    let mut nums: Vec<(&str, f64)> = ["feather", "feather_balance", "opacity", "expansion"].into_iter().filter_map(|k| f64_p(p, k).map(|v| (k, v))).collect();
+    if !nums.iter().any(|(k, _)| *k == "feather_balance")
+        && let Some(v) = f64_p(p, "featherBalance")
+    {
+        nums.push(("feather_balance", v));
+    }
     edit_mask(s, p, "Change Mask", move |m, t| {
         if let Some(n) = name {
             m.name = n;
@@ -310,6 +345,7 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
         for (k, v) in nums {
             let v = match k {
                 "feather" => v.max(0.0),
+                "feather_balance" => v.clamp(-100.0, 100.0),
                 "opacity" => v.clamp(0.0, 100.0),
                 _ => v,
             };

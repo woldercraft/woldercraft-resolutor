@@ -78,6 +78,22 @@ impl MaskPath {
     pub fn polygon(points: &[Vec2]) -> Self {
         Self { vertices: points.iter().map(|p| MaskVertex::corner(*p)).collect(), closed: true }
     }
+    /// A regular convex `sides`-sided polygon centered at `center` with circumradius `radius`.
+    pub fn regular_polygon(center: Vec2, radius: Vec2, sides: usize) -> Self {
+        let n = sides.clamp(3, 32);
+        let pts: Vec<Vec2> = (0..n)
+            .map(|i| {
+                let a = -std::f64::consts::FRAC_PI_2 + (i as f64 / n as f64) * std::f64::consts::TAU;
+                center + Vec2::new(a.cos() * radius.x, a.sin() * radius.y)
+            })
+            .collect();
+        Self::polygon(&pts)
+    }
+    /// A 2-point linear gradient definition (`vertices[0]` = 50%/neutral split line,
+    /// `vertices[1]` = falloff direction and reference distance).
+    pub fn gradient(p0: Vec2, p1: Vec2) -> Self {
+        Self { vertices: vec![MaskVertex::corner(p0), MaskVertex::corner(p1)], closed: false }
+    }
     /// An axis-aligned rectangle (Premiere's 4-point polygon mask default).
     pub fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Self {
         Self::polygon(&[Vec2::new(x0, y0), Vec2::new(x1, y0), Vec2::new(x1, y1), Vec2::new(x0, y1)])
@@ -373,14 +389,33 @@ impl TrackMethod {
     }
 }
 
+/// Geometry interpretation of a [`Mask`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MaskKind {
+    /// Closed polygon / Bézier contour (`MaskPath`).
+    #[default]
+    Path,
+    /// Infinite linear gradient split by two control points (`path.vertices[0..2]`).
+    Gradient,
+}
+
+fn default_feather_balance() -> Param {
+    Param::new(ParamValue::Float(0.0))
+}
+
 /// A mask on an effect instance.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Mask {
     pub name: String,
+    #[serde(default)]
+    pub kind: MaskKind,
     /// `ParamValue::Path`.
     pub path: Param,
     /// Feather width in clip pixels (≥ 0).
     pub feather: Param,
+    /// Feather bias (-100 = Inside Only, 0 = Centered, +100 = Outside Only).
+    #[serde(default = "default_feather_balance")]
+    pub feather_balance: Param,
     /// 0..100 %.
     pub opacity: Param,
     /// Clip pixels (negative shrinks).
@@ -400,8 +435,10 @@ impl Mask {
     pub fn new(name: impl Into<String>, path: MaskPath) -> Self {
         Self {
             name: name.into(),
+            kind: MaskKind::Path,
             path: Param::new(ParamValue::Path(path)),
             feather: Param::new(ParamValue::Float(10.0)),
+            feather_balance: default_feather_balance(),
             opacity: Param::new(ParamValue::Float(100.0)),
             expansion: Param::new(ParamValue::Float(0.0)),
             inverted: false,
@@ -409,10 +446,17 @@ impl Mask {
             track_method: TrackMethod::default(),
         }
     }
+    pub fn gradient(name: impl Into<String>, p0: Vec2, p1: Vec2, feather: f64) -> Self {
+        let mut m = Self::new(name, MaskPath::gradient(p0, p1));
+        m.kind = MaskKind::Gradient;
+        m.feather = Param::new(ParamValue::Float(feather.max(0.0)));
+        m
+    }
     pub fn param(&self, id: &str) -> Option<&Param> {
         match id {
             "path" => Some(&self.path),
             "feather" => Some(&self.feather),
+            "feather_balance" => Some(&self.feather_balance),
             "opacity" => Some(&self.opacity),
             "expansion" => Some(&self.expansion),
             _ => None,
@@ -422,6 +466,7 @@ impl Mask {
         match id {
             "path" => Some(&mut self.path),
             "feather" => Some(&mut self.feather),
+            "feather_balance" => Some(&mut self.feather_balance),
             "opacity" => Some(&mut self.opacity),
             "expansion" => Some(&mut self.expansion),
             _ => None,

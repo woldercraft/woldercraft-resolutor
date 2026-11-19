@@ -12,7 +12,7 @@
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
 use filmcraft_geom::{Affine, Vec2};
-use filmcraft_project::{ClipId, EffectInstance, MaskMode, MaskPath, MaskVertex, TrackItem};
+use filmcraft_project::{ClipId, EffectInstance, MaskKind, MaskMode, MaskPath, MaskVertex, TrackItem};
 use filmcraft_time::Tick;
 use serde_json::{Value, json};
 
@@ -258,6 +258,10 @@ pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, fra
     let expansion = m.expansion.f64_at(mt);
     let col = Color32::from_rgb(0x5a, 0xb4, 0xff);
     let painter = ui.painter().with_clip_rect(pic.expand(16.0));
+    if m.kind == MaskKind::Gradient {
+        gradient_overlay(app, ui, &painter, &path, &to_screen, &lin_inv, sel.clip.0, sel.effect, sel.mask, col);
+        return;
+    }
     let flat = path.flatten(0.5);
     let screen: Vec<Pos2> = flat.iter().map(|v| sp(&to_screen, *v)).collect();
     painter.add(egui::Shape::closed_line(screen.clone(), Stroke::new(1.5, col)));
@@ -407,6 +411,60 @@ pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, fra
             actions.push(("masks.addVertex".into(), with(json!({"after": i, "at": [c.x, c.y]}))));
         }
     }
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) && ui.ctx().memory(|m| m.focused().is_none()) {
+        actions.push(("masks.select".into(), json!({"none": true})));
+    }
+    for (c, p) in actions {
+        if let Err(e) = app.session.execute(&c, p) {
+            app.ui.status = e.to_string();
+        }
+    }
+}
+
+/// On-monitor gizmo for `MaskKind::Gradient`: solid start line at `p0`, dashed falloff line
+/// at `p1`, connecting direction vector, and draggable `p0`/`p1` vertex handles.
+#[allow(clippy::too_many_arguments)]
+fn gradient_overlay(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    path: &MaskPath,
+    to_screen: &Affine,
+    lin_inv: &Affine,
+    clip: u64,
+    effect: usize,
+    mask: usize,
+    col: Color32,
+) {
+    let p0 = path.vertices.first().map(|v| v.p).unwrap_or(Vec2::new(-120.0, 0.0));
+    let p1 = path.vertices.get(1).map(|v| v.p).unwrap_or(Vec2::new(120.0, 0.0));
+    let dir = p1 - p0;
+    let len = dir.length();
+    let perp = if len > 1e-4 { Vec2::new(-dir.y / len, dir.x / len) } else { Vec2::new(0.0, 1.0) };
+    let extent = 4000.0;
+    let s0 = sp(to_screen, p0);
+    let s1 = sp(to_screen, p1);
+    painter.line_segment([sp(to_screen, p0 - perp * extent), sp(to_screen, p0 + perp * extent)], Stroke::new(1.5, col));
+    painter.extend(egui::Shape::dashed_line(
+        &[sp(to_screen, p1 - perp * extent), sp(to_screen, p1 + perp * extent)],
+        Stroke::new(1.0, col.gamma_multiply(0.7)),
+        5.0,
+        4.0,
+    ));
+    painter.line_segment([s0, s1], Stroke::new(1.2, col.gamma_multiply(0.9)));
+
+    let target = json!({"clip": clip, "effect": effect, "mask": mask});
+    let gesture_id = egui::Id::unique("mask-gesture");
+    let mut gesture: u64 = ui.data(|d| d.get_temp(gesture_id)).unwrap_or(0);
+    if ui.input(|i| i.pointer.any_pressed()) {
+        gesture += 1;
+        ui.data_mut(|d| d.insert_temp(gesture_id, gesture));
+    }
+    let sel_v_id = egui::Id::unique(("mask-sel-vertex", clip, effect, mask));
+    let n_v = path.vertices.len();
+    let mut sel_vs: Vec<usize> = ui.data(|d| d.get_temp::<(usize, Vec<usize>)>(sel_v_id)).filter(|(n, _)| *n == n_v).map(|(_, v)| v).unwrap_or_default();
+    let mut actions: Vec<(String, Value)> = Vec::new();
+    vertex_handles(app, ui, painter, path, to_screen, lin_inv, &target, &mut sel_vs, sel_v_id, n_v, gesture, &mut actions);
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) && ui.ctx().memory(|m| m.focused().is_none()) {
         actions.push(("masks.select".into(), json!({"none": true})));
     }

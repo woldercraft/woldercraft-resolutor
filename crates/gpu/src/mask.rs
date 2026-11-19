@@ -89,10 +89,11 @@ impl GpuMask {
         for m in &active {
             let start = (pts.len() / 2) as u32;
             pts.extend(m.pts.iter().flatten());
-            for v in [start, m.pts.len() as u32, m.mode.index(), u32::from(m.inverted)] {
+            let flags = u32::from(m.inverted) | (u32::from(m.kind == filmcraft_project::MaskKind::Gradient) << 1);
+            for v in [start, m.pts.len() as u32, m.mode.index(), flags] {
                 infos.extend_from_slice(&v.to_le_bytes());
             }
-            for v in [m.feather, m.expansion, m.opacity, 0.0] {
+            for v in [m.feather, m.expansion, m.opacity, m.feather_balance] {
                 infos.extend_from_slice(&v.to_le_bytes());
             }
         }

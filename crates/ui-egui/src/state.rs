@@ -263,6 +263,54 @@ impl Default for TimelineView {
     }
 }
 
+/// Monitor wipe mode comparing current frame against a Gallery still or reference frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WipeMode {
+    #[default]
+    Horizontal,
+    Vertical,
+    Diagonal,
+    Box,
+}
+
+impl WipeMode {
+    pub const ALL: [WipeMode; 4] = [WipeMode::Horizontal, WipeMode::Vertical, WipeMode::Diagonal, WipeMode::Box];
+    pub fn label(self) -> &'static str {
+        match self {
+            WipeMode::Horizontal => "Horizontal",
+            WipeMode::Vertical => "Vertical",
+            WipeMode::Diagonal => "Diagonal",
+            WipeMode::Box => "Box",
+        }
+    }
+    pub fn next(self) -> Self {
+        match self {
+            WipeMode::Horizontal => WipeMode::Vertical,
+            WipeMode::Vertical => WipeMode::Diagonal,
+            WipeMode::Diagonal => WipeMode::Box,
+            WipeMode::Box => WipeMode::Horizontal,
+        }
+    }
+}
+
+/// Interactive Image Wipe state on the Program monitor.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProgramWipeState {
+    pub enabled: bool,
+    pub still_id: Option<u64>,
+    pub mode: WipeMode,
+    pub split: f32,
+    pub invert: bool,
+}
+
+impl Default for ProgramWipeState {
+    fn default() -> Self {
+        Self { enabled: false, still_id: None, mode: WipeMode::Horizontal, split: 0.5, invert: false }
+    }
+}
+
 /// Video thumbnails on timeline clips (Timeline wrench menu ▸ Show Video Thumbnails).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThumbnailMode {
@@ -471,6 +519,8 @@ pub enum EyedropperKind {
     ColorParam,
     LumetriWb,
     LumetriHsl,
+    /// `true` subtracts (`-` sample), `false` adds (`+` sample) to `hsl_3d_samples`.
+    Lumetri3d(bool),
     LumetriCurve(String),
 }
 
@@ -580,6 +630,13 @@ pub struct UiState {
     /// Active Lumetri color node index for node-based grading (0-indexed).
     #[serde(default)]
     pub active_color_node: usize,
+    /// Viewer Highlight overlay (`0` = Off, `1` = B/W Matte, `2` = Color/Gray, `3` = Color/Black),
+    /// toggled without mutating the project or undo history (`Shift+H`).
+    #[serde(default)]
+    pub color_highlight: u8,
+    /// Preferred Highlight display mode (`1` = B/W Matte, `2` = Color/Gray, `3` = Color/Black).
+    #[serde(default = "default_highlight_style")]
+    pub color_highlight_style: u8,
     /// User custom labels for color nodes (`clip:node_index` -> label).
     #[serde(default)]
     pub color_node_labels: std::collections::HashMap<String, String>,
@@ -595,6 +652,9 @@ pub struct UiState {
     /// Active Color Group being graded in Color workspace (`None` = grade individual clip).
     #[serde(default)]
     pub active_color_group: Option<filmcraft_project::ColorGroupId>,
+    /// Active pipeline scope in Color Nodes (`PreClip`, `Clip`, `PostClip`, `Timeline`).
+    #[serde(default)]
+    pub active_color_scope: filmcraft_project::ColorScopeKind,
     /// Multi-selected clip IDs in the Color workspace Clips panel.
     #[serde(default)]
     pub selected_color_clips: Vec<filmcraft_project::ClipId>,
@@ -625,6 +685,21 @@ pub struct UiState {
     /// Dual/split palette view enabled in Lumetri Color panel.
     #[serde(default)]
     pub lumetri_dual_view: bool,
+    /// Active sub-mode inside Primaries Wheels (`0=Wheels`, `1=Bars`, `2=Log`, `3=HDR`).
+    #[serde(default)]
+    pub lumetri_wheels_mode: u8,
+    /// Active Gallery tab (`0 = Stills`, `1 = PowerGrades`).
+    #[serde(default)]
+    pub gallery_tab: u8,
+    /// Selected still/powergrade id in Gallery.
+    #[serde(skip)]
+    pub selected_still_id: Option<u64>,
+    /// User-level persistent PowerGrades loaded from `powergrades.json`.
+    #[serde(skip)]
+    pub powergrades: Vec<filmcraft_project::ColorStill>,
+    /// Interactive Image Wipe state in the Program monitor.
+    #[serde(default)]
+    pub program_wipe: ProgramWipeState,
     /// Custom order of Lumetri palette tool buttons.
     #[serde(default = "default_lumetri_tool_order")]
     pub lumetri_tool_order: Vec<String>,
@@ -1167,6 +1242,11 @@ fn default_lumetri_tool_order() -> Vec<String> {
         "HSL Secondary".into(),
         "Creative".into(),
         "Vignette".into(),
+        "ColorSlice".into(),
+        "Color Warper".into(),
+        "RGB Mixer".into(),
+        "Color Space Transform".into(),
+        "Sizing".into(),
     ]
 }
 
@@ -1176,6 +1256,10 @@ fn default_lumetri_bar_pos() -> String {
 
 fn default_lumetri_match_ref() -> String {
     "00:00:00:00".into()
+}
+
+fn default_highlight_style() -> u8 {
+    1
 }
 
 fn yes() -> bool {
@@ -1222,11 +1306,14 @@ impl Default for UiState {
             keyframe_selection: Vec::new(),
             essential_sound_tab: "Edit".into(),
             active_color_node: 0,
+            color_highlight: 0,
+            color_highlight_style: default_highlight_style(),
             color_node_labels: std::collections::HashMap::new(),
             color_node_positions: std::collections::HashMap::new(),
             color_node_pan: [0.0, 0.0],
             color_node_zoom: 1.0,
             active_color_group: None,
+            active_color_scope: filmcraft_project::ColorScopeKind::Clip,
             selected_color_clips: Vec::new(),
             color_clip_filter: String::new(),
             copied_color_clip: None,
@@ -1237,6 +1324,11 @@ impl Default for UiState {
             lumetri_active_tool: default_lumetri_tool(),
             lumetri_secondary_tool: default_lumetri_secondary_tool(),
             lumetri_dual_view: false,
+            lumetri_wheels_mode: 0,
+            gallery_tab: 0,
+            selected_still_id: None,
+            powergrades: Vec::new(),
+            program_wipe: ProgramWipeState::default(),
             lumetri_tool_order: default_lumetri_tool_order(),
             lumetri_bar_pos: default_lumetri_bar_pos(),
             lumetri_match_ref: default_lumetri_match_ref(),

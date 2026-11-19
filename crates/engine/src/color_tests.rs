@@ -607,3 +607,85 @@ fn apply_match_export_cube_and_merge_keys_work_on_color_group() {
     s.execute("color.groupSetParam", json!({"group": gid, "param": "temperature", "value": 25.0, "merge": "wheel-offset", "begin": true})).unwrap();
     assert_eq!(undo_len(&mut s), undo_before + 2, "`begin: true` starts a new undo step");
 }
+
+#[test]
+fn color_graph_dag_scopes_outside_parallel_layer_shared_and_cycle_rejection() {
+    let mut s = demo();
+    let clip = pick_clip(&mut s);
+    let grp_res = s.execute("color.groupCreate", json!({"clips": [clip.0], "name": "Scene A"})).unwrap();
+    let gid = grp_res["group"].as_u64().unwrap();
+
+    // 1. Add Pre-Clip node, Clip Outside + Parallel + Layer nodes, Post-Clip node, and Timeline node
+    let pre = s.execute("color.graph.addNode", json!({"scope": "pre_clip", "group": gid, "kind": "serial"})).unwrap();
+    let pre_n = pre["node"].as_u64().unwrap();
+    s.execute("color.graph.setNodeParam", json!({"scope": "pre_clip", "group": gid, "node": pre_n, "param": "exposure", "value": 0.4})).unwrap();
+
+    let c1 = s.execute("color.graph.addNode", json!({"scope": "clip", "clip": clip.0, "kind": "serial"})).unwrap()["node"].as_u64().unwrap();
+    let c_out = s.execute("color.graph.addNode", json!({"scope": "clip", "clip": clip.0, "kind": "outside", "after": c1})).unwrap()["node"].as_u64().unwrap();
+    s.execute("color.graph.setNodeParam", json!({"scope": "clip", "clip": clip.0, "node": c_out, "param": "saturation", "value": 40.0})).unwrap();
+    s.execute("color.graph.setKeyParams", json!({"scope": "clip", "clip": clip.0, "node": c_out, "inputGain": 1.2, "outputGain": 0.8})).unwrap();
+
+    let par = s.execute("color.graph.addNode", json!({"scope": "clip", "clip": clip.0, "kind": "parallel", "after": c_out})).unwrap();
+    let par_mixer = par["mixer"].as_u64().unwrap();
+    let lay = s.execute("color.graph.addNode", json!({"scope": "clip", "clip": clip.0, "kind": "layer", "after": par_mixer})).unwrap();
+    let lay_mixer = lay["mixer"].as_u64().unwrap();
+    s.execute("color.graph.setLayerMixer", json!({"scope": "clip", "clip": clip.0, "node": lay_mixer, "port": 1, "blend": "Screen", "gain": 0.75})).unwrap();
+
+    // 2. Reject cyclic connection without mutating undo history
+    let undo_before = s.execute("history.list", json!({})).unwrap()["undo"].as_array().unwrap().len();
+    let cyclic = s.execute("color.graph.connect", json!({"scope": "clip", "clip": clip.0, "kind": "rgb", "from": lay_mixer, "to": c1}));
+    assert!(cyclic.is_err(), "cycle must be rejected");
+    assert_eq!(s.execute("history.list", json!({})).unwrap()["undo"].as_array().unwrap().len(), undo_before);
+
+    // 3. Shared node creation & unlinking, plus Timeline-level color node
+    let shared = s.execute("color.graph.shareNode", json!({"scope": "clip", "clip": clip.0, "node": c1, "name": "HeroGrade"})).unwrap();
+    assert!(shared["shared"].as_u64().is_some());
+    s.execute("color.graph.unlinkShared", json!({"scope": "clip", "clip": clip.0, "node": c1})).unwrap();
+
+    let tl_n = s.execute("color.graph.addNode", json!({"scope": "timeline", "kind": "serial"})).unwrap()["node"].as_u64().unwrap();
+    s.execute("color.graph.setNodeParam", json!({"scope": "timeline", "node": tl_n, "param": "contrast", "value": 18.0})).unwrap();
+
+    // 4. Render program frame through Pre-Clip -> Clip DAG -> Post-Clip -> Timeline
+    let rendered = s.render_program(0.25).expect("program render with full 4-scope DAG");
+    assert!(rendered.w > 0 && rendered.h > 0);
+}
+
+#[test]
+fn still_grab_apply_rename_delete_and_undo() {
+    let mut s = demo();
+    let clips: Vec<_> = s.active_sequence().unwrap().video_tracks[0].items.iter().map(|it| it.id).collect();
+    assert!(clips.len() >= 2);
+    let (c0, c1) = (clips[0], clips[1]);
+
+    s.execute("effects.apply", json!({"clips": [c0.0], "effect": "lumetri"})).unwrap();
+    s.execute("effects.setParam", json!({"clip": c0.0, "effect": "lumetri", "param": "exposure", "value": 0.65})).unwrap();
+
+    let grabbed = s.execute("color.stillGrab", json!({"clip": c0.0})).unwrap();
+    let sid = grabbed["id"].as_u64().unwrap();
+    assert_eq!(s.project.color_stills.len(), 1);
+    assert!(s.project.color_stills[0].has_valid_thumb());
+
+    s.execute("color.stillRename", json!({"id": sid, "name": "Warm Sunset"})).unwrap();
+    assert_eq!(s.project.color_stills[0].label, "Warm Sunset");
+
+    s.execute("color.stillApply", json!({"id": sid, "clips": [c1.0], "mode": "replace"})).unwrap();
+    let c1_exp = s
+        .active_sequence()
+        .unwrap()
+        .find_item(c1)
+        .unwrap()
+        .1
+        .effects
+        .iter()
+        .find(|e| e.effect == "lumetri")
+        .unwrap()
+        .param("exposure")
+        .unwrap()
+        .f64_at(filmcraft_time::Tick::ZERO);
+    assert!((c1_exp - 0.65).abs() < 1e-4);
+
+    s.execute("color.stillDelete", json!({"id": sid})).unwrap();
+    assert!(s.project.color_stills.is_empty());
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.project.color_stills.len(), 1);
+}

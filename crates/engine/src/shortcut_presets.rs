@@ -502,6 +502,8 @@ pub const DAVINCI_RESOLVE: &[Entry] = &[
     ("view.zoomIn", "Cmd+=", ""),
     ("view.zoomOut", "Cmd+-", ""),
     ("view.zoomToSequence", "Shift+Z", ""),
+    ("color.toggleHighlight", "Shift+H", ""),
+    ("color.stillGrab", "Cmd+Alt+G", ""),
     // Markers & In/Out
     ("markers.markIn", "I", ""),
     ("markers.markOut", "O", ""),

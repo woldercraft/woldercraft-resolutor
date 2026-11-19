@@ -7,6 +7,7 @@ pub mod clip_dialogs;
 pub mod clip_mismatch;
 pub mod color_clips;
 pub mod color_dialogs;
+pub mod color_gallery;
 pub mod color_groups;
 pub mod color_nodes;
 pub mod custom_panels;
@@ -160,7 +161,13 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect)
         | PanelKind::ColorMasks
         | PanelKind::ColorQualifier
         | PanelKind::ColorCreative
-        | PanelKind::ColorVignette => lumetri::show(app, ui, rect, p),
+        | PanelKind::ColorVignette
+        | PanelKind::ColorSlice
+        | PanelKind::ColorWarper
+        | PanelKind::ColorRgbMixer
+        | PanelKind::ColorCst
+        | PanelKind::ColorSizing => lumetri::show(app, ui, rect, p),
+        PanelKind::ColorGallery => color_gallery::show(app, ui, rect),
         PanelKind::InspectorVideo if graphics::graphic_selected(app) => graphics::properties(app, ui, rect),
         PanelKind::InspectorVideo if text::caption_selected(app) => text::caption_properties(app, ui, rect),
         PanelKind::InspectorVideo => effect_controls::inspector_video_panel(app, ui, rect),
@@ -501,7 +508,22 @@ pub(crate) fn panel_items(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKin
         ui.separator();
         close |= monitor::source_panel_menu(app, ui);
     }
-    if p == PanelKind::LumetriColor {
+    if matches!(
+        p,
+        PanelKind::LumetriColor
+            | PanelKind::ColorPrimaries
+            | PanelKind::ColorWheels
+            | PanelKind::ColorCurves
+            | PanelKind::ColorMasks
+            | PanelKind::ColorQualifier
+            | PanelKind::ColorCreative
+            | PanelKind::ColorVignette
+            | PanelKind::ColorSlice
+            | PanelKind::ColorWarper
+            | PanelKind::ColorRgbMixer
+            | PanelKind::ColorCst
+            | PanelKind::ColorSizing
+    ) {
         ui.separator();
         close |= lumetri::panel_menu(app, ui);
     }

@@ -568,12 +568,7 @@ impl DockContent<PanelKind> for FilmContent<'_> {
 
     fn logical_label(&self, panel: &PanelKind) -> String {
         if let PanelKind::Custom(id) = panel {
-            return self
-                .app
-                .custom_panels
-                .title(*id)
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("{} {}", crate::i18n::t("Custom Panel"), id + 1));
+            return self.app.custom_panels.title(*id).map(str::to_string).unwrap_or_else(|| format!("{} {}", crate::i18n::t("Custom Panel"), id + 1));
         }
         crate::i18n::t(panel.title()).to_string()
     }

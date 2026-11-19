@@ -3794,6 +3794,11 @@ fn build() -> Vec<CommandSpec> {
                         // at the end of the stack, as in Premiere, so the indices already
                         // handed out (graphics.list effectIndex…) stay valid (#1879); the
                         // renderer applies the intrinsic ones after the standard ones anyway
+                        if def.id == "lumetri"
+                            && let Some(cg) = i.color_graph.as_mut()
+                        {
+                            let _ = cg.add_serial_node(None, inst.clone());
+                        }
                         i.effects.push(inst);
                         let pos = i.effects.len() - 1;
                         applied.push(json!({"clip": i.id.0, "index": pos, "effect": def.id}));
@@ -3943,6 +3948,7 @@ fn build() -> Vec<CommandSpec> {
                             }
                         }
                     }
+                    it.sync_color_graph_from_lumetri_effects();
                     Ok((keyframes, accepted_value))
                 })?;
                 // 0 keyframes: the value is static (`time` was not used)
@@ -3984,6 +3990,7 @@ fn build() -> Vec<CommandSpec> {
                 if let Some(e) = it.effects.get_mut(idx) {
                     e.enabled = !e.enabled;
                 }
+                it.sync_color_graph_from_lumetri_effects();
                 Ok(())
             })?;
             Ok(Value::Null)
@@ -3998,6 +4005,7 @@ fn build() -> Vec<CommandSpec> {
                 if let Some(e) = it.effects.get_mut(idx) {
                     e.label = next.clone();
                 }
+                it.sync_color_graph_from_lumetri_effects();
                 Ok(())
             })?;
             Ok(Value::Null)
@@ -4014,6 +4022,7 @@ fn build() -> Vec<CommandSpec> {
                 if let Some(e) = it.effects.get_mut(idx) {
                     reset_params(e, None, frame, source, mt);
                 }
+                it.sync_color_graph_from_lumetri_effects();
                 Ok(())
             })?;
             Ok(Value::Null)

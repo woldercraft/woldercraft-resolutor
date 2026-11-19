@@ -476,6 +476,19 @@ fn draw_one(app: &mut FilmcraftApp, ui: &mut egui::Ui, cell: Rect, k: ScopeKind,
             }
             ui.painter().text(cell.left_top() + vec2(6.0, 4.0), Align2::LEFT_TOP, k.label(), Tokens::ui(9.0), Color32::from_gray(110));
         }
+        ScopeKind::Cie1931 => {
+            let side = (cell.width().min(cell.height()) - 18.0).max(8.0);
+            let sq = Rect::from_center_size(cell.center(), vec2(side, side));
+            let tex = cached_texture(&ctx, slot, key, || {
+                let c = sc::cie1931(&sf.signal, &p);
+                sc::paint::cie1931(&c, gain)
+            });
+            cie_graticule(ui, sq);
+            if let Some(tex) = tex {
+                ui.painter().image(tex.id(), sq, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
+            ui.painter().text(cell.left_top() + vec2(6.0, 4.0), Align2::LEFT_TOP, k.label(), Tokens::ui(9.0), Color32::from_gray(110));
+        }
     }
 }
 
@@ -591,4 +604,48 @@ fn vector_graticule(ui: &egui::Ui, sq: Rect, space: ColorSpace, targets: Targets
             }
         }
     }
+}
+
+/// Spectral locus horseshoe, Rec.709 / P3-D65 / Rec.2020 gamut triangles, and D65 white point.
+fn cie_graticule(ui: &egui::Ui, sq: Rect) {
+    let painter = ui.painter();
+    let to_screen =
+        |cx: f32, cy: f32| pos2(sq.min.x + (cx / sc::CieChromaticity::X_MAX) * sq.width(), sq.max.y - (cy / sc::CieChromaticity::Y_MAX) * sq.height());
+    // Subtle axes
+    for i in 1..=8 {
+        let f = i as f32 * 0.1;
+        let x = to_screen(f, 0.0).x;
+        let y = to_screen(0.0, f).y;
+        painter.line_segment([pos2(x, sq.min.y), pos2(x, sq.max.y)], Stroke::new(1.0, GRATICULE));
+        if f <= sc::CieChromaticity::Y_MAX {
+            painter.line_segment([pos2(sq.min.x, y), pos2(sq.max.x, y)], Stroke::new(1.0, GRATICULE));
+        }
+    }
+    // Spectral locus + purple line
+    let locus: Vec<egui::Pos2> = sc::CIE_SPECTRAL_LOCUS.iter().map(|&(x, y)| to_screen(x, y)).collect();
+    if let (Some(&first), Some(&last)) = (locus.first(), locus.last()) {
+        let mut pts = locus;
+        pts.push(first);
+        painter.add(egui::Shape::line(pts, Stroke::new(1.2, Color32::from_gray(105))));
+        let _ = last;
+    }
+    // Gamut triangles
+    for (gamut, col, label_pos) in [
+        (filmcraft_color::Gamut::Bt2020, Color32::from_rgba_unmultiplied(110, 195, 255, 130), "2020"),
+        (filmcraft_color::Gamut::P3D65, Color32::from_rgba_unmultiplied(235, 185, 90, 140), "P3"),
+        (filmcraft_color::Gamut::Bt709, Color32::from_rgba_unmultiplied(210, 210, 210, 170), "709"),
+    ] {
+        let pr = gamut.primaries();
+        let tri = [
+            to_screen(pr[0][0] as f32, pr[0][1] as f32),
+            to_screen(pr[1][0] as f32, pr[1][1] as f32),
+            to_screen(pr[2][0] as f32, pr[2][1] as f32),
+            to_screen(pr[0][0] as f32, pr[0][1] as f32),
+        ];
+        painter.add(egui::Shape::line(tri.to_vec(), Stroke::new(1.0, col)));
+        painter.text(tri[1] + vec2(4.0, -4.0), Align2::LEFT_BOTTOM, label_pos, Tokens::ui(8.5), col);
+    }
+    // D65 white point
+    let d65 = to_screen(0.3127, 0.3290);
+    painter.circle_stroke(d65, 3.0, Stroke::new(1.0, Color32::WHITE));
 }

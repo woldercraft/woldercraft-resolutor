@@ -1253,12 +1253,7 @@ pub struct SilencePrefs {
 
 impl Default for SilencePrefs {
     fn default() -> Self {
-        Self {
-            threshold: DEFAULT_THRESHOLD_DB,
-            pre_head: DEFAULT_PRE_HEAD_FRAMES,
-            post_tail: DEFAULT_POST_TAIL_FRAMES,
-            min_strip: DEFAULT_MIN_STRIP_FRAMES,
-        }
+        Self { threshold: DEFAULT_THRESHOLD_DB, pre_head: DEFAULT_PRE_HEAD_FRAMES, post_tail: DEFAULT_POST_TAIL_FRAMES, min_strip: DEFAULT_MIN_STRIP_FRAMES }
     }
 }
 

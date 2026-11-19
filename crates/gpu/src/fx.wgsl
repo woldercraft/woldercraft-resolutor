@@ -64,6 +64,23 @@ const OP_HSL_KEY: u32 = 41u;
 const OP_HSL_MEDIAN: u32 = 42u;
 const OP_HSL_APPLY: u32 = 43u;
 const OP_MASK_MIX: u32 = 44u;
+const OP_MIDTONE_DETAIL: u32 = 45u;
+const OP_COLOR_SLICE: u32 = 46u;
+const OP_COLOR_WARPER: u32 = 47u;
+const OP_HSL_MORPH: u32 = 48u;
+const OP_NODE_KEY_FINISH: u32 = 49u;
+const OP_RESTORE_ORIG: u32 = 50u;
+const OP_NODE_KEY_MIX: u32 = 51u;
+const OP_DAG_KEY_COMBINE: u32 = 52u;
+const OP_DAG_PARALLEL: u32 = 53u;
+const OP_DAG_LAYER: u32 = 54u;
+const OP_DAG_SPLIT: u32 = 55u;
+const OP_DAG_COMBINE: u32 = 56u;
+const OP_LOG_WHEELS: u32 = 57u;
+const OP_HDR_WHEELS: u32 = 58u;
+const OP_RGB_MIXER: u32 = 59u;
+const OP_CST: u32 = 60u;
+const OP_NODE_SIZING: u32 = 61u;
 
 fn size() -> vec2<i32> {
     return vec2<i32>(i32(u.i0.y), i32(u.i0.z));
@@ -561,6 +578,24 @@ fn color_op(op: u32, c: vec3<f32>) -> vec3<f32> {
     }
 }
 
+fn apply_contrast_pivot_wgsl(v: vec3<f32>, contrast: f32, pivot: f32) -> vec3<f32> {
+    let p = clamp(pivot, 0.05, 0.95);
+    let k = 1.0 + contrast;
+    let q = clamp(v, vec3(0.0), vec3(1.0));
+    if k < 1.0 {
+        return clamp(vec3(p) + (q - vec3(p)) * k, vec3(0.0), vec3(1.0));
+    }
+    if abs(p - 0.5) < 1e-4 {
+        let sc = q * q * (vec3(3.0) - 2.0 * q);
+        return q + (sc - q) * (k - 1.0);
+    }
+    let gamma = 0.6931471805599453 / (-log(p));
+    let w = pow(max(q, vec3(1e-7)), vec3(gamma));
+    let sw = w * w * (vec3(3.0) - 2.0 * w);
+    let s = select(vec3(0.0), pow(max(sw, vec3(1e-7)), vec3(1.0 / gamma)), q > vec3(0.0));
+    return q + (s - q) * (k - 1.0);
+}
+
 fn lumetri_op(c: vec3<f32>, p: vec2<i32>) -> vec3<f32> {
     let s = size();
     let creative_on = u.i1.x != 0u;
@@ -595,17 +630,11 @@ fn lumetri_op(c: vec3<f32>, p: vec2<i32>) -> vec3<f32> {
     let add = nl - max(l, 0.0) * k;
     v = v * k + vec3(add);
 
-    // contrast: smooth S-curve around mid grey
+    // contrast: smooth S-curve around pivot
     let contrast = u.p1.w;
+    let pivot = u.p3.w;
     if abs(contrast) > 1e-4 {
-        let k = 1.0 + contrast;
-        let q = clamp(v, vec3(0.0), vec3(1.0));
-        let sc = q * q * (vec3(3.0) - 2.0 * q);
-        if k >= 1.0 {
-            v = q + (sc - q) * (k - 1.0);
-        } else {
-            v = vec3(0.5) + (q - vec3(0.5)) * k;
-        }
+        v = apply_contrast_pivot_wgsl(v, contrast, pivot);
     }
 
     // faded film: lift blacks and compress
@@ -622,12 +651,22 @@ fn lumetri_op(c: vec3<f32>, p: vec2<i32>) -> vec3<f32> {
         v = v + st_k * (1.0 - l2) + ht_k * l2;
     }
 
-    // saturation & vibrance
+    // primary hue rotation
+    let primary_hue = u.p5.w;
+    if abs(primary_hue) > 1e-5 {
+        var hh = rgb_to_hsl(clamp(v, vec3(0.0), vec3(1.0)));
+        hh.x = fract_euclid(hh.x + primary_hue);
+        v = hsl_to_rgb(hh.x, hh.y, hh.z);
+    }
+
+    // saturation, vibrance & color boost
     let sat = u.p2.y;
     let vib = u.p2.z;
+    let color_boost = u.p4.w;
     let l3 = luma709(v);
-    let cur_sat = max(max(v.x, v.y), v.z) - min(min(v.x, v.y), v.z);
-    let sat_mult = sat * (1.0 + vib * (1.0 - clamp(cur_sat, 0.0, 1.0)));
+    let cur_sat = clamp(max(max(v.x, v.y), v.z) - min(min(v.x, v.y), v.z), 0.0, 1.0);
+    let inv_s = 1.0 - cur_sat;
+    let sat_mult = max(sat * (1.0 + vib * inv_s + color_boost * inv_s * sqrt(inv_s)), 0.0);
     v = vec3(l3) + (v - vec3(l3)) * sat_mult;
 
     // vignette
@@ -654,22 +693,380 @@ fn lumetri_op(c: vec3<f32>, p: vec2<i32>) -> vec3<f32> {
     return dec(v);
 }
 
+fn wheel_smoothstep_wgsl(a: f32, b: f32, x: f32) -> f32 {
+    let t = clamp((x - a) / max(b - a, 1e-4), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
 fn color_wheels_op(c: vec3<f32>) -> vec3<f32> {
     var v = enc(c);
+    let grade_model = u.i1.x;
     let lift_k = u.p0.xyz;
     let gamma_k = u.p1.xyz;
     let gain_k = u.p2.xyz;
+    let offset_k = u.p3.xyz;
 
-    let l = clamp(0.2126 * v.x + 0.7152 * v.y + 0.0722 * v.z, 0.0, 1.0);
-    let wsh = (1.0 - l) * (1.0 - l);
-    let whi = l * l;
-    let wmid = max(1.0 - wsh - whi, 0.0);
+    if grade_model == 0u {
+        let g = max(vec3(1.0) + gain_k, vec3(0.01));
+        var x = v * g;
+        x = x + lift_k * (vec3(1.0) - x);
+        let rx = select(x.x, pow(max(x.x, 1e-12), exp2(-gamma_k.x * 2.0)), abs(gamma_k.x) > 1e-6 && x.x > 0.0);
+        let ry = select(x.y, pow(max(x.y, 1e-12), exp2(-gamma_k.y * 2.0)), abs(gamma_k.y) > 1e-6 && x.y > 0.0);
+        let rz = select(x.z, pow(max(x.z, 1e-12), exp2(-gamma_k.z * 2.0)), abs(gamma_k.z) > 1e-6 && x.z > 0.0);
+        v = vec3(rx, ry, rz) + offset_k;
+    } else {
+        let l = clamp(0.2126 * v.x + 0.7152 * v.y + 0.0722 * v.z, 0.0, 1.0);
+        let wsh = (1.0 - l) * (1.0 - l);
+        let whi = l * l;
+        let wmid = max(1.0 - wsh - whi, 0.0);
 
-    v += lift_k * wsh;
-    v += gamma_k * wmid;
-    v *= vec3(1.0) + gain_k * whi;
+        v += lift_k * wsh;
+        v += gamma_k * wmid;
+        v *= vec3(1.0) + gain_k * whi;
+        v += offset_k;
+    }
 
     return dec(v);
+}
+
+fn log_wheels_op(c: vec3<f32>) -> vec3<f32> {
+    var v = enc(c);
+    let l = clamp(0.2126 * v.x + 0.7152 * v.y + 0.0722 * v.z, 0.0, 1.0);
+    let low_r = u.p0.w;
+    let high_r = u.p1.w;
+    let w_sh = 1.0 - wheel_smoothstep_wgsl(0.0, low_r, l);
+    let w_hi = wheel_smoothstep_wgsl(high_r, 1.0, l);
+    let w_mid = clamp(1.0 - w_sh - w_hi, 0.0, 1.0);
+    v += u.p0.xyz * w_sh + u.p1.xyz * w_mid + u.p2.xyz * w_hi + u.p3.xyz;
+    return dec(v);
+}
+
+fn hdr_wheels_op(c: vec3<f32>) -> vec3<f32> {
+    let z0 = u.p0.xyz;
+    let z1 = vec3(u.p0.w, u.p1.x, u.p1.y);
+    let z2 = vec3(u.p1.z, u.p1.w, u.p2.x);
+    let z3 = vec3(u.p2.y, u.p2.z, u.p2.w);
+    let z4 = u.p3.xyz;
+    let z5 = vec3(u.p3.w, u.p4.x, u.p4.y);
+    let gl = vec3(u.p4.z, u.p4.w, u.p5.x);
+    let sigma = max(u.p5.y, 0.25);
+    let wheel_range = u.p5.z;
+
+    let y = max(0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z, 1e-5);
+    let ev = log2(y / 0.18) - wheel_range;
+    let inv_2s2 = 0.5 / (sigma * sigma);
+    let w0 = 1.0 - wheel_smoothstep_wgsl(-4.5 - sigma, -4.5 + sigma, ev);
+    let w1 = exp(-((ev + 2.5) * (ev + 2.5)) * inv_2s2);
+    let w2 = exp(-((ev + 1.0) * (ev + 1.0)) * inv_2s2);
+    let w3 = exp(-((ev - 0.5) * (ev - 0.5)) * inv_2s2);
+    let w4 = exp(-((ev - 2.0) * (ev - 2.0)) * inv_2s2);
+    let w5 = wheel_smoothstep_wgsl(3.5 - sigma, 3.5 + sigma, ev);
+    let shift = clamp(gl + w0 * z0 + w1 * z1 + w2 * z2 + w3 * z3 + w4 * z4 + w5 * z5, vec3(-12.0), vec3(12.0));
+    return dec(enc(c * exp2(shift)));
+}
+
+fn rgb_mixer_op(c: vec3<f32>) -> vec3<f32> {
+    let v = enc(c);
+    let out = vec3(dot(u.p0.xyz, v), dot(u.p1.xyz, v), dot(u.p2.xyz, v));
+    return dec(out);
+}
+
+fn cst_pq_eotf(e: f32) -> f32 {
+    let m1 = 0.1593017578125;
+    let m2 = 78.84375;
+    let c1 = 0.8359375;
+    let c2 = 18.8515625;
+    let c3 = 18.6875;
+    let p = pow(clamp(e, 0.0, 1.0), 1.0 / m2);
+    return pow(max(p - c1, 0.0) / max(c2 - c3 * p, 1e-6), 1.0 / m1);
+}
+
+fn cst_pq_inv(y: f32) -> f32 {
+    let m1 = 0.1593017578125;
+    let m2 = 78.84375;
+    let c1 = 0.8359375;
+    let c2 = 18.8515625;
+    let c3 = 18.6875;
+    let p = pow(clamp(y, 0.0, 1.0), m1);
+    return pow((c1 + c2 * p) / (1.0 + c3 * p), m2);
+}
+
+fn cst_decode_ch(gamma: u32, v: f32) -> f32 {
+    switch gamma {
+        case 0u, 1u: {
+            return select(srgb_to_linear1(v), -srgb_to_linear1(-v), v < 0.0);
+        }
+        case 2u: {
+            return v;
+        }
+        case 3u: {
+            return cst_pq_eotf(v) * 10000.0 / 203.0;
+        }
+        case 4u: {
+            let x = clamp(v, 0.0, 1.0);
+            let a = 0.17883277;
+            let b = 0.28466892;
+            let c = 0.55991073;
+            return select((exp((x - c) / a) + b) / 12.0, x * x / 3.0, x <= 0.5);
+        }
+        case 5u: {
+            let di_c = 0.07329248;
+            let di_m = 10.44426855;
+            return select(exp2(v / di_c - 7.0) - 0.0075, v / di_m, v <= 0.02740668);
+        }
+        case 6u: {
+            let a = 10.5402377416545;
+            let b = 0.0729055341958355;
+            return select(min(exp2(v * 17.52 - 9.72), 65504.0), (v - b) / a, v <= 0.155251141552511);
+        }
+        case 7u: {
+            return select(
+                (v * 1023.0 - 95.0) * 0.01125 / (171.2102946929 - 95.0),
+                pow(10.0, (v * 1023.0 - 420.0) / 261.5) * 0.19 - 0.01,
+                v >= 171.2102946929 / 1023.0,
+            );
+        }
+        case 8u: {
+            return select((v - 0.125) / 5.6, pow(10.0, (v - 0.598206) / 0.241514) - 0.00873, v >= 0.181);
+        }
+        case 9u: {
+            let s = 0.24136077;
+            let b = 0.092864125;
+            let raw = select(
+                -(pow(10.0, (b - v) / s) - 1.0) / 87.09937546,
+                (pow(10.0, (v - b) / s) - 1.0) / 87.09937546,
+                v >= b,
+            );
+            return raw * 0.9;
+        }
+        case 10u: {
+            var x = 0.0;
+            if v < 0.097465473 {
+                x = -(pow(10.0, (0.12783901 - v) / 0.36726845) - 1.0) / 14.98325;
+            } else if v <= 0.15277891 {
+                x = (v - 0.12512219) / 1.9754798;
+            } else {
+                x = (pow(10.0, (v - 0.12240537) / 0.36726845) - 1.0) / 14.98325;
+            }
+            return x * 0.9;
+        }
+        case 11u: {
+            let cut = 0.010591 * 5.367655 + 0.092809;
+            return select((v - 0.092809) / 5.367655, (pow(10.0, (v - 0.385537) / 0.247190) - 0.052272) / 5.555556, v > cut);
+        }
+        case 12u: {
+            let a = (262144.0 - 16.0) / 117.45;
+            let b = (1023.0 - 95.0) / 1023.0;
+            let c = 95.0 / 1023.0;
+            let s = (7.0 * 0.6931471805599453 * exp2(7.0 - 14.0 * c / b)) / (a * b);
+            let t = (exp2(14.0 * (-c / b) + 6.0) - 64.0) / a;
+            return select(v * s + t, (exp2(14.0 * (v - c) / b + 6.0) - 64.0) / a, v >= 0.0);
+        }
+        case 13u: {
+            let r0 = -0.05641088;
+            let rt = 0.01;
+            let c_al = 47.28711236;
+            let pt = c_al * (rt - r0) * (rt - r0);
+            if v >= pt {
+                return exp2((v - 0.69336945) / 0.08550479) - 0.00964052;
+            } else if v >= 0.0 {
+                return sqrt(v / c_al) + r0;
+            }
+            return r0;
+        }
+        case 14u: {
+            return select((v - 0.0929) / 6.025, (pow(10.0, 3.89616 * v - 2.27752) - 0.0108) / 0.9892, v > 0.14);
+        }
+        case 15u: {
+            return select((v - 0.092864) / 8.735631, (pow(10.0, (v - 0.790453) / 0.344676) - 0.009468) / 0.555556, v >= 0.100537775223865);
+        }
+        default: {
+            return select((v - 0.092864) / 8.799461, (pow(10.0, (v - 0.384316) / 0.245281) - 0.064829) / 5.555556, v >= 0.100686685370811);
+        }
+    }
+}
+
+fn cst_encode_ch(gamma: u32, x: f32) -> f32 {
+    switch gamma {
+        case 0u, 1u: {
+            return select(linear_to_srgb1(x), -linear_to_srgb1(-x), x < 0.0);
+        }
+        case 2u: {
+            return x;
+        }
+        case 3u: {
+            return cst_pq_inv(max(x, 0.0) * 203.0 / 10000.0);
+        }
+        case 4u: {
+            let v = clamp(x, 0.0, 1.0);
+            return select(0.17883277 * log(max(12.0 * v - 0.28466892, 1e-6)) + 0.55991073, sqrt(3.0 * v), v <= 1.0 / 12.0);
+        }
+        case 5u: {
+            return select((log2(max(x + 0.0075, 1e-6)) + 7.0) * 0.07329248, x * 10.44426855, x <= 0.00262409);
+        }
+        case 6u: {
+            return select((log2(max(x, 1e-6)) + 9.72) / 17.52, 10.5402377416545 * x + 0.0729055341958355, x <= 0.0078125);
+        }
+        case 7u: {
+            return select((x * (171.2102946929 - 95.0) / 0.01125 + 95.0) / 1023.0, (420.0 + log2(max((x + 0.01) / 0.19, 1e-6)) / log2(10.0) * 261.5) / 1023.0, x >= 0.01125);
+        }
+        case 8u: {
+            return select(5.6 * x + 0.125, 0.241514 * log(max(x + 0.00873, 1e-6)) / log(10.0) + 0.598206, x >= 0.01);
+        }
+        case 9u: {
+            let r = x / 0.9;
+            return select(-0.24136077 * log(max(-r * 87.09937546 + 1.0, 1e-6)) / log(10.0) + 0.092864125, 0.24136077 * log(max(r * 87.09937546 + 1.0, 1e-6)) / log(10.0) + 0.092864125, r >= 0.0);
+        }
+        case 10u: {
+            let r = x / 0.9;
+            if r < -0.014 {
+                return -0.36726845 * log(max(-r * 14.98325 + 1.0, 1e-6)) / log(10.0) + 0.12783901;
+            } else if r <= 0.014 {
+                return 1.9754798 * r + 0.12512219;
+            }
+            return 0.36726845 * log(max(r * 14.98325 + 1.0, 1e-6)) / log(10.0) + 0.12240537;
+        }
+        case 11u: {
+            return select(5.367655 * x + 0.092809, 0.247190 * log(max(5.555556 * x + 0.052272, 1e-6)) / log(10.0) + 0.385537, x > 0.010591);
+        }
+        case 12u: {
+            let a = (262144.0 - 16.0) / 117.45;
+            let b = (1023.0 - 95.0) / 1023.0;
+            let c = 95.0 / 1023.0;
+            let s = (7.0 * 0.6931471805599453 * exp2(7.0 - 14.0 * c / b)) / (a * b);
+            let t = (exp2(14.0 * (-c / b) + 6.0) - 64.0) / a;
+            return select((x - t) / s, ((log2(max(a * x + 64.0, 1e-6)) - 6.0) / 14.0) * b + c, x >= t);
+        }
+        case 13u: {
+            if x >= 0.01 {
+                return 0.08550479 * log2(max(x + 0.00964052, 1e-6)) + 0.69336945;
+            } else if x >= -0.05641088 {
+                let d = x + 0.05641088;
+                return 47.28711236 * d * d;
+            }
+            return 0.0;
+        }
+        case 14u: {
+            return select(0.256663 * log(max(x * 0.9892 + 0.0108, 1e-6)) / log(10.0) + 0.584555, 6.025 * x + 0.0929, x <= 0.0078);
+        }
+        case 15u: {
+            return select(8.735631 * x + 0.092864, 0.344676 * log(max(0.555556 * x + 0.009468, 1e-6)) / log(10.0) + 0.790453, x >= 0.00089);
+        }
+        default: {
+            return select(8.799461 * x + 0.092864, 0.245281 * log(max(5.555556 * x + 0.064829, 1e-6)) / log(10.0) + 0.384316, x >= 0.000889);
+        }
+    }
+}
+
+fn cst_bt2390_ratio(lum: f32, src_peak: f32, dst_peak: f32) -> f32 {
+    if dst_peak >= src_peak || lum <= 1e-6 {
+        return 1.0;
+    }
+    let nits = lum * 203.0;
+    let smax = max(cst_pq_inv(src_peak / 10000.0), 1e-5);
+    let e1 = min(cst_pq_inv(nits / 10000.0) / smax, 1.0);
+    let max_lum = cst_pq_inv(dst_peak / 10000.0) / smax;
+    let ks = 1.5 * max_lum - 0.5;
+    var e2 = e1;
+    if e1 >= ks {
+        let t = (e1 - ks) / max(1.0 - ks, 1e-5);
+        let t2 = t * t;
+        let t3 = t2 * t;
+        e2 = (2.0 * t3 - 3.0 * t2 + 1.0) * ks + (t3 - 2.0 * t2 + t) * (1.0 - ks) + (-2.0 * t3 + 3.0 * t2) * max_lum;
+    }
+    let mapped_nits = max(cst_pq_eotf(e2 * smax) * 10000.0, 0.0);
+    return (mapped_nits / 203.0) / lum;
+}
+
+fn cst_compress_ch(v: f32, ach: f32, thr: f32, scale: f32, pwr: f32) -> f32 {
+    let dist = (ach - v) / ach;
+    if dist <= thr {
+        return v;
+    }
+    let nd = dist - thr;
+    let comp = thr + scale * (nd / scale) / pow(1.0 + pow(nd / scale, pwr), 1.0 / pwr);
+    return max(ach * (1.0 - comp), 0.0);
+}
+
+fn cst_op(c: vec3<f32>) -> vec3<f32> {
+    let v = enc(c);
+    let in_g = u.i1.x;
+    let out_g = u.i1.y;
+    let tone_map = u.i1.z;
+    let gamut_map = u.i1.w;
+    var lin = vec3(cst_decode_ch(in_g, v.x), cst_decode_ch(in_g, v.y), cst_decode_ch(in_g, v.z));
+    lin = vec3(dot(u.p0.xyz, lin), dot(u.p1.xyz, lin), dot(u.p2.xyz, lin));
+    let out_luma = vec3(u.p0.w, u.p1.w, u.p2.w);
+
+    if tone_map != 0u && u.p3.y < u.p3.x {
+        var m = 0.0;
+        if tone_map == 1u {
+            m = max(max(max(lin.x, lin.y), lin.z), 0.0);
+        } else {
+            m = max(dot(out_luma, lin), 0.0);
+        }
+        lin *= cst_bt2390_ratio(m, u.p3.x, u.p3.y);
+    }
+
+    if gamut_map == 1u {
+        let ach = max(max(lin.x, lin.y), lin.z);
+        if ach <= 1e-6 {
+            lin = max(lin, vec3(0.0));
+        } else {
+            let thr = 0.8;
+            let lim = 1.25;
+            let pwr = 1.2;
+            let scale = (lim - thr) / max((1.0 - thr) / pow(max(lim - 1.0, 1e-4) / (lim - thr), -pwr) - 1.0, 1e-5);
+            lin = vec3(
+                cst_compress_ch(lin.x, ach, thr, scale, pwr),
+                cst_compress_ch(lin.y, ach, thr, scale, pwr),
+                cst_compress_ch(lin.z, ach, thr, scale, pwr),
+            );
+        }
+    } else if gamut_map == 2u {
+        let mn = min(min(lin.x, lin.y), lin.z);
+        if mn < 0.0 {
+            let y = max(dot(out_luma, lin), 0.0);
+            if y <= 1e-6 {
+                lin = vec3(0.0);
+            } else {
+                let k = clamp(y / (y - mn), 0.0, 1.0);
+                lin = vec3(y) + (lin - vec3(y)) * k;
+            }
+        }
+    }
+
+    let out_v = vec3(cst_encode_ch(out_g, lin.x), cst_encode_ch(out_g, lin.y), cst_encode_ch(out_g, lin.z));
+    return dec(out_v);
+}
+
+fn node_sizing_px(p: vec2<i32>) -> vec4<f32> {
+    let s = size();
+    let w = f32(s.x);
+    let h = f32(s.y);
+    let cx = w * 0.5;
+    let cy = h * 0.5;
+    let px = f32(p.x) + 0.5;
+    let py = f32(p.y) + 0.5;
+    let blanking = u.p1.w;
+    if blanking > 0.0 {
+        let target_h = min(w / blanking, h);
+        let bar = 0.5 * (h - target_h);
+        if py < bar || py > h - bar {
+            return vec4(0.0, 0.0, 0.0, 1.0);
+        }
+    }
+    let dx = px - cx - u.p0.x * cx;
+    let dy = py - cy - u.p0.y * cy;
+    let cos_r = u.p0.w;
+    let sin_r = u.p1.z;
+    let rx = dx * cos_r + dy * sin_r;
+    let ry = -dx * sin_r + dy * cos_r;
+    let sx_off = rx * u.p0.z * u.p1.x;
+    let sy_off = ry * u.p0.z * u.p1.y;
+    let sx = cx + select(sx_off, -sx_off, u.i1.x != 0u);
+    let sy = cy + select(sy_off, -sy_off, u.i1.y != 0u);
+    return sample_bilinear(sx, sy);
 }
 
 fn s_curve_wgsl(v: f32, k: f32) -> f32 {
@@ -793,6 +1190,22 @@ fn sample_curve(row: i32, ch: u32, x: f32) -> f32 {
     return a + (b - a) * (p - f32(i));
 }
 
+fn apply_soft_clip_wgsl(v_in: vec3<f32>, low: f32, high: f32) -> vec3<f32> {
+    var v = v_in;
+    if low > 1e-5 {
+        let kl = clamp(low * 0.35, 1e-5, 0.35);
+        let toe = kl * exp(-(kl - v) / kl);
+        v = select(v, toe, v < vec3(kl));
+    }
+    if high > 1e-5 {
+        let kh = clamp(high * 0.35, 1e-5, 0.35);
+        let s = 1.0 - kh;
+        let sh = s + kh * (1.0 - exp(-(v - s) / kh));
+        v = select(v, sh, v > vec3(s));
+    }
+    return v;
+}
+
 fn lumetri_curves_op(c: vec3<f32>) -> vec3<f32> {
     var v = enc(c);
     let m = u.i1.x;
@@ -808,7 +1221,12 @@ fn lumetri_curves_op(c: vec3<f32>) -> vec3<f32> {
     if (m & 8u) != 0u {
         v.z = sample_curve(0, 3u, v.z);
     }
-    if (m & 0x1F0u) != 0u {
+    let low_soft = u.p0.x;
+    let high_soft = u.p0.y;
+    if low_soft > 1e-5 || high_soft > 1e-5 {
+        v = apply_soft_clip_wgsl(v, low_soft, high_soft);
+    }
+    if (m & 0x3F0u) != 0u {
         let uc = clamp(v, vec3(0.0), vec3(1.0));
         var h = rgb_to_hsl(uc);
         let h0 = h.x;
@@ -831,9 +1249,95 @@ fn lumetri_curves_op(c: vec3<f32>) -> vec3<f32> {
         if (m & 256u) != 0u {
             h.z = clamp(h.z + (sample_curve(2, 0u, h0) - 0.5) * 0.5, 0.0, 1.0);
         }
+        if (m & 512u) != 0u {
+            h.z = clamp(h.z + (sample_curve(2, 1u, s0) - 0.5) * 0.5, 0.0, 1.0);
+        }
         v = hsl_to_rgb(h.x, h.y, h.z);
     }
     return dec(v);
+}
+
+fn cs_band_weight(h: f32, center: f32, hw: f32) -> f32 {
+    let d0 = abs(h - center);
+    let d = min(d0, 1.0 - d0);
+    if d >= hw {
+        return 0.0;
+    }
+    return 0.5 + 0.5 * cos(3.141592653589793 * d / hw);
+}
+
+fn color_slice_op(c: vec3<f32>) -> vec3<f32> {
+    var h = rgb_to_hsl(clamp(enc(c), vec3(0.0), vec3(1.0)));
+    let gate = smoothstep(0.0, 0.22, h.y);
+    if gate <= 1e-5 {
+        return c;
+    }
+    let w0 = cs_band_weight(h.x, 0.0, 1.0 / 6.0) * gate;
+    let w1 = cs_band_weight(h.x, 1.0 / 6.0, 1.0 / 6.0) * gate;
+    let w2 = cs_band_weight(h.x, 2.0 / 6.0, 1.0 / 6.0) * gate;
+    let w3 = cs_band_weight(h.x, 3.0 / 6.0, 1.0 / 6.0) * gate;
+    let w4 = cs_band_weight(h.x, 4.0 / 6.0, 1.0 / 6.0) * gate;
+    let w5 = cs_band_weight(h.x, 5.0 / 6.0, 1.0 / 6.0) * gate;
+    let w6 = cs_band_weight(h.x, 25.0 / 360.0, 32.0 / 360.0) * gate;
+    let norm = max(w0 + w1 + w2 + w3 + w4 + w5 + w6, 1.0);
+    let sat_d = (w0 * u.p0.x + w1 * u.p0.w + w2 * u.p1.z + w3 * u.p2.y + w4 * u.p3.x + w5 * u.p3.w + w6 * u.p4.z) / norm;
+    let den_d = (w0 * u.p0.y + w1 * u.p1.x + w2 * u.p1.w + w3 * u.p2.z + w4 * u.p3.y + w5 * u.p4.x + w6 * u.p4.w) / norm;
+    let hue_d = (w0 * u.p0.z + w1 * u.p1.y + w2 * u.p2.x + w3 * u.p2.w + w4 * u.p3.z + w5 * u.p4.y + w6 * u.p5.x) / norm;
+    h.x = fract_euclid(h.x + hue_d);
+    h.y = clamp(h.y * (1.0 + sat_d), 0.0, 1.0);
+    let rgb = hsl_to_rgb(h.x, h.y, h.z);
+    let den_scale = clamp(1.0 - den_d * 0.45 * smoothstep(0.0, 0.35, h.y), 0.15, 1.85);
+    return dec(rgb * den_scale);
+}
+
+const CW_W: u32 = 128u;
+const CW_H: u32 = 64u;
+
+fn sample_warper_2d(u_c: f32, v_c: f32) -> vec4<f32> {
+    let fx = clamp(u_c, 0.0, 1.0) * f32(CW_W - 1u);
+    let fy = clamp(v_c, 0.0, 1.0) * f32(CW_H - 1u);
+    let x0 = u32(fx);
+    let y0 = u32(fy);
+    let x1 = min(x0 + 1u, CW_W - 1u);
+    let y1 = min(y0 + 1u, CW_H - 1u);
+    let tx = fx - f32(x0);
+    let ty = fy - f32(y0);
+    let p00 = textureLoad(aux, vec2<i32>(i32(x0), i32(y0)), 0);
+    let p10 = textureLoad(aux, vec2<i32>(i32(x1), i32(y0)), 0);
+    let p01 = textureLoad(aux, vec2<i32>(i32(x0), i32(y1)), 0);
+    let p11 = textureLoad(aux, vec2<i32>(i32(x1), i32(y1)), 0);
+    return mix(mix(p00, p10, tx), mix(p01, p11, tx), ty);
+}
+
+fn color_warper_op(c: vec3<f32>) -> vec3<f32> {
+    var h = rgb_to_hsl(clamp(enc(c), vec3(0.0), vec3(1.0)));
+    let m = u.i1.x;
+    if (m & 1u) != 0u {
+        let s = sample_warper_2d(h.x, h.y);
+        let s2 = clamp(sqrt(s.x * s.x + s.y * s.y), 0.0, 1.0);
+        if s2 > 1e-4 {
+            h.x = fract_euclid(atan2(s.y, s.x) / 6.283185307179586);
+        }
+        h.y = s2;
+    }
+    if (m & 2u) != 0u {
+        let s = sample_warper_2d(h.x, h.z);
+        h.y = clamp(h.y * (1.0 + s.z * 1.5), 0.0, 1.0);
+        h.z = clamp(h.z + s.w * 0.4, 0.0, 1.0);
+    }
+    return dec(hsl_to_rgb(h.x, h.y, h.z));
+}
+
+fn range_gate_wgsl(val: f32, lo: f32, hi: f32, soft: f32) -> f32 {
+    var low_g = 1.0;
+    if lo > 0.001 {
+        low_g = clamp((val - lo) / soft, 0.0, 1.0);
+    }
+    var high_g = 1.0;
+    if hi < 0.999 {
+        high_g = clamp((hi - val) / soft, 0.0, 1.0);
+    }
+    return min(low_g, high_g);
 }
 
 fn hsl_key_px(p: vec2<i32>) -> vec4<f32> {
@@ -842,19 +1346,109 @@ fn hsl_key_px(p: vec2<i32>) -> vec4<f32> {
         return vec4(0.0, 0.0, 0.0, 1.0);
     }
     let uv = clamp(enc(o.rgb / o.a), vec3(0.0), vec3(1.0));
-    let h = rgb_to_hsl(uv);
-    let hc = u.p0.x;
-    let hr = u.p0.y;
-    let smin = u.p0.z;
-    let lmin = u.p0.w;
-    let lmax = u.p1.x;
-    let soft = u.p1.y;
-    let d0 = abs(h.x - hc);
-    let dh = min(d0, 1.0 - d0);
-    let mh = 1.0 - clamp((dh - hr * 0.5) / soft, 0.0, 1.0);
-    let ms = clamp((h.y - smin) / soft, 0.0, 1.0);
-    let ml = min(clamp((h.z - lmin) / soft, 0.0, 1.0), clamp((lmax - h.z) / soft, 0.0, 1.0));
-    return vec4(mh * ms * ml, 0.0, 0.0, 1.0);
+    let mode = u.i1.x;
+    let soft = u.p1.z;
+    var m: f32 = 0.0;
+    if mode == 1u {
+        let r_g = range_gate_wgsl(uv.r, u.p2.y, u.p3.x, u.p3.w);
+        let g_g = range_gate_wgsl(uv.g, u.p2.z, u.p3.y, u.p3.w);
+        let b_g = range_gate_wgsl(uv.b, u.p2.w, u.p3.z, u.p3.w);
+        m = r_g * g_g * b_g;
+    } else if mode == 2u {
+        let y = luma709(uv);
+        m = range_gate_wgsl(y, u.p1.x, u.p1.y, u.p2.x);
+    } else if mode == 3u {
+        let n_pts = min(u.i1.y, 64u);
+        if n_pts > 0u {
+            let yp = luma709(uv);
+            let cb = uv.b - yp;
+            let cr = uv.r - yp;
+            var w_pos: f32 = 0.0;
+            var w_neg: f32 = 0.0;
+            for (var idx = 0u; idx < n_pts; idx++) {
+                let s = textureLoad(aux, vec2<i32>(i32(idx), 0), 0);
+                let sy = luma709(s.rgb);
+                let scb = s.b - sy;
+                let scr = s.r - sy;
+                let dy = (yp - sy) * 0.45;
+                let dcb = cb - scb;
+                let dcr = cr - scr;
+                let dist = sqrt(dy * dy + dcb * dcb + dcr * dcr);
+                let w = 1.0 - clamp((dist - abs(s.w)) / soft, 0.0, 1.0);
+                if s.w >= 0.0 {
+                    w_pos = max(w_pos, w);
+                } else {
+                    w_neg = max(w_neg, w);
+                }
+            }
+            m = clamp(w_pos * (1.0 - w_neg), 0.0, 1.0);
+        }
+    } else {
+        let h = rgb_to_hsl(uv);
+        let hc = u.p0.x;
+        let hr = u.p0.y;
+        let smin = u.p0.z;
+        let smax = u.p0.w;
+        let lmin = u.p1.x;
+        let lmax = u.p1.y;
+        let sat_soft = u.p1.w;
+        let luma_soft = u.p2.x;
+        let d0 = abs(h.x - hc);
+        let dh = min(d0, 1.0 - d0);
+        let mh = 1.0 - clamp((dh - hr * 0.5) / soft, 0.0, 1.0);
+        let ms = range_gate_wgsl(h.y, smin, smax, sat_soft);
+        let ml = range_gate_wgsl(h.z, lmin, lmax, luma_soft);
+        m = mh * ms * ml;
+    }
+    return vec4(m, 0.0, 0.0, 1.0);
+}
+
+fn hsl_morph_px(p: vec2<i32>) -> vec4<f32> {
+    let s = size();
+    let orig_m = ld(p).r;
+    let r = clamp(i32(u.i1.x), 1, 3);
+    let dilate = u.i1.y != 0u;
+    let strength = clamp(u.p0.x, 0.0, 1.0);
+    var best = orig_m;
+    let y0 = max(0, p.y - r);
+    let y1 = min(s.y - 1, p.y + r);
+    let x0 = max(0, p.x - r);
+    let x1 = min(s.x - 1, p.x + r);
+    for (var yy = y0; yy <= y1; yy++) {
+        for (var xx = x0; xx <= x1; xx++) {
+            let v = ld(vec2(xx, yy)).r;
+            if dilate {
+                best = max(best, v);
+            } else {
+                best = min(best, v);
+            }
+        }
+    }
+    return vec4(orig_m + (best - orig_m) * strength, 0.0, 0.0, 1.0);
+}
+
+fn node_key_finish_px(p: vec2<i32>) -> vec4<f32> {
+    var m: f32 = 1.0;
+    if u.i1.y != 0u {
+        m = ld(p).r;
+        let clean_b = u.p0.x;
+        let clean_w = u.p0.y;
+        if clean_b > 1e-4 || clean_w > 1e-4 {
+            let lo = clamp(clean_b, 0.0, 0.99) * 0.85;
+            let hi = max(lo + 1e-3, 1.0 - clamp(clean_w, 0.0, 0.99) * 0.85);
+            m = clamp((m - lo) / (hi - lo), 0.0, 1.0);
+        } else {
+            m = clamp(m, 0.0, 1.0);
+        }
+        if u.p0.z > 0.5 {
+            m = 1.0 - m;
+        }
+    }
+    if u.i1.x != 0u {
+        m *= textureLoad(mask_tex, p, 0).r;
+    }
+    m = clamp(m * u.p0.w, 0.0, 1.0);
+    return vec4(m, 0.0, 0.0, 1.0);
 }
 
 fn hsl_median_px(p: vec2<i32>) -> vec4<f32> {
@@ -896,41 +1490,54 @@ fn hsl_median_px(p: vec2<i32>) -> vec4<f32> {
     return vec4(orig_m + (med - orig_m) * denoise, 0.0, 0.0, 1.0);
 }
 
+fn apply_highlight_px(uv: vec3<f32>, m: f32, show_mask: u32) -> vec3<f32> {
+    switch show_mask {
+        case 1u: {
+            let g = rgb_to_hsl(uv).z;
+            return vec3(g) + (uv - vec3(g)) * m;
+        }
+        case 2u: {
+            return uv * m;
+        }
+        case 3u: {
+            return vec3(m);
+        }
+        default: {
+            return uv;
+        }
+    }
+}
+
 fn hsl_apply_px(p: vec2<i32>) -> vec4<f32> {
-    let o = textureLoad(aux, p, 0);
+    let full_unmasked = u.i1.y != 0u;
+    var o = ld(p);
+    var m: f32 = 1.0;
+    if !full_unmasked {
+        o = textureLoad(aux, p, 0);
+        m = ld(p).r;
+    }
     let a = o.a;
     if a <= 1e-6 {
         return o;
     }
-    let m = ld(p).r;
     let uv = clamp(enc(o.rgb / a), vec3(0.0), vec3(1.0));
     let show_mask = u.i1.x;
     var out_c: vec3<f32>;
-    switch show_mask {
-        case 1u: {
-            let g = rgb_to_hsl(uv).z;
-            out_c = vec3(g) + (uv - vec3(g)) * m;
-        }
-        case 2u: {
-            out_c = uv * m;
-        }
-        case 3u: {
-            out_c = vec3(m);
-        }
-        default: {
-            let htemp = u.p0.x;
-            let htint = u.p0.y;
-            let hsat = u.p0.z;
-            let hshift = u.p0.w;
-            var hh = rgb_to_hsl(uv);
-            hh.x = fract_euclid(hh.x + hshift);
-            hh.y = clamp(hh.y * hsat, 0.0, 1.0);
-            var c2 = hsl_to_rgb(hh.x, hh.y, hh.z);
-            c2.x *= 1.0 + 0.25 * htemp;
-            c2.z *= 1.0 - 0.25 * htemp;
-            c2.y *= 1.0 - 0.2 * htint;
-            out_c = uv + (c2 - uv) * m;
-        }
+    if show_mask > 0u && !full_unmasked {
+        out_c = apply_highlight_px(uv, m, show_mask);
+    } else {
+        let htemp = u.p0.x;
+        let htint = u.p0.y;
+        let hsat = u.p0.z;
+        let hshift = u.p0.w;
+        var hh = rgb_to_hsl(uv);
+        hh.x = fract_euclid(hh.x + hshift);
+        hh.y = clamp(hh.y * hsat, 0.0, 1.0);
+        var c2 = hsl_to_rgb(hh.x, hh.y, hh.z);
+        c2.x *= 1.0 + 0.25 * htemp;
+        c2.z *= 1.0 - 0.25 * htemp;
+        c2.y *= 1.0 - 0.2 * htint;
+        out_c = uv + (c2 - uv) * m;
     }
     return vec4(dec(out_c) * a, a);
 }
@@ -940,6 +1547,165 @@ fn mask_mix_px(p: vec2<i32>) -> vec4<f32> {
     let orig_px = textureLoad(aux, p, 0);
     let c = textureLoad(mask_tex, p, 0).r;
     return orig_px + (cur_px - orig_px) * c;
+}
+
+fn dag_key_combine_px(p: vec2<i32>) -> vec4<f32> {
+    var m: f32 = 1.0;
+    if u.i1.x != 0u {
+        var qm = ld(p).r;
+        let clean_b = u.p0.x;
+        let clean_w = u.p0.y;
+        if clean_b > 1e-4 || clean_w > 1e-4 {
+            let lo = clamp(clean_b, 0.0, 0.99) * 0.85;
+            let hi = max(lo + 1e-3, 1.0 - clamp(clean_w, 0.0, 0.99) * 0.85);
+            qm = clamp((qm - lo) / (hi - lo), 0.0, 1.0);
+        } else {
+            qm = clamp(qm, 0.0, 1.0);
+        }
+        if u.p0.z > 0.5 {
+            qm = 1.0 - qm;
+        }
+        m *= qm;
+    }
+    if u.i1.y != 0u {
+        m *= clamp(textureLoad(mask_tex, p, 0).r, 0.0, 1.0);
+    }
+    if u.i1.z != 0u {
+        var uk = clamp(textureLoad(aux, p, 0).r, 0.0, 1.0);
+        if u.i1.w != 0u {
+            uk = 1.0 - uk;
+        }
+        uk = clamp(uk * u.p0.w, 0.0, 1.0);
+        m *= uk;
+    }
+    if u.p1.y > 0.5 {
+        m = 1.0 - m;
+    }
+    m = clamp(m * u.p1.x, 0.0, 1.0);
+    return vec4(m, m, m, 1.0);
+}
+
+fn dag_parallel_px(p: vec2<i32>) -> vec4<f32> {
+    let acc = ld(p);
+    let br = textureLoad(aux, p, 0);
+    if u.i1.x != 0u {
+        let bs = textureLoad(mask_tex, p, 0);
+        return vec4(max(acc.rgb + (br.rgb - bs.rgb), vec3(0.0)), acc.a);
+    }
+    return vec4(acc.rgb + (br.rgb - acc.rgb) * u.p0.x, acc.a);
+}
+
+fn dag_blend_ch(b: f32, t: f32, mode: u32) -> f32 {
+    let bc = clamp(b, 0.0, 1.0);
+    let tc = clamp(t, 0.0, 1.0);
+    switch mode {
+        case 1u: { return b * t; }
+        case 2u: { return 1.0 - (1.0 - bc) * (1.0 - tc); }
+        case 3u: { return select(1.0 - 2.0 * (1.0 - bc) * (1.0 - tc), 2.0 * bc * tc, bc < 0.5); }
+        case 4u: { return (1.0 - 2.0 * tc) * bc * bc + 2.0 * tc * bc; }
+        case 5u: { return select(1.0 - 2.0 * (1.0 - bc) * (1.0 - tc), 2.0 * bc * tc, tc < 0.5); }
+        case 6u: { return b + t; }
+        case 7u: { return max(b - t, 0.0); }
+        case 8u: { return min(b, t); }
+        case 9u: { return max(b, t); }
+        default: { return t; }
+    }
+}
+
+fn dag_layer_px(p: vec2<i32>) -> vec4<f32> {
+    let bot = ld(p);
+    let top = textureLoad(aux, p, 0);
+    var k: f32 = 1.0;
+    if u.i1.y != 0u {
+        k = clamp(textureLoad(mask_tex, p, 0).r, 0.0, 1.0);
+        if u.i1.z != 0u {
+            k = 1.0 - k;
+        }
+    }
+    k = clamp(k * u.p0.x, 0.0, 1.0);
+    let mode = u.i1.x;
+    var blended: vec3<f32>;
+    if mode == 10u {
+        let bh = rgb_to_hsl(clamp(bot.rgb, vec3(0.0), vec3(1.0)));
+        let th = rgb_to_hsl(clamp(top.rgb, vec3(0.0), vec3(1.0)));
+        blended = hsl_to_rgb(th.x, th.y, bh.z);
+    } else if mode == 11u {
+        let bh = rgb_to_hsl(clamp(bot.rgb, vec3(0.0), vec3(1.0)));
+        let th = rgb_to_hsl(clamp(top.rgb, vec3(0.0), vec3(1.0)));
+        blended = hsl_to_rgb(bh.x, bh.y, th.z);
+    } else {
+        blended = vec3(
+            dag_blend_ch(bot.r, top.r, mode),
+            dag_blend_ch(bot.g, top.g, mode),
+            dag_blend_ch(bot.b, top.b, mode),
+        );
+    }
+    return vec4(bot.rgb + (blended - bot.rgb) * k, bot.a);
+}
+
+fn dag_split_px(p: vec2<i32>) -> vec4<f32> {
+    let o = ld(p);
+    let space = u.i1.x;
+    let ch = u.i1.y;
+    var v: f32 = 0.0;
+    if space == 1u {
+        let y = 0.2126 * o.r + 0.7152 * o.g + 0.0722 * o.b;
+        if ch == 0u {
+            v = y;
+        } else if ch == 1u {
+            v = ((o.b - y) / 1.8556) + 0.5;
+        } else {
+            v = ((o.r - y) / 1.5748) + 0.5;
+        }
+    } else if space == 2u {
+        let hsl = rgb_to_hsl(clamp(o.rgb, vec3(0.0), vec3(1.0)));
+        v = select(select(hsl.z, hsl.y, ch == 1u), hsl.x, ch == 0u);
+    } else {
+        v = select(select(o.b, o.g, ch == 1u), o.r, ch == 0u);
+    }
+    return vec4(v, v, v, o.a);
+}
+
+fn dag_combine_px(p: vec2<i32>) -> vec4<f32> {
+    let i0 = ld(p);
+    let c0 = i0.r;
+    let c1 = textureLoad(aux, p, 0).r;
+    let c2 = textureLoad(mask_tex, p, 0).r;
+    let space = u.i1.x;
+    var rgb = vec3(c0, c1, c2);
+    if space == 1u {
+        let y = c0;
+        let cb = c1 - 0.5;
+        let cr = c2 - 0.5;
+        let r = max(y + 1.5748 * cr, 0.0);
+        let b = max(y + 1.8556 * cb, 0.0);
+        let g = max((y - 0.2126 * r - 0.0722 * b) / 0.7152, 0.0);
+        rgb = vec3(r, g, b);
+    } else if space == 2u {
+        rgb = hsl_to_rgb(fract_euclid(c0), clamp(c1, 0.0, 1.0), clamp(c2, 0.0, 1.0));
+    }
+    return vec4(rgb, i0.a);
+}
+
+fn node_key_mix_px(p: vec2<i32>) -> vec4<f32> {
+    let graded = ld(p);
+    let orig = textureLoad(aux, p, 0);
+    let show_mask = u.i1.x;
+    let has_mask_tex = u.i1.y != 0u;
+    var k = u.p0.x;
+    if has_mask_tex {
+        k *= textureLoad(mask_tex, p, 0).r;
+    }
+    k = clamp(k, 0.0, 1.0);
+    if show_mask > 0u {
+        let a = orig.a;
+        if a <= 1e-6 {
+            return orig;
+        }
+        let uv = clamp(enc(orig.rgb / a), vec3(0.0), vec3(1.0));
+        return vec4(dec(apply_highlight_px(uv, k, show_mask)) * a, a);
+    }
+    return orig + (graded - orig) * k;
 }
 
 // One output pixel of every op but the running-sum box blur.
@@ -1139,6 +1905,45 @@ fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
             let res = color_wheels_op(c);
             return vec4(res * a, a);
         }
+        case OP_LOG_WHEELS: {
+            let o = ld(p);
+            let a = o.a;
+            if a <= 1e-6 {
+                return o;
+            }
+            let res = log_wheels_op(o.rgb / a);
+            return vec4(res * a, a);
+        }
+        case OP_HDR_WHEELS: {
+            let o = ld(p);
+            let a = o.a;
+            if a <= 1e-6 {
+                return o;
+            }
+            let res = hdr_wheels_op(o.rgb / a);
+            return vec4(res * a, a);
+        }
+        case OP_RGB_MIXER: {
+            let o = ld(p);
+            let a = o.a;
+            if a <= 1e-6 {
+                return o;
+            }
+            let res = rgb_mixer_op(o.rgb / a);
+            return vec4(res * a, a);
+        }
+        case OP_CST: {
+            let o = ld(p);
+            let a = o.a;
+            if a <= 1e-6 {
+                return o;
+            }
+            let res = cst_op(o.rgb / a);
+            return vec4(res * a, a);
+        }
+        case OP_NODE_SIZING: {
+            return node_sizing_px(p);
+        }
         case OP_LUMETRI_LOOK: {
             let o = ld(p);
             let a = o.a;
@@ -1180,6 +1985,63 @@ fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
         }
         case OP_MASK_MIX: {
             return mask_mix_px(p);
+        }
+        case OP_MIDTONE_DETAIL: {
+            let o = textureLoad(aux, p, 0);
+            if o.a <= 1e-6 {
+                return o;
+            }
+            let bq = ld(p);
+            let c = enc(o.rgb / o.a);
+            let l = clamp(luma709(c), 0.0, 1.0);
+            let gain = u.p0.x * 0.8 * 4.0 * l * (1.0 - l);
+            let d = o.rgb - bq.rgb;
+            return vec4(max(o.rgb + d * gain, vec3(0.0)), o.a);
+        }
+        case OP_COLOR_SLICE: {
+            let o = ld(p);
+            let a = o.a;
+            if a <= 1e-6 {
+                return o;
+            }
+            let res = color_slice_op(o.rgb / a);
+            return vec4(res * a, a);
+        }
+        case OP_COLOR_WARPER: {
+            let o = ld(p);
+            let a = o.a;
+            if a <= 1e-6 {
+                return o;
+            }
+            let res = color_warper_op(o.rgb / a);
+            return vec4(res * a, a);
+        }
+        case OP_HSL_MORPH: {
+            return hsl_morph_px(p);
+        }
+        case OP_NODE_KEY_FINISH: {
+            return node_key_finish_px(p);
+        }
+        case OP_RESTORE_ORIG: {
+            return textureLoad(aux, p, 0);
+        }
+        case OP_NODE_KEY_MIX: {
+            return node_key_mix_px(p);
+        }
+        case OP_DAG_KEY_COMBINE: {
+            return dag_key_combine_px(p);
+        }
+        case OP_DAG_PARALLEL: {
+            return dag_parallel_px(p);
+        }
+        case OP_DAG_LAYER: {
+            return dag_layer_px(p);
+        }
+        case OP_DAG_SPLIT: {
+            return dag_split_px(p);
+        }
+        case OP_DAG_COMBINE: {
+            return dag_combine_px(p);
         }
         default: {
             let o = ld(p);

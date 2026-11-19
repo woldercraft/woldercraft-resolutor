@@ -27,7 +27,7 @@ fn query(id: &'static str, label: &'static str, params: &'static str, run: Run) 
 }
 
 pub(crate) fn commands() -> Vec<CommandSpec> {
-    vec![
+    let mut v = vec![
         spec(
             "sequence.colorSettings",
             "Color Management…",
@@ -99,7 +99,14 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
         spec("color.batchPasteGrade", "Paste Color Grade to Clips", &[], r#"{"from":id,"clips":[id]}"#, has_seq, batch_paste_grade),
         spec("color.batchToggleBypass", "Toggle Color Grade Bypass on Clips", &[], r#"{"clips":[id]}"#, has_seq, batch_toggle_bypass),
         spec("color.batchResetGrade", "Reset Color Grade on Clips", &[], r#"{"clips":[id]}"#, has_seq, batch_reset_grade),
-    ]
+        spec("color.stillGrab", "Grab Still", &["Color"], r#"{"clip":id?,"name":str?,"time":ticks?}"#, has_seq, still_grab),
+        spec("color.stillApply", "Apply Still", &[], r#"{"id":id,"clips":[id]?,"mode":"replace"|"append"?}"#, has_seq, still_apply),
+        spec("color.stillRename", "Rename Still", &[], r#"{"id":id,"name":str}"#, has_seq, still_rename),
+        spec("color.stillDelete", "Delete Still", &[], r#"{"id":id}"#, has_seq, still_delete),
+        query("color.stillList", "List Stills", "{}", still_list),
+    ];
+    v.extend(crate::color_graph::commands());
+    v
 }
 
 fn import_lut(s: &mut Session, path: &str, name: Option<&str>) -> Result<(String, Value)> {
@@ -317,6 +324,11 @@ fn section_param(cmd: &str, sec: &str) -> Result<&'static str> {
         "basic" | "basic correction" => Ok("basic_on"),
         "creative" => Ok("creative_on"),
         "curves" => Ok("curves_on"),
+        "colorslice" | "color slice" => Ok("cs_on"),
+        "colorwarper" | "color warper" => Ok("cw_on"),
+        "rgbmixer" | "rgb mixer" => Ok("rgb_mix_on"),
+        "cst" | "color space transform" => Ok("cst_on"),
+        "sizing" => Ok("sizing_on"),
         "wheels" | "color wheels" | "color wheels & match" => Ok("wheels_on"),
         "hsl" | "hsl secondary" => Ok("hsl_on"),
         "vignette" => Ok("vignette_on"),
@@ -612,6 +624,7 @@ fn apply_match(s: &mut Session, p: &Value) -> Result<Value> {
             ("wheel_highlights_l", ParamValue::Float(m.lightness[2] as f64)),
             ("saturation", ParamValue::Float(m.saturation as f64)),
             ("wheels_on", ParamValue::Bool(true)),
+            ("grade_model", ParamValue::Choice(1)),
         ];
         let def = filmcraft_project::find_effect("lumetri").ok_or_else(|| bad("lumetri.applyMatch", "lumetri effect missing"))?;
         s.edit_sequence("Apply Match", |q, _, _| {
@@ -670,6 +683,7 @@ fn apply_match(s: &mut Session, p: &Value) -> Result<Value> {
         ("wheel_highlights_l", ParamValue::Float(m.lightness[2] as f64)),
         ("saturation", ParamValue::Float(m.saturation as f64)),
         ("wheels_on", ParamValue::Bool(true)),
+        ("grade_model", ParamValue::Choice(1)),
     ];
     s.edit_sequence("Apply Match", |q, _, _| {
         let (_, it) = q.find_item_mut(clip).ok_or(filmcraft_edit::EditError::NoItem(clip))?;
@@ -715,7 +729,15 @@ fn group_create(s: &mut Session, p: &Value) -> Result<Value> {
             .and_then(|v| v.as_array())
             .and_then(|a| Some([a.first()?.as_u64()? as u8, a.get(1)?.as_u64()? as u8, a.get(2)?.as_u64()? as u8]))
             .unwrap_or(GROUP_PALETTE[idx % GROUP_PALETTE.len()]);
-        q.color_groups.push(filmcraft_project::ColorGroup { id: gid, name, color, clips: Vec::new(), effects: Vec::new() });
+        q.color_groups.push(filmcraft_project::ColorGroup {
+            id: gid,
+            name,
+            color,
+            clips: Vec::new(),
+            effects: Vec::new(),
+            pre_clip: filmcraft_project::ColorGraph::default(),
+            post_clip: filmcraft_project::ColorGraph::default(),
+        });
         for c in &clips {
             if q.find_item(*c).is_some() {
                 q.set_clip_color_group(*c, Some(gid));
@@ -800,6 +822,7 @@ fn group_set_param(s: &mut Session, p: &Value) -> Result<Value> {
         if let Some(e) = g.effects.get_mut(idx) {
             e.params.entry(param.clone()).or_insert_with(|| filmcraft_project::Param::new(pv.clone())).value = pv.clone();
         }
+        g.sync_post_clip_from_effects();
         Ok(())
     })?;
     Ok(json!({"group": gid.0, "param": param}))
@@ -815,6 +838,7 @@ fn group_toggle_bypass(s: &mut Session, p: &Value) -> Result<Value> {
         for e in &mut g.effects {
             e.enabled = now_enabled;
         }
+        g.sync_post_clip_from_effects();
         Ok(())
     })?;
     Ok(json!({"group": gid.0, "enabled": now_enabled}))
@@ -825,6 +849,8 @@ fn group_reset(s: &mut Session, p: &Value) -> Result<Value> {
     s.edit_sequence("Reset Color Group", |q, _, _| {
         let g = q.color_group_mut(gid).ok_or_else(|| bad("color.groupReset", "unknown color group"))?;
         g.effects.clear();
+        g.pre_clip = filmcraft_project::ColorGraph::default();
+        g.post_clip = filmcraft_project::ColorGraph::default();
         Ok(())
     })?;
     Ok(json!({"group": gid.0}))
@@ -880,4 +906,144 @@ fn batch_reset_grade(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(())
     })?;
     Ok(json!({"count": clips.len()}))
+}
+
+fn downscale_rgba8_thumb(src_w: usize, src_h: usize, rgba: &[u8], dst_w: u32, dst_h: u32) -> (u32, u32, Vec<u8>) {
+    if src_w == 0 || src_h == 0 || rgba.len() < src_w * src_h * 4 || dst_w == 0 || dst_h == 0 {
+        return (0, 0, Vec::new());
+    }
+    let mut out = vec![0u8; (dst_w as usize) * (dst_h as usize) * 4];
+    for y in 0..dst_h as usize {
+        let sy = (y * src_h / dst_h as usize).min(src_h - 1);
+        for x in 0..dst_w as usize {
+            let sx = (x * src_w / dst_w as usize).min(src_w - 1);
+            let si = (sy * src_w + sx) * 4;
+            let di = (y * dst_w as usize + x) * 4;
+            out[di..di + 4].copy_from_slice(&rgba[si..si + 4]);
+        }
+    }
+    (dst_w, dst_h, out)
+}
+
+fn still_grab(s: &mut Session, p: &Value) -> Result<Value> {
+    let seq_id = s.state.active_sequence.ok_or(crate::EngineError::NoSequence)?;
+    let seq = s.active_sequence().ok_or(crate::EngineError::NoSequence)?;
+    let rate = seq.settings.frame_rate;
+    let time = time_p(s, p, "time").unwrap_or_else(|| s.playhead());
+    let tc = filmcraft_time::format_timecode_frames(rate.frame_at(time), rate, false);
+
+    let clip_id = clip_p(p, "clip")
+        .or_else(|| s.state.selection.iter().find(|cid| seq.video_tracks.iter().any(|tr| tr.items.iter().any(|it| it.id == **cid))).copied())
+        .or_else(|| seq.video_tracks.iter().flat_map(|tr| tr.items.iter()).find(|it| it.range().start <= time && time < it.range().end()).map(|it| it.id))
+        .or_else(|| seq.video_tracks.iter().flat_map(|tr| tr.items.iter()).next().map(|it| it.id))
+        .ok_or_else(|| bad("color.stillGrab", "no video clip to grab still from"))?;
+
+    let (_, it) = seq.find_item(clip_id).ok_or_else(|| bad("color.stillGrab", "clip not found"))?;
+    let clip_name = s.project.items.get(&it.item).map(|m| m.name.clone()).unwrap_or_else(|| format!("Clip {}", clip_id.0));
+    let mut graph = it.effective_color_graph().into_owned();
+    let effects: Vec<filmcraft_project::EffectInstance> = it.effects.iter().filter(|e| e.effect == "lumetri").cloned().collect();
+    if graph.is_empty() && !effects.is_empty() {
+        graph = filmcraft_project::ColorGraph::from_serial_effects(&effects);
+    }
+
+    let provider = s.media.provider(s.project.clone(), s.services.clone());
+    let opts = filmcraft_render::RenderOptions { scale: 0.25, captions: false, ..Default::default() };
+    let rendered = filmcraft_render::render_sequence(&s.project, seq_id, time, opts, &provider);
+    let (thumb_w, thumb_h, thumb_rgba) = downscale_rgba8_thumb(rendered.w, rendered.h, &rendered.over_black_rgba8(), 160, 90);
+
+    let custom_name = str_p(p, "name").map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    let mut created_id = 0u64;
+    let mut created_label = String::new();
+    s.edit("Grab Still", |pr, _| {
+        if pr.color_stills.len() >= filmcraft_project::MAX_COLOR_STILLS {
+            return Err(bad("color.stillGrab", format!("still limit ({}) reached", filmcraft_project::MAX_COLOR_STILLS)));
+        }
+        let id = pr.alloc_id();
+        let next_num = pr.color_stills.len() + 1;
+        let label = custom_name.unwrap_or_else(|| format!("Still {next_num:02}"));
+        created_id = id;
+        created_label = label.clone();
+        pr.color_stills.push(filmcraft_project::ColorStill { id, label, clip_name, timecode: tc, graph, effects, thumb_w, thumb_h, thumb_rgba });
+        Ok(())
+    })?;
+    Ok(json!({"id": created_id, "label": created_label}))
+}
+
+fn still_apply(s: &mut Session, p: &Value) -> Result<Value> {
+    let sid = p.get("id").and_then(Value::as_u64).ok_or_else(|| bad("color.stillApply", "need `id`"))?;
+    let still = s.project.color_stills.iter().find(|st| st.id == sid).cloned().ok_or_else(|| bad("color.stillApply", "unknown still id"))?;
+    let append = str_p(p, "mode").is_some_and(|m| m.eq_ignore_ascii_case("append"));
+    let explicit_clips = clip_ids_p(p, "clips");
+    let target_clips = if explicit_clips.is_empty() { s.state.selection.clone() } else { explicit_clips };
+    if target_clips.is_empty() {
+        return Err(bad("color.stillApply", "no target clips selected"));
+    }
+    s.edit_sequence(if append { "Append Still Grade" } else { "Apply Still Grade" }, |q, _, _| {
+        for cid in &target_clips {
+            let Some((_, it)) = q.find_item_mut(*cid) else { continue };
+            if append {
+                for fx in &still.effects {
+                    it.effects.push(fx.clone());
+                }
+                if let Some(cg) = it.color_graph.as_mut() {
+                    for fx in &still.effects {
+                        let _ = cg.add_serial_node(None, fx.clone());
+                    }
+                } else {
+                    it.color_graph = Some(Box::new(filmcraft_project::ColorGraph::from_serial_effects(&it.effects)));
+                }
+            } else {
+                it.effects.retain(|e| e.effect != "lumetri");
+                it.color_graph = Some(Box::new(still.graph.clone()));
+                it.sync_lumetri_effects_from_graph();
+                if it.effects.iter().all(|e| e.effect != "lumetri") {
+                    it.effects.extend(still.effects.iter().cloned());
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(json!({"id": sid, "clips": target_clips.len()}))
+}
+
+fn still_rename(s: &mut Session, p: &Value) -> Result<Value> {
+    let sid = p.get("id").and_then(Value::as_u64).ok_or_else(|| bad("color.stillRename", "need `id`"))?;
+    let name = str_p(p, "name").map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).ok_or_else(|| bad("color.stillRename", "need `name`"))?;
+    s.edit("Rename Still", |pr, _| {
+        let st = pr.color_stills.iter_mut().find(|st| st.id == sid).ok_or_else(|| bad("color.stillRename", "unknown still id"))?;
+        st.label = name;
+        Ok(())
+    })?;
+    Ok(json!({"id": sid}))
+}
+
+fn still_delete(s: &mut Session, p: &Value) -> Result<Value> {
+    let sid = p.get("id").and_then(Value::as_u64).ok_or_else(|| bad("color.stillDelete", "need `id`"))?;
+    s.edit("Delete Still", |pr, _| {
+        let before = pr.color_stills.len();
+        pr.color_stills.retain(|st| st.id != sid);
+        if pr.color_stills.len() == before {
+            return Err(bad("color.stillDelete", "unknown still id"));
+        }
+        Ok(())
+    })?;
+    Ok(json!({"id": sid}))
+}
+
+fn still_list(s: &mut Session, _p: &Value) -> Result<Value> {
+    let stills: Vec<Value> = s
+        .project
+        .color_stills
+        .iter()
+        .map(|st| {
+            json!({
+                "id": st.id,
+                "label": st.label,
+                "clipName": st.clip_name,
+                "timecode": st.timecode,
+                "nodes": st.graph.nodes.len(),
+            })
+        })
+        .collect();
+    Ok(json!({"stills": stills}))
 }

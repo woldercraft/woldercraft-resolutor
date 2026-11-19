@@ -10,6 +10,8 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
 pub mod caption;
+pub mod color_graph;
+pub mod color_still;
 pub mod effect;
 pub mod essential;
 pub mod find;
@@ -36,12 +38,19 @@ use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeRange};
 use serde::{Deserialize, Serialize};
 
 pub use caption::{Caption, CaptionAlign, CaptionAnchor, CaptionFormat, CaptionStyle, CaptionTrack, plain_text};
-pub use effect::{EFFECTCRAFT_TOP_FOLDER, EffectDef, EffectInstance, EffectKind, ParamDef, ParamKind, effect_defs, find_effect, interchange_name, search_aliases};
+pub use color_graph::{
+    ColorEdge, ColorEndpoint, ColorGraph, ColorNode, ColorNodeId, ColorNodeKind, ColorPortKind, ColorScopeKind, LayerBlendMode, MAX_COLOR_EDGES,
+    MAX_COLOR_NODES, MAX_MIXER_INPUTS, SharedColorNode, SharedNodeId, SplitSpace, default_lumetri_instance,
+};
+pub use color_still::{ColorStill, MAX_COLOR_STILLS, MAX_STILL_THUMB_SIDE};
+pub use effect::{
+    EFFECTCRAFT_TOP_FOLDER, EffectDef, EffectInstance, EffectKind, ParamDef, ParamKind, effect_defs, find_effect, interchange_name, search_aliases,
+};
 pub use essential::{AudioType, EssentialSound};
 pub use find::{FindOp, FindQuery, FindRow, SearchBin};
 pub use graphic_design::{CharStyle, GraphicMeta, LayerExtra, Pin, PinTarget, Roll, RollMode, SourceGraphic, StyleRun};
 pub use keyframe::{Interpolation, Keyframe, Param, ParamValue};
-pub use mask::{Mask, MaskMode, MaskPath, MaskVertex, TrackMethod};
+pub use mask::{Mask, MaskKind, MaskMode, MaskPath, MaskVertex, TrackMethod};
 pub use mixer::{AutomationMode, InputMap, MixerStrip, TrackSend};
 pub use multicam::{Camera, MergedClip, MulticamAudio, MulticamSel, MulticamSource};
 pub use narration::{Narration, VocalPitch};
@@ -67,8 +76,8 @@ pub use item::{AudioChannelMap, Bin, BinEntry, Interpretation, ItemKind, MediaCl
 pub use label::Label;
 pub(crate) use sequence::bounded_time_range;
 pub use sequence::{
-    ColorGroup, ColorGroupId, MAX_FRAME_PIXELS, MAX_FRAME_SIDE, MAX_PIXEL_ASPECT, Sequence, SequenceSettings, SplitMarks, checked_par,
-    conformed_size, par_ratio, sane_par, validate_frame_size,
+    ColorGroup, ColorGroupId, MAX_FRAME_PIXELS, MAX_FRAME_SIDE, MAX_PIXEL_ASPECT, Sequence, SequenceSettings, SplitMarks, checked_par, conformed_size,
+    par_ratio, sane_par, validate_frame_size,
 };
 pub use settings::{IngestAction, IngestSettings, ProjectSettings, ScratchDisks};
 pub use source::resolve_auto_points;
@@ -120,6 +129,12 @@ pub struct Project {
     /// instructions for whoever opens it next, frame numbers and the like. Schema v15.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// Project-wide shared color nodes referenced by [`ColorNodeKind::Shared`]. Schema v18.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shared_color_nodes: BTreeMap<SharedNodeId, SharedColorNode>,
+    /// Gallery stills (`PanelKind::ColorGallery`): thumbnails + saved `ColorGraph` snapshots. Schema v19.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub color_stills: Vec<ColorStill>,
 }
 
 impl Default for Project {
@@ -149,6 +164,8 @@ impl Project {
             source_graphics: BTreeMap::new(),
             narrations: BTreeMap::new(),
             notes: String::new(),
+            shared_color_nodes: BTreeMap::new(),
+            color_stills: Vec::new(),
         }
     }
 
@@ -176,6 +193,7 @@ impl Project {
             }
         }
         self.search_bins.iter().for_each(|b| see(b.id.0));
+        self.color_stills.iter().for_each(|s| see(s.id));
         // deleting an item leaves these entries behind: a new item taking that id would inherit them
         self.transcripts.keys().chain(self.source_graphics.keys()).chain(self.narrations.keys()).for_each(|i| see(i.0));
         // `lut.import` names LUTs `lut<id>`
@@ -388,6 +406,7 @@ impl Project {
             merged: None,
             split: SplitMarks::default(),
             color_groups: Vec::new(),
+            timeline_color: ColorGraph::default(),
         };
         for i in 0..v {
             let id = TrackId(self.alloc_id());
@@ -496,6 +515,7 @@ impl Project {
             source_channels,
             audio_stream: 0,
             graphic: source_graphic.and_then(|sg| sg.meta.map(Box::new)),
+            color_graph: None,
         })
     }
 

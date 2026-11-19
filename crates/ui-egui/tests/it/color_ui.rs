@@ -146,6 +146,7 @@ fn lumetri(d: &mut Driver, clip: u64) -> Value {
 fn lumetri_lut_menus_and_section_switches() {
     let mut d = Driver::demo();
     d.ok("ui.set", json!({"workspace": "Color"}));
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
     d.frames(3);
     let clip = select_first_clip(&mut d);
     d.exec("lumetri.setInputLut", json!({"lut": "builtin:slog3-sgamut3cine-to-rec709"}));
@@ -232,8 +233,10 @@ fn effect_controls_lut_browse_imports_and_sets_in_one_undo_step() {
     d.frames(2);
     // Browse… is at the bottom of a long list: scroll it into view
     let first = d.ids("effectControls.lumetri.input_lut.lut.").into_iter().next().expect("the LUT list is open");
-    for _ in 0..10 {
-        d.ok("ui.scroll", json!({"id": first, "dy": -400.0}));
+    let first_r = d.element(&first).expect("LUT list item rect");
+    let (sx, sy) = (first_r[0] + first_r[2] * 0.5, first_r[1] + first_r[3] * 0.5);
+    for _ in 0..6 {
+        d.ok("ui.scroll", json!({"x": sx, "y": sy, "dy": -400.0}));
         d.frames(1);
     }
     d.click("effectControls.lumetri.input_lut.browse");
@@ -257,7 +260,7 @@ fn lumetri_curves_grow_with_the_panel() {
     d.frames(3);
     let clip = select_first_clip(&mut d);
     d.exec("effects.apply", json!({"clips": [clip], "effect": "lumetri"}));
-    d.ok("ui.set", json!({"focused": "LumetriColor"}));
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
     d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
     d.frames(3);
     d.click("lumetri.section.Curves");
@@ -308,6 +311,8 @@ fn interpret_footage_and_sequence_color_dialogs_and_hdr_scopes() {
 fn apply_match_from_the_color_wheels_section() {
     let mut d = Driver::demo();
     d.ok("ui.set", json!({"workspace": "Color"}));
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
+    d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
     d.frames(3);
     let clip = select_first_clip(&mut d);
     d.exec("effects.apply", json!({"clips": [clip], "effect": "lumetri"}));
@@ -342,6 +347,8 @@ impl Driver {
 fn hdr_lumetri_controls_hsl_refine_and_comparison_view() {
     let mut d = Driver::demo();
     d.ok("ui.set", json!({"workspace": "Color"}));
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
+    d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
     d.frames(3);
     let clip = select_first_clip(&mut d);
     d.exec("effects.apply", json!({"clips": [clip], "effect": "lumetri"}));
@@ -378,7 +385,11 @@ fn hdr_lumetri_controls_hsl_refine_and_comparison_view() {
     // Color Match ▸ Comparison View toggles the Program monitor's Comparison View; Apply Match
     // then uses its reference frame
     d.click("lumetri.section.Color Wheels & Match");
+    d.frames(2);
     d.click("lumetri.match.comparisonView");
+    // Restore split layout so Comparison View shows the Program monitor's reference pane
+    d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
+    d.frames(2);
     assert_eq!(d.app().ui.program.display_mode(), Some(filmcraft_ui_egui::state::DisplayMode::Comparison));
     assert!(!d.ids("program.compare.reference").is_empty());
     let seq = d.exec("sequence.inspect", json!({}));
@@ -388,6 +399,8 @@ fn hdr_lumetri_controls_hsl_refine_and_comparison_view() {
     d.app().ui.program.compare_ref = Some(rate.tick_of(frame).0);
     d.frames(3);
     d.snapshot("color-comparison-view", None);
+    d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
+    d.frames(2);
     d.click("lumetri.match.apply");
     let e = lumetri(&mut d, clip);
     assert!(e["params"]["wheel_highlights"]["value"].as_str().unwrap() != "Vec2(Vec2 { x: 0.0, y: 0.0 })", "matched to the comparison reference: {e}");
@@ -614,6 +627,7 @@ fn timeline_clips_selector_and_draggable_nodes() {
 fn davinci_resolve_color_page_layout_and_power_windows() {
     let mut d = Driver::demo();
     d.ok("ui.set", json!({"workspace": "Color"}));
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
     d.frames(4);
 
     // 1. Clips ribbon is present
@@ -783,6 +797,7 @@ fn interpret_footage_from_the_item_menu_takes_the_whole_selection() {
 fn a_dragged_lumetri_curve_point_undoes_and_redoes() {
     let mut d = Driver::demo();
     d.ok("ui.set", json!({"workspace": "Color"}));
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
     d.frames(3);
     let clip = select_first_clip(&mut d);
     d.exec("effects.apply", json!({"clips": [clip], "effect": "lumetri"}));
@@ -826,6 +841,7 @@ fn a_dragged_lumetri_curve_point_undoes_and_redoes() {
 fn a_click_on_the_lumetri_curve_places_a_point() {
     let mut d = Driver::demo();
     d.ok("ui.set", json!({"workspace": "Color"}));
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
     d.frames(3);
     let clip = select_first_clip(&mut d);
     d.exec("effects.apply", json!({"clips": [clip], "effect": "lumetri"}));
@@ -854,6 +870,7 @@ fn lumetri_panel_menu_offers_export_cube() {
     // #4127: the Color Grading panel menu has Export .cube… for the selected clip's grade
     let mut d = Driver::demo();
     d.ok("ui.set", json!({"workspace": "Color"}));
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
     d.frames(3);
     let clip = select_first_clip(&mut d);
     d.exec("effects.apply", json!({"clips": [clip], "effect": "lumetri"}));
@@ -892,6 +909,7 @@ fn export_cube_dialog_honours_an_explicit_clip_without_a_selection() {
 fn panel_export_cube_uses_the_shown_clip_and_names_what_is_left_out() {
     let mut d = Driver::demo();
     d.ok("ui.set", json!({"workspace": "Color"}));
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
     d.frames(3);
     let seq = d.exec("sequence.inspect", json!({}));
     let items = seq["video"][0]["items"].as_array().unwrap().clone();
@@ -948,6 +966,7 @@ fn lumetri_primaries_wheels_and_controls_fit_inside_panel_at_1080p() {
         d.frames(4);
         d.ok("ui.menu.invoke", json!({"id": "app.language.spanish"}));
         d.ok("ui.set", json!({"workspace": "Color"}));
+        d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
         d.frames(4);
         let _clip = select_first_clip(&mut d);
         d.frames(4);
@@ -990,6 +1009,8 @@ fn lumetri_primaries_wheels_and_controls_fit_inside_panel_at_1080p() {
 fn lumetri_power_windows_switch_and_section_reset() {
     let mut d = Driver::demo();
     d.ok("ui.set", json!({"workspace": "Color"}));
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
+    d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
     d.frames(3);
     let clip = select_first_clip(&mut d);
     d.exec("effects.apply", json!({"clips": [clip], "effect": "lumetri"}));
@@ -1040,6 +1061,7 @@ fn lumetri_power_windows_switch_and_section_reset() {
 fn creative_tints_pen_on_fresh_clip_hsl_auto_enable_and_dual_ids() {
     let mut d = Driver::demo();
     d.ok("ui.set", json!({"workspace": "Color"}));
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
     d.frames(4);
     let clip = select_first_clip(&mut d);
 
@@ -1143,6 +1165,7 @@ fn wb_eyedropper_tint_cancels_green_cast_with_positive_tint() {
 fn lumetri_part2_presets_hsl_bars_mask_chips_and_paste_all() {
     let mut d = Driver::demo();
     d.ok("ui.set", json!({"workspace": "Color"}));
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
     d.frames(4);
     let seq = d.exec("sequence.inspect", json!({}));
     let items = seq["video"][0]["items"].as_array().expect("video items");
@@ -1221,4 +1244,395 @@ fn lumetri_part2_presets_hsl_bars_mask_chips_and_paste_all() {
         let (_, it2) = q.find_item(filmcraft_project::ClipId(clip2)).unwrap();
         assert!(it2.effects.iter().any(|e| e.effect == "lumetri"), "Paste All should copy lumetri grade to clip2");
     }
+}
+
+#[test]
+fn resolve_phase1_curves_primaries_colorslice_warper_and_badges() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
+    d.frames(3);
+    let clip = select_first_clip(&mut d);
+
+    // 1. Verify Resolve Primary extra controls are rendered in Primaries Knobs mode
+    d.click("lumetri.mode.knobs");
+    d.frames(2);
+    for id in ["lumetri.knob.contrast_pivot", "lumetri.knob.midtone_detail", "lumetri.knob.color_boost", "lumetri.knob.primary_hue", "lumetri.knob.lum_mix"] {
+        assert!(d.element(id).is_some(), "Primary control {id} should be rendered");
+    }
+
+    // 2. Switch to Curves section: verify Overlay/Gang/Soft Clip on Custom RGB (tab 0), then Sat vs Lum (tab 6)
+    d.click("lumetri.section.Curves");
+    d.frames(2);
+    assert!(d.element("lumetri.curve.overlay").is_some(), "Overlay toggle present on RGB Curves tab");
+    assert!(d.element("lumetri.curve.gang").is_some(), "Gang toggle present on RGB Curves tab");
+    assert!(d.element("lumetri.param.curve_low_soft").is_some(), "Low Soft slider present");
+    assert!(d.element("lumetri.param.curve_high_soft").is_some(), "High Soft slider present");
+    assert!(d.element("lumetri.curve_tab.6").is_some(), "Sat vs Lum curve tab present");
+    d.click("lumetri.curve_tab.6");
+    d.frames(2);
+    assert!(d.element("lumetri.curve.sat_vs_luma").is_some(), "Sat vs Lum curve editor rendered");
+
+    // 3. Maximize LumetriColor so all 9 toolbar buttons are visible, then test ColorSlice & Color Warper
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
+    d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
+    d.frames(3);
+    d.click("lumetri.section.ColorSlice");
+    d.frames(2);
+    d.click("lumetri.switch.ColorSlice");
+    d.frames(2);
+    assert!(d.element("lumetri.param.cs_red_sat").is_some(), "ColorSlice red sat fader present");
+    assert!(d.element("lumetri.param.cs_red_den").is_some(), "ColorSlice red den fader present");
+    assert!(d.element("lumetri.colorslice.red.hue").is_some(), "ColorSlice red hue hot-number present");
+    assert!(d.element("lumetri.colorslice.red.reset").is_some(), "ColorSlice red reset present");
+
+    // 4. Toggle & expand Color Warper section and verify Hue-Sat / Chroma-Luma grids + cw_on param
+    d.click("lumetri.section.Color Warper");
+    d.frames(2);
+    d.click("lumetri.switch.Color Warper");
+    d.frames(2);
+    assert!(d.element("lumetri.warper.hs_grid").is_some(), "Hue-Sat spiderweb grid rendered by default");
+    assert!(d.element("lumetri.warper.mode.chroma_luma").is_some(), "Chroma-Luma tab present");
+    d.click("lumetri.warper.mode.chroma_luma");
+    d.frames(2);
+    assert!(d.element("lumetri.warper.cl_grid").is_some(), "Chroma-Luma 2D grid rendered");
+    assert!(d.element("lumetri.warper.reset").is_some(), "Warper reset button present");
+
+    // 5. Verify section switches toggled cs_on / cw_on from default true -> false, and toggle back -> true
+    let fx = lumetri(&mut d, clip);
+    assert_eq!(fx["params"]["cs_on"]["value"], json!("Bool(false)"));
+    assert_eq!(fx["params"]["cw_on"]["value"], json!("Bool(false)"));
+    d.click("lumetri.switch.Color Warper");
+    d.frames(2);
+    let fx = lumetri(&mut d, clip);
+    assert_eq!(fx["params"]["cw_on"]["value"], json!("Bool(true)"));
+}
+
+#[test]
+fn resolve_phase3_qualifier_power_windows_and_highlight() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(3);
+    let clip = select_first_clip(&mut d);
+    d.exec("effects.apply", json!({"clips": [clip], "effect": "lumetri"}));
+
+    // Maximize Color Grading panel so Power Windows & Qualifier controls fit comfortably
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
+    d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
+    d.frames(3);
+
+    // 1. Highlight toggle (`Shift+H` / `color.toggleHighlight`) mutates UI only (never adds undo)
+    let undo_before = d.exec("history.list", json!({}))["undo"].as_array().map_or(0, Vec::len);
+    assert_eq!(d.app().ui.color_highlight, 0);
+    d.ok("ui.menu.invoke", json!({"id": "color.toggleHighlight"}));
+    d.frames(2);
+    assert!(d.app().ui.color_highlight > 0, "Highlight should turn on");
+    assert_eq!(d.exec("history.list", json!({}))["undo"].as_array().map_or(0, Vec::len), undo_before, "Highlight must not push an undo step");
+    d.click("lumetri.highlight");
+    assert_eq!(d.app().ui.color_highlight, 0, "Clicking HL button toggles Highlight off");
+
+    // 2. Power Windows: Polygon (6-gon), Gradient, and Soft Balance presets
+    d.click("lumetri.section.Power Windows");
+    d.click("lumetri.mask.add_polygon");
+    d.click("lumetri.mask.add_gradient");
+    d.click("lumetri.mask.chip.0");
+    assert!(d.element("lumetri.mask.feather_in").is_some(), "Soft Balance In pill rendered for Polygon mask");
+    d.click("lumetri.mask.feather_in");
+    {
+        let q = d.app().session.active_sequence().unwrap();
+        let (_, it) = q.find_item(filmcraft_project::ClipId(clip)).unwrap();
+        let lum = it.effects.iter().find(|e| e.effect == "lumetri").unwrap();
+        assert_eq!(lum.masks.len(), 2);
+        assert_eq!(lum.masks[0].path_at(filmcraft_time::Tick(0)).vertices.len(), 6);
+        assert!((lum.masks[0].feather_balance.f64_at(filmcraft_time::Tick(0)) - (-100.0)).abs() < 1e-6);
+        assert_eq!(lum.masks[1].kind, filmcraft_project::MaskKind::Gradient);
+    }
+
+    // 3. Qualifier: Node Key, Invert, Matte Finesse, and HSL / RGB / Luma / 3D tabs
+    d.click("lumetri.section.HSL Secondary");
+    for id in [
+        "lumetri.hsl.key_scope",
+        "lumetri.hsl.invert_key",
+        "lumetri.hsl.highlight",
+        "lumetri.param.hsl_sat_max",
+        "lumetri.param.hsl_clean_black",
+        "lumetri.param.hsl_clean_white",
+        "lumetri.param.hsl_in_out",
+        "lumetri.param.key_gain",
+    ] {
+        assert!(d.element(id).is_some(), "Qualifier control {id} should render");
+    }
+    d.click("lumetri.hsl.invert_key");
+    d.click("lumetri.hsl.key_scope");
+    let fx = lumetri(&mut d, clip);
+    assert_eq!(fx["params"]["hsl_invert_key"]["value"], json!("Bool(true)"));
+    assert_eq!(fx["params"]["hsl_key_scope"]["value"], json!("Choice(1)"));
+
+    d.click("lumetri.hsl.mode.1");
+    assert!(d.element("lumetri.param.hsl_r_min").is_some(), "RGB mode shows channel bounds");
+    d.click("lumetri.hsl.mode.2");
+    assert!(d.element("lumetri.param.hsl_luma_soft").is_some(), "Luma mode shows luma soften");
+    d.click("lumetri.hsl.mode.3");
+    assert!(d.element("lumetri.eyedropper.3d_add").is_some(), "3D mode shows + Pick button");
+    assert!(d.element("lumetri.eyedropper.3d_sub").is_some(), "3D mode shows - Exclude button");
+    assert!(d.element("lumetri.hsl.3d_clear").is_some(), "3D mode shows Clear button");
+}
+
+#[test]
+fn resolve_phase4_nonlinear_color_graph_scopes_and_pins() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(3);
+    let clip = select_first_clip(&mut d);
+
+    // 1. Add initial node and create a Color Group so Pre-Clip / Post-Clip scopes are available
+    d.click("color_nodes.init_node");
+    let grp = d.exec("color.groupCreate", json!({"clips": [clip], "name": "DayExterior"}));
+    let gid = grp["group"].as_u64().unwrap();
+    d.frames(2);
+
+    // 2. Verify Row 2 scope tabs and non-linear creation buttons in ColorNodes
+    for id in [
+        "color_nodes.scope.pre_clip",
+        "color_nodes.scope.clip",
+        "color_nodes.scope.post_clip",
+        "color_nodes.scope.timeline",
+        "color_nodes.add_parallel",
+        "color_nodes.add_layer",
+        "color_nodes.add_outside",
+        "color_nodes.add_splitter",
+        "color_nodes.add_shared",
+    ] {
+        assert!(d.element(id).is_some(), "ColorNodes control {id} should be rendered");
+    }
+
+    // 3. Add Outside, Parallel, and Layer nodes on Clip scope and verify dual RGB/Key pins
+    d.click("color_nodes.add_outside");
+    d.click("color_nodes.add_parallel");
+    d.click("color_nodes.add_layer");
+    assert!(d.element("color_nodes.node.0.out_rgb.0").is_some(), "RGB output pin rendered");
+    assert!(d.element("color_nodes.node.0.out_key.0").is_some(), "Key output pin rendered");
+    assert!(d.element("color_nodes.node.1.in_key.0").is_some(), "Outside node Key input pin rendered");
+
+    // 4. Switch to Pre-Clip and Timeline scopes and add a node in Timeline scope
+    d.click("color_nodes.scope.pre_clip");
+    assert_eq!(d.app().ui.active_color_scope, filmcraft_project::ColorScopeKind::PreClip);
+    assert_eq!(d.app().ui.active_color_group, Some(filmcraft_project::ColorGroupId(gid)));
+
+    d.click("color_nodes.scope.timeline");
+    assert_eq!(d.app().ui.active_color_scope, filmcraft_project::ColorScopeKind::Timeline);
+    d.click("color_nodes.init_node");
+    assert!(!d.app().session.active_sequence().unwrap().timeline_color.is_empty(), "Timeline color graph has initial node");
+
+    // 5. Switch back to Clip scope and verify DAG Key Routing controls in Qualifier section
+    d.click("color_nodes.scope.clip");
+    d.click("color_nodes.node.0");
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
+    d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
+    d.frames(2);
+    d.click("lumetri.section.HSL Secondary");
+    assert!(d.element("lumetri.dag.key_input_gain").is_some(), "DAG Key Input Gain control rendered");
+    assert!(d.element("lumetri.dag.key_output_gain").is_some(), "DAG Key Output Gain control rendered");
+    assert!(d.element("lumetri.dag.key_invert").is_some(), "DAG Key Invert control rendered");
+    assert!(d.element("lumetri.dag.add_outside").is_some(), "DAG + Outside button rendered");
+}
+
+#[test]
+fn resolve_phase2_bars_log_hdr_and_rgb_mixer() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(3);
+    let _clip = select_first_clip(&mut d);
+    d.ok("ui.panel.show", json!({"panel": "LumetriColor"}));
+    d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
+    d.frames(2);
+
+    // 1. Primaries Wheels mode + LGG/Legacy toggle
+    assert!(d.element("lumetri.wheels.mode.wheels").is_some());
+    assert!(d.element("lumetri.wheels.grade_model").is_some());
+    assert!(d.element("lumetri.wheel.offset").is_some());
+
+    // 2. Switch to Primaries Bars mode
+    d.click("lumetri.wheels.mode.bars");
+    for id in ["lumetri.bars.lift.r", "lumetri.bars.gamma.g", "lumetri.bars.gain.b", "lumetri.bars.offset.y"] {
+        assert!(d.element(id).is_some(), "Bars mode should render {id}");
+    }
+
+    // 3. Switch to Log Wheels mode
+    d.click("lumetri.wheels.mode.log");
+    for id in [
+        "lumetri.wheel.log_shadows",
+        "lumetri.wheel.log_midtones",
+        "lumetri.wheel.log_highlights",
+        "lumetri.wheel.log_offset",
+        "lumetri.param.log_low_range",
+        "lumetri.param.log_high_range",
+    ] {
+        assert!(d.element(id).is_some(), "Log mode should render {id}");
+    }
+
+    // 4. Switch to HDR Wheels mode
+    d.click("lumetri.wheels.mode.hdr");
+    for id in [
+        "lumetri.param.hdr_zone_falloff",
+        "lumetri.param.hdr_wheel_range",
+        "lumetri.wheel.hdr_black",
+        "lumetri.wheel.hdr_dark",
+        "lumetri.wheel.hdr_shadow",
+        "lumetri.wheel.hdr_light",
+        "lumetri.wheel.hdr_highlight",
+        "lumetri.wheel.hdr_specular",
+        "lumetri.wheel.hdr_global",
+    ] {
+        assert!(d.element(id).is_some(), "HDR mode should render {id}");
+    }
+
+    // 5. Switch to RGB Mixer tool and interact with Monochrome + Swap R↔B
+    d.click("lumetri.section.RGB Mixer");
+    for id in [
+        "lumetri.rgb_mixer.monochrome",
+        "lumetri.rgb_mixer.preserve_lum",
+        "lumetri.rgb_mixer.swap_rb",
+        "lumetri.rgb_mixer.reset",
+        "lumetri.rgb_mixer.mix_rr",
+        "lumetri.rgb_mixer.mix_gg",
+        "lumetri.rgb_mixer.mix_bb",
+    ] {
+        assert!(d.element(id).is_some(), "RGB Mixer should render {id}");
+    }
+    d.click("lumetri.rgb_mixer.swap_rb");
+    d.click("lumetri.rgb_mixer.monochrome");
+    let seq = d.app().session.active_sequence().unwrap();
+    let fx = seq
+        .video_tracks
+        .iter()
+        .flat_map(|tr| tr.items.iter())
+        .find_map(|it| it.effects.iter().find(|e| e.effect == "lumetri"))
+        .expect("lumetri effect created");
+    assert_eq!(fx.param("mix_monochrome").and_then(|p| p.value.as_bool()), Some(true));
+    assert!((fx.param("mix_rb").map_or(0.0, |p| p.f64_at(filmcraft_time::Tick::ZERO)) - 100.0).abs() < 1e-3);
+}
+
+#[test]
+fn resolve_phase5_modular_panels_gallery_wipe_cie_cst_and_sizing() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(4);
+
+    // 1. Modular Color workspace: separate dockable tabs active by default without Lumetri bar layout switcher
+    for tab in [
+        "panel.tab.ColorGallery",
+        "panel.tab.ColorPrimaries",
+        "panel.tab.ColorCurves",
+        "panel.tab.ColorCst",
+        "panel.tab.ColorSizing",
+        "panel.tab.LumetriScopes",
+    ] {
+        assert!(d.element(tab).is_some(), "Modular Color tab {tab} missing");
+    }
+    assert!(d.element("lumetri.bar.top").is_none(), "Dedicated Color panels must use fixed top chrome without Top/Bottom/Left/Dual bar switcher");
+    assert!(d.element("lumetri.bar.dual").is_none(), "Dedicated Color panels must not show Dual view switcher");
+
+    let clip = select_first_clip(&mut d);
+    d.exec("effects.apply", json!({"clips": [clip], "effect": "lumetri"}));
+    d.frames(3);
+
+    // 2. Color Keyframes (`Dynamics`) controls in fixed top bar add a keyframe at playhead
+    assert!(d.element("lumetri.keyframe.mark").is_some(), "Keyframe mark control missing");
+    d.click("lumetri.keyframe.mark");
+    d.frames(2);
+    {
+        let seq = d.app().session.active_sequence().unwrap();
+        let (_, it) = seq.find_item(filmcraft_project::ClipId(clip)).unwrap();
+        let fx = it.effects.iter().find(|e| e.effect == "lumetri").unwrap();
+        let any_kf = fx.params.values().any(|p| !p.keyframes.is_empty());
+        assert!(any_kf, "Clicking lumetri.keyframe.mark should insert at least one keyframe");
+    }
+
+    // 3. Dedicated ColorCst window & Color Space Transform swaps/params + node badge
+    d.click("panel.tab.ColorCst");
+    d.frames(3);
+    for id in [
+        "lumetri.cst.swap",
+        "lumetri.cst.reset",
+        "lumetri.cst.cst_in_space",
+        "lumetri.cst.cst_in_gamma",
+        "lumetri.cst.cst_out_space",
+        "lumetri.cst.cst_out_gamma",
+        "lumetri.cst.cst_tone_map",
+        "lumetri.cst.cst_gamut_map",
+        "lumetri.cst.cst_peak_nits",
+    ] {
+        assert!(d.element(id).is_some(), "ColorCst control {id} missing");
+    }
+    d.exec("effects.setParam", json!({"clip": clip, "effect": "lumetri", "param": "cst_in_space", "value": 3}));
+    d.exec("effects.setParam", json!({"clip": clip, "effect": "lumetri", "param": "cst_on", "value": true}));
+    d.click("lumetri.cst.swap");
+    d.frames(2);
+    {
+        let e = lumetri(&mut d, clip);
+        assert_eq!(e["params"]["cst_out_space"]["value"], json!("Choice(3)"));
+    }
+
+    // 4. Dedicated ColorSizing window + SIZ badge + Flip H toggle
+    d.click("panel.tab.ColorSizing");
+    d.frames(3);
+    for id in ["lumetri.sizing.flip_h", "lumetri.sizing.flip_v", "lumetri.sizing.blanking", "lumetri.sizing.reset", "lumetri.sizing.sizing_zoom"] {
+        assert!(d.element(id).is_some(), "ColorSizing control {id} missing");
+    }
+    d.click("lumetri.sizing.flip_h");
+    d.frames(2);
+    {
+        let e = lumetri(&mut d, clip);
+        assert_eq!(e["params"]["sizing_on"]["value"], json!("Bool(true)"));
+        assert_eq!(e["params"]["sizing_flip_h"]["value"], json!("Bool(true)"));
+    }
+
+    // 5. Gallery Stills: Grab Still + toggle Interactive Program Image Wipe
+    d.click("panel.tab.ColorGallery");
+    d.frames(3);
+    d.click("color_gallery.grab");
+    d.frames(3);
+    assert_eq!(d.app().session.project.color_stills.len(), 1, "Grab Still should store 1 project still");
+    d.click("color_gallery.wipe_toggle");
+    d.frames(3);
+    assert!(d.app().ui.program_wipe.enabled, "Wipe toggle enables Program Image Wipe");
+    assert!(d.element("program.wipe.mode").is_some(), "Program monitor shows wipe mode button");
+    assert!(d.element("program.wipe.invert").is_some(), "Program monitor shows wipe invert button");
+    d.click("program.wipe.mode");
+    d.click("program.wipe.invert");
+    assert_eq!(d.app().ui.program_wipe.mode, filmcraft_ui_egui::state::WipeMode::Vertical);
+    assert!(d.app().ui.program_wipe.invert);
+    d.click("program.wipe.close");
+    assert!(!d.app().ui.program_wipe.enabled);
+
+    // 6. CIE 1931 Chromaticity Scope in LumetriScopes
+    d.click("panel.tab.LumetriScopes");
+    d.frames(3);
+    d.click("scopes.wrench");
+    d.frames(2);
+    d.click("scopes.menu.cie1931");
+    for _ in 0..30 {
+        d.frames(2);
+        if d.element("scopes.view.cie1931").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(d.element("scopes.view.cie1931").is_some(), "CIE 1931 chromaticity scope view rendered");
+
+    // 7. Curves 2-column inspector, Hist toggle, Hue swatches, and scroll-invariant height
+    d.click("panel.tab.ColorCurves");
+    d.frames(3);
+    assert!(d.element("lumetri.curve.hist").is_some(), "Hist toggle present");
+    let before_scroll = d.element("lumetri.curve.curve_luma").expect("curve_luma rect");
+    let cx = before_scroll[0] + before_scroll[2] * 0.5;
+    let cy = before_scroll[1] + before_scroll[3] * 0.5;
+    d.ok("ui.scroll", json!({"x": cx, "y": cy, "dy": -200.0}));
+    d.frames(2);
+    let after_scroll = d.element("lumetri.curve.curve_luma").expect("curve_luma rect after scroll");
+    assert!((before_scroll[3] - after_scroll[3]).abs() < 1.0, "Curve height must stay fixed on scroll: {before_scroll:?} vs {after_scroll:?}");
+    d.click("lumetri.curve_tab.1");
+    d.frames(2);
+    assert!(d.element("lumetri.curve.swatch.0").is_some(), "Hue vector swatch 0 present in side inspector");
 }

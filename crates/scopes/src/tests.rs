@@ -307,6 +307,7 @@ fn perf_scopes_at_1080p() {
         (ScopeKind::Histogram, WaveformType::Rgb, ParadeType::Rgb),
         (ScopeKind::VectorscopeYuv, WaveformType::Rgb, ParadeType::Rgb),
         (ScopeKind::VectorscopeHls, WaveformType::Rgb, ParadeType::Rgb),
+        (ScopeKind::Cie1931, WaveformType::Rgb, ParadeType::Rgb),
     ] {
         let t = std::time::Instant::now();
         for _ in 0..reps {
@@ -314,4 +315,19 @@ fn perf_scopes_at_1080p() {
         }
         println!("{k:?} {wt:?}/{pt:?}: {:.3} ms", t.elapsed().as_secs_f64() * 1000.0 / reps as f64);
     }
+}
+
+#[test]
+fn cie1931_places_primaries_and_d65_correctly() {
+    let p = Params::default();
+    let d65 = cie1931(&solid(4, 4, [128, 128, 128]), &p);
+    assert_eq!(d65.samples, 16);
+    assert!((d65.mean[0] - 0.3127).abs() < 1e-3 && (d65.mean[1] - 0.3290).abs() < 1e-3, "D65 mean: {:?}", d65.mean);
+
+    let red = cie1931(&solid(4, 4, [255, 0, 0]), &p);
+    assert!((red.mean[0] - 0.640).abs() < 1e-3 && (red.mean[1] - 0.330).abs() < 1e-3, "Rec.709 red: {:?}", red.mean);
+
+    let (_, _, rgba) = paint::cie1931(&red, 1.0);
+    assert_eq!(rgba.len(), red.size * red.size * 4);
+    assert!(rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0));
 }

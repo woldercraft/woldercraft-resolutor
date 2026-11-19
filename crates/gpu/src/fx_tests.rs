@@ -359,30 +359,11 @@ fn cases() -> Vec<(&'static str, Vec<(&'static str, ParamValue)>, bool)> {
             ],
             true,
         ),
+        ("lumetri", vec![("look", ch(1)), ("look_intensity", fl(80.0))], true),
+        ("lumetri", vec![("sharpen", fl(40.0))], true),
         (
             "lumetri",
-            vec![
-                ("look", ch(1)),
-                ("look_intensity", fl(80.0)),
-            ],
-            true,
-        ),
-        (
-            "lumetri",
-            vec![
-                ("sharpen", fl(40.0)),
-            ],
-            true,
-        ),
-        (
-            "lumetri",
-            vec![
-                ("temperature", fl(10.0)),
-                ("look", ch(1)),
-                ("look_intensity", fl(100.0)),
-                ("wheel_shadows", pt(0.2, -0.1)),
-                ("sharpen", fl(30.0)),
-            ],
+            vec![("temperature", fl(10.0)), ("look", ch(1)), ("look_intensity", fl(100.0)), ("wheel_shadows", pt(0.2, -0.1)), ("sharpen", fl(30.0))],
             true,
         ),
     ]
@@ -996,6 +977,127 @@ fn gpu_lumetri_curves_and_hsl_match_cpu() {
                 ("luma_vs_sat", ParamValue::Curve(vec![[0.2, 0.3], [0.8, 0.75]])),
                 ("sat_vs_sat", ParamValue::Curve(vec![[0.2, 0.65], [0.8, 0.4]])),
                 ("hue_vs_luma", ParamValue::Curve(vec![[0.3, 0.62], [0.7, 0.38]])),
+                ("sat_vs_luma", ParamValue::Curve(vec![[0.2, 0.62], [0.8, 0.35]])),
+                ("curve_low_soft", fl(35.0)),
+                ("curve_high_soft", fl(40.0)),
+            ],
+        ),
+        (
+            "resolve_primaries_extra",
+            vec![
+                ("contrast", fl(40.0)),
+                ("contrast_pivot", fl(35.0)),
+                ("color_boost", fl(45.0)),
+                ("midtone_detail", fl(50.0)),
+                ("primary_hue", fl(56.0)),
+                ("lum_mix", fl(25.0)),
+                ("wheel_shadows", ParamValue::Vec2(filmcraft_geom::Vec2::new(0.4, -0.2))),
+            ],
+        ),
+        (
+            "color_slice",
+            vec![
+                ("cs_on", ParamValue::Bool(true)),
+                ("cs_red_sat", fl(40.0)),
+                ("cs_red_den", fl(-25.0)),
+                ("cs_red_hue", fl(15.0)),
+                ("cs_yellow_sat", fl(-30.0)),
+                ("cs_yellow_den", fl(35.0)),
+                ("cs_yellow_hue", fl(-10.0)),
+                ("cs_green_sat", fl(25.0)),
+                ("cs_cyan_den", fl(30.0)),
+                ("cs_blue_sat", fl(50.0)),
+                ("cs_blue_den", fl(-40.0)),
+                ("cs_magenta_hue", fl(20.0)),
+                ("cs_skin_sat", fl(-20.0)),
+                ("cs_skin_den", fl(15.0)),
+                ("cs_skin_hue", fl(-12.0)),
+            ],
+        ),
+        (
+            "color_warper",
+            vec![
+                ("cw_on", ParamValue::Bool(true)),
+                (
+                    "cw_hs_grid",
+                    ParamValue::Curve(
+                        (0..48)
+                            .map(|i| {
+                                let s = i / 4;
+                                let r = i % 4;
+                                let dh = if s == 2 && r >= 2 { 0.06 } else { -0.02 * ((s % 3) as f32) };
+                                let ds = if r == 2 { 0.14 } else { -0.05 };
+                                [dh, ds]
+                            })
+                            .collect(),
+                    ),
+                ),
+                (
+                    "cw_cl_grid",
+                    ParamValue::Curve(
+                        (0..48)
+                            .map(|i| {
+                                let s = i / 4;
+                                let r = i % 4;
+                                let dc = if s % 4 == 1 { 0.09 } else { -0.04 };
+                                let dl = if r >= 2 { 0.08 } else { -0.03 };
+                                [dc, dl]
+                            })
+                            .collect(),
+                    ),
+                ),
+            ],
+        ),
+        (
+            "qualifier_node_key_hsl_masks_primaries",
+            vec![
+                ("hsl_on", ParamValue::Bool(true)),
+                ("hsl_key_scope", ch(0)),
+                ("hsl_hue", fl(120.0)),
+                ("hsl_hue_range", fl(90.0)),
+                ("hsl_sat_max", fl(85.0)),
+                ("hsl_clean_black", fl(15.0)),
+                ("hsl_clean_white", fl(10.0)),
+                ("hsl_in_out", fl(40.0)),
+                ("key_gain", fl(80.0)),
+                ("exposure", fl(1.5)),
+                ("contrast", fl(45.0)),
+            ],
+        ),
+        (
+            "qualifier_rgb_inverted",
+            vec![
+                ("hsl_on", ParamValue::Bool(true)),
+                ("hsl_key_scope", ch(0)),
+                ("hsl_mode", ch(1)),
+                ("hsl_r_min", fl(30.0)),
+                ("hsl_r_max", fl(90.0)),
+                ("hsl_g_max", fl(65.0)),
+                ("hsl_invert_key", ParamValue::Bool(true)),
+                ("temperature", fl(-45.0)),
+            ],
+        ),
+        (
+            "qualifier_luma_in_out_highlight",
+            vec![
+                ("hsl_on", ParamValue::Bool(true)),
+                ("hsl_key_scope", ch(0)),
+                ("hsl_mode", ch(2)),
+                ("hsl_luma_min", fl(25.0)),
+                ("hsl_luma_max", fl(75.0)),
+                ("hsl_in_out", fl(-50.0)),
+                ("hsl_show_mask", ch(1)),
+            ],
+        ),
+        (
+            "qualifier_3d_samples",
+            vec![
+                ("hsl_on", ParamValue::Bool(true)),
+                ("hsl_key_scope", ch(0)),
+                ("hsl_mode", ch(3)),
+                ("hsl_3d_samples", ParamValue::Text("[[0.85,0.2,0.2,0.18],[0.2,0.8,0.2,-0.15]]".into())),
+                ("hsl_blur", fl(15.0)),
+                ("saturation", fl(20.0)),
             ],
         ),
         (
@@ -1016,18 +1118,9 @@ fn gpu_lumetri_curves_and_hsl_match_cpu() {
                 ("hsl_blur", fl(25.0)),
             ],
         ),
-        (
-            "hsl_secondary_mask_gray",
-            vec![("hsl_on", ParamValue::Bool(true)), ("hsl_hue", fl(200.0)), ("hsl_show_mask", ch(1)), ("hsl_denoise", fl(40.0))],
-        ),
-        (
-            "hsl_secondary_mask_black",
-            vec![("hsl_on", ParamValue::Bool(true)), ("hsl_hue", fl(40.0)), ("hsl_show_mask", ch(2))],
-        ),
-        (
-            "hsl_secondary_mask_white",
-            vec![("hsl_on", ParamValue::Bool(true)), ("hsl_hue", fl(310.0)), ("hsl_show_mask", ch(3))],
-        ),
+        ("hsl_secondary_mask_gray", vec![("hsl_on", ParamValue::Bool(true)), ("hsl_hue", fl(200.0)), ("hsl_show_mask", ch(1)), ("hsl_denoise", fl(40.0))]),
+        ("hsl_secondary_mask_black", vec![("hsl_on", ParamValue::Bool(true)), ("hsl_hue", fl(40.0)), ("hsl_show_mask", ch(2))]),
+        ("hsl_secondary_mask_white", vec![("hsl_on", ParamValue::Bool(true)), ("hsl_hue", fl(310.0)), ("hsl_show_mask", ch(3))]),
     ];
 
     for (name, params) in cases {
@@ -1037,7 +1130,7 @@ fn gpu_lumetri_curves_and_hsl_match_cpu() {
         let mut cpu = filmcraft_render::Image { w: w as usize, h: h as usize, px: px.clone() };
         op.apply(&mut cpu);
         let fx = LayerFx { size: (w, h), decimation: 1, turns: 0, ops: vec![op] };
-        let (_, _, gpu) = c.effect_image(&frame, &fx).expect("effect image");
+        let (_, _, gpu) = c.effect_image(&frame, &fx).unwrap_or_else(|| panic!("{name}: effect image returned None (fx={})", c.fx.is_some()));
         let (worst, flips) = compare(&cpu.px, &gpu);
         eprintln!("{name}: max rel diff {worst:.2e}, {:.3}% flipped", flips * 100.0);
         assert!(worst <= EXACT && flips <= FLIPS, "{name}: {worst}, {flips}");
@@ -1082,7 +1175,7 @@ fn gpu_masked_lumetri_and_hsl_match_cpu() {
     let op = FxOp::eval_masked(&e, &cx(Tick::ZERO, 1.0), w, h).expect("masked lumetri op");
     assert!(op.gpu_ok(), "masked lumetri must be gpu_ok");
 
-    let mut cpu = filmcraft_render::Image { w, h, px };
+    let mut cpu = filmcraft_render::Image { w, h, px: px.clone() };
     op.apply(&mut cpu);
     let fx = LayerFx { size: (w as u32, h as u32), decimation: 1, turns: 0, ops: vec![op.clone()] };
     let (_, _, gpu) = c.effect_image(&frame, &fx).expect("masked effect image");
@@ -1093,14 +1186,7 @@ fn gpu_masked_lumetri_and_hsl_match_cpu() {
     let plan = FramePlan::Layers {
         width: w,
         height: h,
-        layers: vec![PlanLayer {
-            frame,
-            matrix: Affine::IDENTITY,
-            opacity: 1.0,
-            blend: Blend::Normal,
-            fx: Some(Arc::new(fx)),
-            input: None,
-        }],
+        layers: vec![PlanLayer { frame: frame.clone(), matrix: Affine::IDENTITY, opacity: 1.0, blend: Blend::Normal, fx: Some(Arc::new(fx)), input: None }],
     };
     let cpu_plan = execute_cpu(&plan).over_black_rgba8();
     c.composite(&plan);
@@ -1115,4 +1201,255 @@ fn gpu_masked_lumetri_and_hsl_match_cpu() {
     let (_, _, gpu_plan2) = c.read_output().expect("plan readback 2");
     assert_eq!(gpu_plan, gpu_plan2);
     assert_eq!(c.fx.as_ref().map_or(0, |f| f.uniform_pool_len()), pool_after_first, "uniform buffer pool grew on repeated frame");
+
+    // Also test Node Key + Gradient Power Window + Highlight White/Black mode parity
+    let mut e_hi = effect(
+        "lumetri",
+        &[
+            ("hsl_on", ParamValue::Bool(true)),
+            ("hsl_key_scope", ParamValue::Choice(0)),
+            ("hsl_hue", fl(120.0)),
+            ("hsl_hue_range", fl(90.0)),
+            ("hsl_show_mask", ParamValue::Choice(3)),
+            ("key_gain", fl(75.0)),
+        ],
+    );
+    e_hi.masks.push(Mask::gradient("grad", Vec2::new(40.0, 20.0), Vec2::new(60.0, 45.0), 12.0));
+    let op_hi = FxOp::eval_masked(&e_hi, &cx(Tick::ZERO, 1.0), w, h).expect("highlight op");
+    assert!(op_hi.gpu_ok());
+    let mut cpu_hi = filmcraft_render::Image { w, h, px };
+    op_hi.apply(&mut cpu_hi);
+    let fx_hi = LayerFx { size: (w as u32, h as u32), decimation: 1, turns: 0, ops: vec![op_hi] };
+    let (_, _, gpu_hi) = c.effect_image(&frame, &fx_hi).expect("highlight effect image");
+    let (worst_hi, flips_hi) = compare(&cpu_hi.px, &gpu_hi);
+    assert!(worst_hi <= EXACT && flips_hi <= FLIPS, "highlight node_key+grad: {worst_hi}, {flips_hi}");
+}
+
+#[test]
+fn gpu_color_dag_outside_parallel_layer_and_splitter_match_cpu() {
+    use filmcraft_project::{ColorGraph, LayerBlendMode, Mask, MaskPath, ParamValue, SplitSpace};
+    use filmcraft_render::color_graph::compile_color_graph;
+
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut c = GpuCompositor::new(&dev, &q);
+    let (w, h) = (80usize, 48usize);
+    let px = picture(w as u32, h as u32);
+    let frame = Arc::new(VideoFrame::rgba_f32(w as u32, h as u32, px.clone()));
+    let ctx = cx(Tick::ZERO, 1.0);
+
+    // 1. Outside Node: Node 1 grades inside an ellipse window (+ qualifiers), Outside grades the exterior
+    {
+        let mut g = ColorGraph::new();
+        let mut inside_fx = effect(
+            "lumetri",
+            &[("exposure", fl(0.9)), ("temperature", fl(40.0)), ("hsl_on", ParamValue::Bool(true)), ("hsl_hue", fl(20.0)), ("hsl_hue_range", fl(90.0))],
+        );
+        inside_fx.masks.push(Mask::new("win", MaskPath::ellipse(Vec2::new(40.0, 24.0), Vec2::new(22.0, 14.0))));
+        let n1 = g.add_serial_node(None, inside_fx).unwrap();
+        let outside_fx = effect("lumetri", &[("exposure", fl(-0.8)), ("saturation", fl(35.0)), ("tint", fl(-30.0))]);
+        let _n_out = g.add_outside_node(n1, outside_fx).unwrap();
+
+        let ops = compile_color_graph(&g, &std::collections::BTreeMap::new(), &ctx, w, h).expect("compile outside dag");
+        assert_eq!(ops.len(), 1);
+        assert!(ops[0].gpu_ok());
+        let mut cpu = filmcraft_render::Image { w, h, px: px.clone() };
+        ops[0].apply(&mut cpu);
+        let fx = LayerFx { size: (w as u32, h as u32), decimation: 1, turns: 0, ops };
+        let (_, _, gpu) = c.effect_image(&frame, &fx).expect("gpu outside dag");
+        let (worst, flips) = compare(&cpu.px, &gpu);
+        assert!(worst <= EXACT && flips <= FLIPS, "Outside DAG parity: worst={worst}, flips={flips}");
+    }
+
+    // 2. ParallelMixer + LayerMixer with Screen blend & Window Key
+    {
+        let mut g = ColorGraph::new();
+        let n1 = g.add_serial_node(None, effect("lumetri", &[("exposure", fl(0.35)), ("contrast", fl(15.0))])).unwrap();
+        let (_p_branch, p_mix) = g.add_branched_node(n1, effect("lumetri", &[("temperature", fl(-35.0)), ("vibrance", fl(25.0))]), false).unwrap();
+        let mut top_fx = effect("lumetri", &[("exposure", fl(0.75)), ("tint", fl(25.0))]);
+        top_fx.masks.push(Mask::gradient("g", Vec2::new(20.0, 10.0), Vec2::new(60.0, 38.0), 8.0));
+        let (_l_branch, l_mix) = g.add_branched_node(p_mix, top_fx, true).unwrap();
+        if let Some(mn) = g.node_mut(l_mix)
+            && let filmcraft_project::ColorNodeKind::LayerMixer { blend_modes, gains, .. } = &mut mn.kind
+        {
+            blend_modes[1] = LayerBlendMode::Screen;
+            gains[1] = 0.85;
+        }
+
+        let ops = compile_color_graph(&g, &std::collections::BTreeMap::new(), &ctx, w, h).expect("compile parallel+layer dag");
+        assert!(ops[0].gpu_ok());
+        let mut cpu = filmcraft_render::Image { w, h, px: px.clone() };
+        ops[0].apply(&mut cpu);
+        let fx = LayerFx { size: (w as u32, h as u32), decimation: 1, turns: 0, ops };
+        let (_, _, gpu) = c.effect_image(&frame, &fx).expect("gpu parallel+layer dag");
+        let (worst, flips) = compare(&cpu.px, &gpu);
+        assert!(worst <= EXACT && flips <= FLIPS, "Parallel+Layer DAG parity: worst={worst}, flips={flips}");
+    }
+
+    // 3. Splitter / Combiner in YCbCr space grading Luma (Y) independently from Chroma (Cb, Cr)
+    {
+        let mut g = ColorGraph::new();
+        let (_spl, chs, _cmb) = g.add_splitter_combiner(None, SplitSpace::YCbCr).unwrap();
+        if let Some(y_node) = g.node_mut(chs[0])
+            && let Some(ef) = y_node.kind.effect_mut()
+        {
+            ef.params.insert("contrast".into(), filmcraft_project::Param::new(fl(30.0)));
+        }
+        let ops = compile_color_graph(&g, &std::collections::BTreeMap::new(), &ctx, w, h).expect("compile splitter dag");
+        assert!(ops[0].gpu_ok());
+        let mut cpu = filmcraft_render::Image { w, h, px };
+        ops[0].apply(&mut cpu);
+        let fx = LayerFx { size: (w as u32, h as u32), decimation: 1, turns: 0, ops };
+        let (_, _, gpu) = c.effect_image(&frame, &fx).expect("gpu splitter dag");
+        let (worst, flips) = compare(&cpu.px, &gpu);
+        assert!(worst <= EXACT && flips <= FLIPS, "Splitter/Combiner DAG parity: worst={worst}, flips={flips}");
+    }
+}
+
+#[test]
+fn gpu_lumetri_phase2_wheels_and_rgb_mixer_match_cpu() {
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut c = GpuCompositor::new(&dev, &q);
+    let (w, h) = (64u32, 48u32);
+    let px = picture(w, h);
+    let frame = VideoFrame::rgba_f32(w, h, px.clone());
+    let ctx = cx(Tick::ZERO, 1.0);
+
+    let cases: Vec<(&str, Vec<(&str, ParamValue)>)> = vec![
+        (
+            "resolve_lgg_wheels_with_offset",
+            vec![
+                ("grade_model", ParamValue::Choice(0)),
+                ("wheel_shadows", ParamValue::Vec2(Vec2::new(0.4, -0.2))),
+                ("wheel_shadows_l", fl(12.0)),
+                ("wheel_midtones", ParamValue::Vec2(Vec2::new(-0.25, 0.3))),
+                ("wheel_midtones_l", fl(-10.0)),
+                ("wheel_highlights", ParamValue::Vec2(Vec2::new(0.2, 0.25))),
+                ("wheel_highlights_l", fl(15.0)),
+                ("wheel_offset", ParamValue::Vec2(Vec2::new(-0.15, 0.1))),
+                ("wheel_offset_l", fl(8.0)),
+            ],
+        ),
+        (
+            "log_wheels_custom_ranges",
+            vec![
+                ("log_shadows", ParamValue::Vec2(Vec2::new(-0.3, 0.2))),
+                ("log_shadows_l", fl(-8.0)),
+                ("log_midtones", ParamValue::Vec2(Vec2::new(0.25, 0.1))),
+                ("log_highlights", ParamValue::Vec2(Vec2::new(0.15, -0.3))),
+                ("log_offset_l", fl(5.0)),
+                ("log_low_range", fl(28.0)),
+                ("log_high_range", fl(64.0)),
+            ],
+        ),
+        (
+            "hdr_wheels_zones_and_global",
+            vec![
+                ("hdr_w_black_exp", fl(-0.5)),
+                ("hdr_w_dark", ParamValue::Vec2(Vec2::new(0.2, -0.15))),
+                ("hdr_w_shadow_exp", fl(0.35)),
+                ("hdr_w_light", ParamValue::Vec2(Vec2::new(-0.15, 0.25))),
+                ("hdr_w_highlight_exp", fl(0.6)),
+                ("hdr_w_specular_exp", fl(-0.4)),
+                ("hdr_w_global_exp", fl(0.2)),
+                ("hdr_zone_falloff", fl(40.0)),
+                ("hdr_wheel_range", fl(0.25)),
+            ],
+        ),
+        (
+            "rgb_mixer_preserve_luma_and_mono",
+            vec![
+                ("mix_rr", fl(130.0)),
+                ("mix_rg", fl(-20.0)),
+                ("mix_rb", fl(10.0)),
+                ("mix_gr", fl(15.0)),
+                ("mix_gg", fl(95.0)),
+                ("mix_gb", fl(-10.0)),
+                ("mix_br", fl(-15.0)),
+                ("mix_bg", fl(25.0)),
+                ("mix_bb", fl(110.0)),
+                ("mix_preserve_lum", ParamValue::Bool(true)),
+            ],
+        ),
+    ];
+
+    for (name, params) in cases {
+        let e = effect("lumetri", &params);
+        let op = FxOp::eval(&e, &ctx, w as usize, h as usize).unwrap_or_else(|| panic!("{name}: eval None"));
+        assert!(op.gpu_ok(), "{name}: expected gpu_ok");
+        let mut cpu = filmcraft_render::Image { w: w as usize, h: h as usize, px: px.clone() };
+        op.apply(&mut cpu);
+        let fx = LayerFx { size: (w, h), decimation: 1, turns: 0, ops: vec![op] };
+        let (_, _, gpu) = c.effect_image(&frame, &fx).unwrap_or_else(|| panic!("{name}: gpu returned None"));
+        let (worst, flips) = compare(&cpu.px, &gpu);
+        assert!(worst <= EXACT && flips <= FLIPS, "{name}: CPU/GPU mismatch worst={worst:.2e}, flips={flips:.4}");
+    }
+}
+
+#[test]
+fn gpu_lumetri_phase5_cst_and_sizing_match_cpu() {
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut c = GpuCompositor::new(&dev, &q);
+    let (w, h) = (80u32, 48u32);
+    let px = picture(w, h);
+    let frame = VideoFrame::rgba_f32(w, h, px.clone());
+    let ctx = cx(Tick::ZERO, 1.0);
+
+    let cases: Vec<(&str, Vec<(&str, ParamValue)>)> = vec![
+        (
+            "cst_slog3_to_rec709_bt2390",
+            vec![
+                ("cst_on", ParamValue::Bool(true)),
+                ("cst_in_space", ParamValue::Choice(5)),
+                ("cst_in_gamma", ParamValue::Choice(7)),
+                ("cst_out_space", ParamValue::Choice(0)),
+                ("cst_out_gamma", ParamValue::Choice(0)),
+                ("cst_tone_map", ParamValue::Choice(1)),
+                ("cst_gamut_map", ParamValue::Choice(1)),
+            ],
+        ),
+        (
+            "cst_davinci_wg_to_acescct",
+            vec![
+                ("cst_on", ParamValue::Bool(true)),
+                ("cst_in_space", ParamValue::Choice(3)),
+                ("cst_in_gamma", ParamValue::Choice(5)),
+                ("cst_out_space", ParamValue::Choice(4)),
+                ("cst_out_gamma", ParamValue::Choice(6)),
+                ("cst_tone_map", ParamValue::Choice(0)),
+                ("cst_gamut_map", ParamValue::Choice(2)),
+            ],
+        ),
+        (
+            "node_sizing_zoom_rotate_blanking",
+            vec![
+                ("sizing_pan", fl(8.0)),
+                ("sizing_tilt", fl(-5.0)),
+                ("sizing_zoom", fl(118.0)),
+                ("sizing_rotate", fl(12.5)),
+                ("sizing_flip_h", ParamValue::Bool(true)),
+                ("sizing_blanking", ParamValue::Choice(4)),
+            ],
+        ),
+    ];
+
+    for (name, params) in cases {
+        let e = effect("lumetri", &params);
+        let op = FxOp::eval(&e, &ctx, w as usize, h as usize).unwrap_or_else(|| panic!("{name}: eval None"));
+        assert!(op.gpu_ok(), "{name}: expected gpu_ok");
+        let mut cpu = filmcraft_render::Image { w: w as usize, h: h as usize, px: px.clone() };
+        op.apply(&mut cpu);
+        let fx = LayerFx { size: (w, h), decimation: 1, turns: 0, ops: vec![op] };
+        let (_, _, gpu) = c.effect_image(&frame, &fx).unwrap_or_else(|| panic!("{name}: gpu returned None"));
+        let (worst, flips) = compare(&cpu.px, &gpu);
+        assert!(worst <= EXACT && flips <= FLIPS, "{name}: CPU/GPU mismatch worst={worst:.2e}, flips={flips:.4}");
+    }
 }

@@ -102,8 +102,19 @@ pub struct HostHooks {
     pub configure_ai_control: Option<Box<dyn FnMut(bool, u16) -> (Option<Receiver<crate::ControlRequest>>, AiControlStatus)>>,
     /// Current runtime status of the local AI integration control server.
     pub ai_control_status: Option<Box<dyn Fn() -> AiControlStatus>>,
+    /// Current runtime status, active token, and helper paths for Preferences ▸ AI Integration.
+    pub ai_control_info: Option<Box<dyn Fn() -> AiControlInfo>>,
     /// Regenerate the local AI integration token on disk and restart the server if active.
     pub regenerate_ai_token: Option<Box<dyn FnMut() -> (Option<Receiver<crate::ControlRequest>>, AiControlStatus)>>,
+}
+
+/// Snapshot of the local AI integration control server state for Preferences ▸ AI Integration.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AiControlInfo {
+    pub status: AiControlStatus,
+    pub token: Option<String>,
+    pub token_path: Option<String>,
+    pub mcp_cli_path: Option<String>,
 }
 
 /// Runtime status of the local AI integration control server (`127.0.0.1`).

@@ -36,6 +36,10 @@ pub enum Gamut {
     DGamut,
     /// Fujifilm F-Gamut C (F-Log2 C). F-Gamut itself has the BT.2020 primaries.
     FGamutC,
+    /// DaVinci Wide Gamut (Blackmagic Design).
+    DaVinciWideGamut,
+    /// ACES AP1 primaries (normalized to D65 white so neutral RGB stays preserved across matrices).
+    AcesAp1,
 }
 
 impl Gamut {
@@ -54,6 +58,8 @@ impl Gamut {
             Gamut::Awg4 => [[0.7347, 0.2653], [0.1424, 0.8576], [0.0991, -0.0308]],
             Gamut::DGamut => [[0.71, 0.31], [0.21, 0.88], [0.09, -0.08]],
             Gamut::FGamutC => [[0.7347, 0.2653], [0.0263, 0.9737], [0.1173, -0.0224]],
+            Gamut::DaVinciWideGamut => [[0.8000, 0.3130], [0.1682, 0.9877], [0.0790, -0.1155]],
+            Gamut::AcesAp1 => [[0.713, 0.293], [0.165, 0.830], [0.128, 0.044]],
         }
     }
 
@@ -176,10 +182,14 @@ pub enum ColorSpace {
     FLog2CFGamutC,
     /// Linear light with BT.709 primaries (EXR-style float sources).
     Linear709,
+    /// DaVinci Wide Gamut / DaVinci Intermediate.
+    DaVinciWideGamut,
+    /// ACEScct / AP1.
+    AcesCct,
 }
 
 impl ColorSpace {
-    pub const ALL: [ColorSpace; 19] = [
+    pub const ALL: [ColorSpace; 21] = [
         ColorSpace::Rec709,
         ColorSpace::Srgb,
         ColorSpace::Rec2020,
@@ -199,6 +209,8 @@ impl ColorSpace {
         ColorSpace::FLog2FGamut,
         ColorSpace::FLog2CFGamutC,
         ColorSpace::Linear709,
+        ColorSpace::DaVinciWideGamut,
+        ColorSpace::AcesCct,
     ];
 
     /// Stable id used in commands and project files.
@@ -223,6 +235,8 @@ impl ColorSpace {
             ColorSpace::FLog2FGamut => "flog2-fgamut",
             ColorSpace::FLog2CFGamutC => "flog2c-fgamutc",
             ColorSpace::Linear709 => "linear709",
+            ColorSpace::DaVinciWideGamut => "davinci-wg-int",
+            ColorSpace::AcesCct => "acescct",
         }
     }
 
@@ -247,6 +261,8 @@ impl ColorSpace {
             ColorSpace::FLog2FGamut => "Fujifilm F-Log2 / F-Gamut",
             ColorSpace::FLog2CFGamutC => "Fujifilm F-Log2 C / F-Gamut C",
             ColorSpace::Linear709 => "Linear (Rec. 709 primaries)",
+            ColorSpace::DaVinciWideGamut => "Wide Gamut / Intermediate",
+            ColorSpace::AcesCct => "ACEScct / AP1",
         }
     }
 
@@ -272,6 +288,8 @@ impl ColorSpace {
             ColorSpace::LogC4Awg4 => Gamut::Awg4,
             ColorSpace::DLogDGamut => Gamut::DGamut,
             ColorSpace::FLog2CFGamutC => Gamut::FGamutC,
+            ColorSpace::DaVinciWideGamut => Gamut::DaVinciWideGamut,
+            ColorSpace::AcesCct => Gamut::AcesAp1,
         }
     }
 
@@ -292,6 +310,8 @@ impl ColorSpace {
             ColorSpace::DLogDGamut => Curve::Log(LogCurve::DLog),
             ColorSpace::FLogFGamut => Curve::Log(LogCurve::FLog),
             ColorSpace::FLog2FGamut | ColorSpace::FLog2CFGamutC => Curve::Log(LogCurve::FLog2),
+            ColorSpace::DaVinciWideGamut => Curve::Log(LogCurve::DaVinciIntermediate),
+            ColorSpace::AcesCct => Curve::Log(LogCurve::AcesCct),
         }
     }
 

@@ -12,11 +12,11 @@ struct MaskInfo {
     start: u32,
     len: u32,
     mode: u32,
-    inverted: u32,
+    flags: u32,
     feather: f32,
     expansion: f32,
     opacity: f32,
-    _pad: f32,
+    feather_balance: f32,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -27,9 +27,10 @@ struct MaskInfo {
 @group(0) @binding(5) var<storage, read_write> out_px: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read_write> out_cov: array<f32>;
 
-fn falloff(s: f32, feather: f32) -> f32 {
+fn falloff(s: f32, feather: f32, balance: f32) -> f32 {
     let w = max(feather, 1.0);
-    let u = clamp(s / w + 0.5, 0.0, 1.0);
+    let shift = -clamp(balance, -1.0, 1.0) * (w * 0.5);
+    let u = clamp((s - shift) / w + 0.5, 0.0, 1.0);
     let smooth_u = u * u * (3.0 - 2.0 * u);
     return u + (smooth_u - u) * min(feather, 1.0);
 }
@@ -67,9 +68,19 @@ fn seg_dist2(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
 }
 
 fn mask_value(m: MaskInfo, p: vec2<f32>) -> f32 {
-    let band = abs(m.expansion) + max(m.feather, 1.0) * 0.5 + 1.0;
+    let band = abs(m.expansion) + max(m.feather, 1.0) * 0.5 * (1.0 + abs(m.feather_balance)) + 1.0;
     var sd = -band;
-    if (m.len >= 3u) {
+    if (m.flags & 2u) != 0u {
+        if m.len >= 2u {
+            let a = pts[m.start];
+            let b = pts[m.start + 1u];
+            let d = b - a;
+            let l = length(d);
+            if l > 1e-4 {
+                sd = ((a.x - p.x) * d.x + (a.y - p.y) * d.y) / l;
+            }
+        }
+    } else if (m.len >= 3u) {
         var wind = 0;
         var d2 = band * band;
         for (var i = 0u; i < m.len; i = i + 1u) {
@@ -86,8 +97,8 @@ fn mask_value(m: MaskInfo, p: vec2<f32>) -> f32 {
         let d = sqrt(d2);
         if (wind != 0) { sd = d; } else { sd = -d; }
     }
-    let c = falloff(sd + m.expansion, m.feather);
-    if (m.inverted != 0u) {
+    let c = falloff(sd + m.expansion, m.feather, m.feather_balance);
+    if (m.flags & 1u) != 0u {
         return m.opacity * (1.0 - c);
     }
     return m.opacity * c;

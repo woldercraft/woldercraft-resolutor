@@ -54,12 +54,18 @@ pub enum PanelKind {
     ColorQualifier,
     ColorCreative,
     ColorVignette,
+    ColorSlice,
+    ColorWarper,
+    ColorRgbMixer,
+    ColorCst,
+    ColorSizing,
+    ColorGallery,
     VfxNodes,
     Custom(u8),
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 42] = [
+    pub const ALL: [PanelKind; 48] = [
         PanelKind::Project,
         PanelKind::MediaBrowser,
         PanelKind::Libraries,
@@ -101,6 +107,12 @@ impl PanelKind {
         PanelKind::ColorQualifier,
         PanelKind::ColorCreative,
         PanelKind::ColorVignette,
+        PanelKind::ColorSlice,
+        PanelKind::ColorWarper,
+        PanelKind::ColorRgbMixer,
+        PanelKind::ColorCst,
+        PanelKind::ColorSizing,
+        PanelKind::ColorGallery,
         PanelKind::VfxNodes,
     ];
     pub fn title(self) -> &'static str {
@@ -146,6 +158,12 @@ impl PanelKind {
             PanelKind::ColorQualifier => "Qualifier",
             PanelKind::ColorCreative => "Creative & LUTs",
             PanelKind::ColorVignette => "Vignette",
+            PanelKind::ColorSlice => "ColorSlice",
+            PanelKind::ColorWarper => "Color Warper",
+            PanelKind::ColorRgbMixer => "RGB Mixer",
+            PanelKind::ColorCst => "CST",
+            PanelKind::ColorSizing => "Sizing",
+            PanelKind::ColorGallery => "Gallery",
             PanelKind::VfxNodes => "VFX Nodes",
             PanelKind::Custom(_) => "Custom Panel",
         }
@@ -548,11 +566,19 @@ fn workspace_root(name: &str) -> Node<PanelKind> {
         "Color" => {
             let top_row = hsplit(
                 SplitSize::FixedFirst(270.0),
-                tabs(&[Project, MediaBrowser, Effects], 0),
+                tabs(&[ColorGallery, Project, MediaBrowser, Effects], 0),
                 hsplit(Ratio(0.55), tabs(&[Program], 0), tabs(&[ColorNodes], 0)),
             );
-            let bottom_row = hsplit(Ratio(0.72), tabs(&[LumetriColor], 0), tabs(&[LumetriScopes], 0));
-            vsplit(Ratio(0.35), top_row, vsplit(SplitSize::FixedFirst(110.0), tabs(&[ColorClips, Timeline, ColorGroups], 0), bottom_row))
+            let bottom_row = hsplit(
+                Ratio(0.38),
+                tabs(&[ColorPrimaries, ColorWheels, ColorRgbMixer, ColorCst, ColorSizing, LumetriColor], 0),
+                hsplit(
+                    Ratio(0.68),
+                    tabs(&[ColorCurves, ColorQualifier, ColorMasks, ColorSlice, ColorWarper, ColorCreative, ColorVignette], 0),
+                    tabs(&[LumetriScopes], 0),
+                ),
+            );
+            vsplit(Ratio(0.32), top_row, vsplit(SplitSize::FixedFirst(92.0), tabs(&[ColorClips, Timeline, ColorGroups], 0), bottom_row))
         }
         "Effects" => {
             let top_row = hsplit(

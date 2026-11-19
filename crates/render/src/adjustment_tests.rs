@@ -118,7 +118,10 @@ fn adjustment_layer_gaussian_blur_blurs_video_below() {
     eprintln!("sharp: {:?}", sharp.get(160, 90));
     eprintln!("blurred: {:?}", blurred.get(160, 90));
     assert_ne!(sharp.get(160, 90), blurred.get(160, 90));
-    assert!(!crate::plan::is_cpu_frame(&s.p, s.seq, R.tick_of(12), RenderOptions::default(), crate::plan::DeviceCaps::ALL), "adjustment layer with GPU effects should render on GPU");
+    assert!(
+        !crate::plan::is_cpu_frame(&s.p, s.seq, R.tick_of(12), RenderOptions::default(), crate::plan::DeviceCaps::ALL),
+        "adjustment layer with GPU effects should render on GPU"
+    );
     let plan = crate::plan::plan_frame(&s.p, s.seq, R.tick_of(12), RenderOptions::default(), crate::plan::DeviceCaps::ALL, &s.map);
     assert!(matches!(&plan, crate::plan::FramePlan::Composite { steps, .. } if steps.iter().any(|s| matches!(s, crate::plan::PlanStep::Adjust { .. }))));
     let planned_img = crate::plan::execute_cpu(&plan);

@@ -51,6 +51,9 @@ pub struct SettingsDraft {
     /// Result of the last Label Color Presets button, or its error.
     #[serde(default)]
     pub preset_message: String,
+    /// Whether the AI Integration control token is currently revealed in the Preferences UI.
+    #[serde(skip)]
+    pub show_ai_token: bool,
 }
 
 /// Open the dialog on a category page.
@@ -817,33 +820,90 @@ fn custom(app: &mut FilmcraftApp, ui: &mut Ui, d: &mut SettingsDraft, name: &str
             }
         }
         "aiControlStatus" => {
-            let status = app.hooks.ai_control_status.as_ref().map(|f| f()).unwrap_or_default();
-            let status_text = match &status {
+            let info = app.hooks.ai_control_info.as_ref().map(|f| f()).unwrap_or_else(|| crate::hooks::AiControlInfo {
+                status: app.hooks.ai_control_status.as_ref().map(|f| f()).unwrap_or_default(),
+                ..Default::default()
+            });
+            let status_text = match &info.status {
                 crate::hooks::AiControlStatus::Disabled => tl!("Status: Disabled").to_string(),
                 crate::hooks::AiControlStatus::Listening { port } => tlf!("Status: Active on 127.0.0.1:{port}", port),
                 crate::hooks::AiControlStatus::Error(err) => tlf!("Status: Error ({err})", err),
             };
             note(ui, &t, &status_text);
-            if app.hooks.regenerate_ai_token.is_some() {
+            let active_port = match info.status {
+                crate::hooks::AiControlStatus::Listening { port } => port,
+                _ => get(&d.values, "aiIntegration.port").as_u64().and_then(|p| u16::try_from(p).ok()).unwrap_or(9876),
+            };
+            if info.token.is_some() || app.hooks.regenerate_ai_token.is_some() {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     field_label(ui, tl!("Control Token"));
-                    let b = ui.button(tl!("Regenerate Token"));
-                    app.auto.add("settings.aiIntegration.regenerateToken", b.rect, "Regenerate Token");
-                    if b.clicked()
-                        && let Some(regen) = app.hooks.regenerate_ai_token.as_mut()
-                    {
-                        let (rx, next_status) = regen();
-                        if let Some(rx) = rx {
-                            app.control_rx = Some(rx);
-                        }
-                        d.message = match next_status {
-                            crate::hooks::AiControlStatus::Listening { port } => tlf!("Token regenerated; listening on 127.0.0.1:{port}.", port),
-                            crate::hooks::AiControlStatus::Disabled => tl!("Token regenerated.").to_string(),
-                            crate::hooks::AiControlStatus::Error(err) => err,
+                    if let Some(token) = &info.token {
+                        let shown = if d.show_ai_token {
+                            token.clone()
+                        } else {
+                            let suffix: String = token.chars().rev().take(6).collect::<String>().chars().rev().collect();
+                            format!("••••••••••••{suffix}")
                         };
+                        ui.label(RichText::new(shown).monospace().color(t.text));
+                        let toggle_label = if d.show_ai_token { tl!("Hide") } else { tl!("Show") };
+                        let tb = ui.button(toggle_label);
+                        app.auto.add("settings.aiIntegration.toggleToken", tb.rect, "Toggle Token Visibility");
+                        if tb.clicked() {
+                            d.show_ai_token = !d.show_ai_token;
+                        }
+                        let cb = ui.button(tl!("Copy Token"));
+                        app.auto.add("settings.aiIntegration.copyToken", cb.rect, "Copy Token");
+                        if cb.clicked() {
+                            ui.ctx().copy_text(token.clone());
+                            d.message = tl!("Control token copied to clipboard.").to_string();
+                        }
+                    }
+                    if app.hooks.regenerate_ai_token.is_some() {
+                        let b = ui.button(tl!("Regenerate Token"));
+                        app.auto.add("settings.aiIntegration.regenerateToken", b.rect, "Regenerate Token");
+                        if b.clicked()
+                            && let Some(regen) = app.hooks.regenerate_ai_token.as_mut()
+                        {
+                            let (rx, next_status) = regen();
+                            if let Some(rx) = rx {
+                                app.control_rx = Some(rx);
+                            }
+                            d.message = match next_status {
+                                crate::hooks::AiControlStatus::Listening { port } => tlf!("Token regenerated; listening on 127.0.0.1:{port}.", port),
+                                crate::hooks::AiControlStatus::Disabled => tl!("Token regenerated.").to_string(),
+                                crate::hooks::AiControlStatus::Error(err) => err,
+                            };
+                        }
                     }
                 });
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                field_label(ui, tl!("MCP Configuration"));
+                let mb = ui.button(tl!("Copy MCP Config"));
+                app.auto.add("settings.aiIntegration.copyMcpConfig", mb.rect, "Copy MCP Config");
+                if mb.clicked() {
+                    let cmd = info.mcp_cli_path.as_deref().unwrap_or("filmcraft-cli");
+                    let mut server = json!({
+                        "command": cmd,
+                        "args": ["mcp", "--bridge", format!("127.0.0.1:{active_port}")]
+                    });
+                    if let Some(token) = &info.token
+                        && let Some(obj) = server.as_object_mut()
+                    {
+                        obj.insert("env".into(), json!({ "RESOLUTOR_CONTROL_TOKEN": token }));
+                    }
+                    let cfg = json!({ "mcpServers": { "filmcraft": server } });
+                    if let Ok(pretty) = serde_json::to_string_pretty(&cfg) {
+                        ui.ctx().copy_text(pretty);
+                        d.message = tl!("MCP configuration copied to clipboard.").to_string();
+                    }
+                }
+            });
+            if let Some(path) = &info.token_path {
+                ui.add_space(4.0);
+                note(ui, &t, &tlf!("Local token file: {path}", path));
             }
         }
         _ => {}

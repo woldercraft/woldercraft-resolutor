@@ -139,7 +139,8 @@ fn main() -> eframe::Result {
         register_gpu_frame_renderer();
     }
     #[cfg(target_os = "linux")]
-    let x11 = launch.x11 || std::env::var_os("FILMCRAFT_X11").is_some() || (std::env::var_os("FILMCRAFT_WAYLAND").is_none() && std::env::var_os("DISPLAY").is_some());
+    let x11 =
+        launch.x11 || std::env::var_os("FILMCRAFT_X11").is_some() || (std::env::var_os("FILMCRAFT_WAYLAND").is_none() && std::env::var_os("DISPLAY").is_some());
     #[cfg(not(target_os = "linux"))]
     let x11 = false;
     if x11 {
@@ -404,17 +405,14 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
             control_port,
         )));
         let mgr_cfg = Arc::clone(&ai_mgr);
-        app.hooks.configure_ai_control = Some(Box::new(move |enabled, port| {
-            mgr_cfg.lock().unwrap_or_else(std::sync::PoisonError::into_inner).configure(enabled, port)
-        }));
+        app.hooks.configure_ai_control =
+            Some(Box::new(move |enabled, port| mgr_cfg.lock().unwrap_or_else(std::sync::PoisonError::into_inner).configure(enabled, port)));
         let mgr_status = Arc::clone(&ai_mgr);
-        app.hooks.ai_control_status = Some(Box::new(move || {
-            mgr_status.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status()
-        }));
+        app.hooks.ai_control_status = Some(Box::new(move || mgr_status.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status()));
+        let mgr_info = Arc::clone(&ai_mgr);
+        app.hooks.ai_control_info = Some(Box::new(move || mgr_info.lock().unwrap_or_else(std::sync::PoisonError::into_inner).info()));
         let mgr_regen = Arc::clone(&ai_mgr);
-        app.hooks.regenerate_ai_token = Some(Box::new(move || {
-            mgr_regen.lock().unwrap_or_else(std::sync::PoisonError::into_inner).regenerate_token()
-        }));
+        app.hooks.regenerate_ai_token = Some(Box::new(move || mgr_regen.lock().unwrap_or_else(std::sync::PoisonError::into_inner).regenerate_token()));
         Ok(Box::new(app))
     })
 }

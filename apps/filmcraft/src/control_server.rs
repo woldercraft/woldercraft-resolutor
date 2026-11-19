@@ -113,19 +113,14 @@ fn write_token_file(data_dir: Option<&std::path::Path>, token: &str) -> Result<(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("could not set permissions on {}: {e}", path.display()))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(|e| format!("could not set permissions on {}: {e}", path.display()))?;
     }
     Ok(())
 }
 
 fn resolve_or_create_token(data_dir: Option<&std::path::Path>) -> Result<String, String> {
     if let Some(t) = env_token() {
-        return if is_valid_token(&t) {
-            Ok(t)
-        } else {
-            Err(DisabledWhy::Token.reason())
-        };
+        return if is_valid_token(&t) { Ok(t) } else { Err(DisabledWhy::Token.reason()) };
     }
     if let Some(t) = read_token_file(data_dir) {
         return Ok(t);
@@ -185,20 +180,28 @@ pub struct ControlServerManager {
     ctx: egui::Context,
     data_dir: Option<std::path::PathBuf>,
     active: Option<ActiveServer>,
+    active_token: Option<String>,
     status: filmcraft_ui_egui::AiControlStatus,
 }
 
 impl ControlServerManager {
     pub fn new(ctx: egui::Context, data_dir: Option<std::path::PathBuf>, cli_port: Option<u16>) -> Self {
+        let active_token = if cli_port.is_some() { env_token().or_else(|| read_token_file(data_dir.as_deref())) } else { None };
         let status = match cli_port {
             Some(port) => filmcraft_ui_egui::AiControlStatus::Listening { port },
             None => filmcraft_ui_egui::AiControlStatus::Disabled,
         };
-        Self { ctx, data_dir, active: None, status }
+        Self { ctx, data_dir, active: None, active_token, status }
     }
 
     pub fn status(&self) -> filmcraft_ui_egui::AiControlStatus {
         self.status.clone()
+    }
+
+    pub fn info(&self) -> filmcraft_ui_egui::AiControlInfo {
+        let token = self.active_token.clone().or_else(env_token).or_else(|| read_token_file(self.data_dir.as_deref()));
+        let token_path = token_file_path(self.data_dir.as_deref()).map(|p| p.display().to_string());
+        filmcraft_ui_egui::AiControlInfo { status: self.status.clone(), token, token_path, mcp_cli_path: Some(detect_mcp_cli_path()) }
     }
 
     pub fn stop(&mut self) {
@@ -209,6 +212,7 @@ impl ControlServerManager {
             }
             log::info!("control server stopped (was on 127.0.0.1:{})", act.port);
         }
+        self.active_token = None;
         self.status = filmcraft_ui_egui::AiControlStatus::Disabled;
     }
 
@@ -275,32 +279,38 @@ impl ControlServerManager {
         let stop = Arc::new(AtomicBool::new(false));
         let loop_stop = Arc::clone(&stop);
         let ctx = self.ctx.clone();
-        let handle = match std::thread::Builder::new()
-            .name("control-accept".into())
-            .spawn(move || accept_loop(listener, tx, ctx, token, ready, loop_stop))
-        {
-            Ok(h) => h,
-            Err(error) => {
-                let err = format!("could not spawn control server thread: {error}");
-                self.status = filmcraft_ui_egui::AiControlStatus::Error(err);
-                return (None, self.status.clone());
-            }
-        };
+        let token_for_loop = token.clone();
+        let handle =
+            match std::thread::Builder::new().name("control-accept".into()).spawn(move || accept_loop(listener, tx, ctx, token_for_loop, ready, loop_stop)) {
+                Ok(h) => h,
+                Err(error) => {
+                    let err = format!("could not spawn control server thread: {error}");
+                    self.status = filmcraft_ui_egui::AiControlStatus::Error(err);
+                    return (None, self.status.clone());
+                }
+            };
         log::info!("control server listening on 127.0.0.1:{port}");
         self.active = Some(ActiveServer { port, stop, handle: Some(handle) });
+        self.active_token = Some(token);
         self.status = filmcraft_ui_egui::AiControlStatus::Listening { port };
         (Some(rx), self.status.clone())
     }
 }
 
-fn accept_loop(
-    listener: TcpListener,
-    tx: Sender<ControlRequest>,
-    ctx: egui::Context,
-    token: String,
-    ready: Arc<AtomicBool>,
-    stop: Arc<AtomicBool>,
-) {
+fn detect_mcp_cli_path() -> String {
+    let bin = if cfg!(windows) { "filmcraft-cli.exe" } else { "filmcraft-cli" };
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let sibling = dir.join(bin);
+        if sibling.is_file() {
+            return sibling.display().to_string();
+        }
+    }
+    bin.to_string()
+}
+
+fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context, token: String, ready: Arc<AtomicBool>, stop: Arc<AtomicBool>) {
     let open = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::Relaxed) {
         let mut stream = match listener.accept() {

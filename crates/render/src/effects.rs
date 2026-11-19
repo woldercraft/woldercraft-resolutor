@@ -5,7 +5,11 @@
 //! (so ½/¼ playback resolution renders the same look). Colour-grading math runs on display-encoded
 //! straight colour where artists expect it (contrast, levels, posterize), linear light elsewhere.
 
-use filmcraft_color::{GradeSpace, hsl_to_rgb, linear_to_srgb, luma709, rgb_to_hsl, srgb_to_linear};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+use filmcraft_color::spaces::gamut_matrix;
+use filmcraft_color::{Curve, Gamut, GradeSpace, LogCurve, Range, hsl_to_rgb, linear_to_srgb, luma709, rgb_to_hsl, srgb_to_linear};
 use filmcraft_geom::{Affine, Vec2};
 use filmcraft_project::{EffectInstance, ParamValue};
 use filmcraft_time::Tick;
@@ -649,7 +653,327 @@ pub(crate) fn lift_scale(l: f32, nl: f32) -> (f32, f32) {
     (k, nl - l.max(0.0) * k)
 }
 
+#[inline]
+pub(crate) fn apply_contrast_pivot(q: f32, contrast: f32, pivot: f32) -> f32 {
+    let p = pivot.clamp(0.05, 0.95);
+    let k = 1.0 + contrast;
+    let q = q.clamp(0.0, 1.0);
+    if k < 1.0 {
+        return (p + (q - p) * k).clamp(0.0, 1.0);
+    }
+    if (p - 0.5).abs() < 1e-4 {
+        let s = q * q * (3.0 - 2.0 * q);
+        return q + (s - q) * (k - 1.0);
+    }
+    let gamma = std::f32::consts::LN_2 / (-p.ln());
+    let w = q.powf(gamma);
+    let sw = w * w * (3.0 - 2.0 * w);
+    let s = sw.powf(1.0 / gamma);
+    q + (s - q) * (k - 1.0)
+}
+
+#[inline]
+pub(crate) fn apply_sat_vib_boost(v: [f32; 3], sat: f32, vib: f32, color_boost: f32) -> [f32; 3] {
+    let l3 = 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+    let cur_sat = (v[0].max(v[1]).max(v[2]) - v[0].min(v[1]).min(v[2])).clamp(0.0, 1.0);
+    let inv_s = 1.0 - cur_sat;
+    let s = (sat * (1.0 + vib * inv_s + color_boost * inv_s * inv_s.sqrt())).max(0.0);
+    v.map(|q| l3 + (q - l3) * s)
+}
+
+#[inline]
+pub(crate) fn apply_soft_clip(mut v: f32, low: f32, high: f32) -> f32 {
+    if low > 1e-5 {
+        let kl = (low * 0.35).clamp(1e-5, 0.35);
+        if v < kl {
+            v = kl * (-(kl - v) / kl).exp();
+        }
+    }
+    if high > 1e-5 {
+        let kh = (high * 0.35).clamp(1e-5, 0.35);
+        let s = 1.0 - kh;
+        if v > s {
+            v = s + kh * (1.0 - (-(v - s) / kh).exp());
+        }
+    }
+    v
+}
+
+#[inline]
+pub(crate) fn apply_lum_mix_offset(rgb: [f32; 3], lum_mix: f32) -> [f32; 3] {
+    if lum_mix >= 0.9999 {
+        return rgb;
+    }
+    let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    let k = 1.0 - lum_mix.clamp(0.0, 1.0);
+    [rgb[0] - y * k, rgb[1] - y * k, rgb[2] - y * k]
+}
+
+/// ColorSlice 7 subtractive color bands: `(id, label, hue_center, half_width, ui_rgb)`.
+pub const COLOR_SLICE_BANDS: [(&str, &str, f32, f32, [u8; 3]); 7] = [
+    ("red", "Red", 0.0, 1.0 / 6.0, [225, 65, 65]),
+    ("yellow", "Yellow", 1.0 / 6.0, 1.0 / 6.0, [230, 205, 55]),
+    ("green", "Green", 2.0 / 6.0, 1.0 / 6.0, [70, 200, 90]),
+    ("cyan", "Cyan", 3.0 / 6.0, 1.0 / 6.0, [65, 200, 225]),
+    ("blue", "Blue", 4.0 / 6.0, 1.0 / 6.0, [75, 130, 240]),
+    ("magenta", "Magenta", 5.0 / 6.0, 1.0 / 6.0, [215, 75, 205]),
+    ("skin", "Skin", 25.0 / 360.0, 32.0 / 360.0, [225, 165, 125]),
+];
+
+/// Evaluated ColorSlice band adjustments: `[sat_delta, den_delta, hue_turns]` per band.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColorSliceParams(pub [[f32; 3]; 7]);
+
+impl ColorSliceParams {
+    pub fn from_effect(e: &EffectInstance, t: Tick) -> Option<Self> {
+        if !on(e, "cs_on") {
+            return None;
+        }
+        let mut bands = [[0.0f32; 3]; 7];
+        let mut active = false;
+        for (i, &(id, _, _, _, _)) in COLOR_SLICE_BANDS.iter().enumerate() {
+            let sat_p = format!("cs_{id}_sat");
+            let den_p = format!("cs_{id}_den");
+            let hue_p = format!("cs_{id}_hue");
+            let sat = e.param(&sat_p).map_or(100.0, |p| p.f64_at(t)) as f32 / 100.0 - 1.0;
+            let den = e.param(&den_p).map_or(0.0, |p| p.f64_at(t)) as f32 / 100.0;
+            let hue = e.param(&hue_p).map_or(0.0, |p| p.f64_at(t)) as f32 / 360.0;
+            if sat.abs() > 1e-4 || den.abs() > 1e-4 || hue.abs() > 1e-5 {
+                active = true;
+            }
+            bands[i] = [sat, den, hue];
+        }
+        active.then_some(Self(bands))
+    }
+}
+
+#[inline]
+fn cs_band_weight(h: f32, center: f32, hw: f32) -> f32 {
+    let d = (h - center).abs();
+    let d = d.min(1.0 - d);
+    if d >= hw { 0.0 } else { 0.5 + 0.5 * (std::f32::consts::PI * d / hw).cos() }
+}
+
+#[inline]
+fn smoothstep_scalar(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+#[inline]
+pub(crate) fn apply_color_slice_unit(u: [f32; 3], cs: &ColorSliceParams) -> [f32; 3] {
+    let mut h = rgb_to_hsl(u[0], u[1], u[2]);
+    let gate = smoothstep_scalar(0.0, 0.22, h[1]);
+    if gate <= 1e-5 {
+        return u;
+    }
+    let mut w_sum = 0.0f32;
+    let mut sat_d = 0.0f32;
+    let mut den_d = 0.0f32;
+    let mut hue_d = 0.0f32;
+    for (i, &(_, _, center, hw, _)) in COLOR_SLICE_BANDS.iter().enumerate() {
+        let w = cs_band_weight(h[0], center, hw) * gate;
+        w_sum += w;
+        sat_d += w * cs.0[i][0];
+        den_d += w * cs.0[i][1];
+        hue_d += w * cs.0[i][2];
+    }
+    let norm = w_sum.max(1.0);
+    sat_d /= norm;
+    den_d /= norm;
+    hue_d /= norm;
+    h[0] = (h[0] + hue_d).rem_euclid(1.0);
+    h[1] = (h[1] * (1.0 + sat_d)).clamp(0.0, 1.0);
+    let rgb = hsl_to_rgb(h[0], h[1], h[2]);
+    let den_scale = (1.0 - den_d * 0.45 * smoothstep_scalar(0.0, 0.35, h[1])).clamp(0.15, 1.85);
+    [rgb[0] * den_scale, rgb[1] * den_scale, rgb[2] * den_scale]
+}
+
+pub const CW_HUE_SECTORS: usize = 12;
+pub const CW_RADIAL_RINGS: usize = 4;
+pub const CW_GRID_LEN: usize = CW_HUE_SECTORS * CW_RADIAL_RINGS;
+pub const CW_LUT_W: usize = 128;
+pub const CW_LUT_H: usize = 64;
+
+/// Baked 128×64 RGBA lookup table for Color Warper (`[hs_wx, hs_wy, cl_dc, cl_dl]`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColorWarperTable {
+    pub texels: Arc<Vec<[f32; 4]>>,
+    pub active_mask: u32,
+}
+
+#[inline]
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct WarperCacheKey([Option<Vec<[u32; 2]>>; 2]);
+
+fn warper_table_cache() -> &'static Mutex<HashMap<WarperCacheKey, Arc<Vec<[f32; 4]>>>> {
+    static CACHE: OnceLock<Mutex<HashMap<WarperCacheKey, Arc<Vec<[f32; 4]>>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn build_warper_table(e: &EffectInstance) -> Option<ColorWarperTable> {
+    if !on(e, "cw_on") {
+        return None;
+    }
+    let hs_pts = curve_param(e, "cw_hs_grid").filter(|c| !c.is_empty() && c.iter().any(|p| p[0].abs() > 1e-5 || p[1].abs() > 1e-5));
+    let cl_pts = curve_param(e, "cw_cl_grid").filter(|c| !c.is_empty() && c.iter().any(|p| p[0].abs() > 1e-5 || p[1].abs() > 1e-5));
+    let active_mask = u32::from(hs_pts.is_some()) | (u32::from(cl_pts.is_some()) << 1);
+    if active_mask == 0 {
+        return None;
+    }
+    let key = WarperCacheKey([
+        hs_pts.as_ref().map(|v| v.iter().map(|p| [p[0].to_bits(), p[1].to_bits()]).collect()),
+        cl_pts.as_ref().map(|v| v.iter().map(|p| [p[0].to_bits(), p[1].to_bits()]).collect()),
+    ]);
+    {
+        let cache = warper_table_cache().lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(texels) = cache.get(&key) {
+            return Some(ColorWarperTable { texels: texels.clone(), active_mask });
+        }
+    }
+
+    let get_hs = |hi: usize, ri: usize| -> [f32; 2] {
+        if ri == 0 {
+            return [0.0, 0.0];
+        }
+        hs_pts
+            .as_ref()
+            .and_then(|v| v.get((ri - 1) * CW_HUE_SECTORS + (hi % CW_HUE_SECTORS)))
+            .map_or([0.0, 0.0], |&p| [if p[0].is_finite() { p[0].clamp(-0.8, 0.8) } else { 0.0 }, if p[1].is_finite() { p[1].clamp(-0.8, 0.8) } else { 0.0 }])
+    };
+    let get_cl = |hi: usize, ri: usize| -> [f32; 2] {
+        if ri == 0 || ri == 5 {
+            return [0.0, 0.0];
+        }
+        cl_pts
+            .as_ref()
+            .and_then(|v| v.get((ri - 1) * CW_HUE_SECTORS + (hi % CW_HUE_SECTORS)))
+            .map_or([0.0, 0.0], |&p| [if p[0].is_finite() { p[0].clamp(-1.0, 1.0) } else { 0.0 }, if p[1].is_finite() { p[1].clamp(-1.0, 1.0) } else { 0.0 }])
+    };
+
+    let mut texels = vec![[0.0f32; 4]; CW_LUT_W * CW_LUT_H];
+    for y in 0..CW_LUT_H {
+        let v = y as f32 / (CW_LUT_H - 1) as f32;
+        let rf = v * CW_RADIAL_RINGS as f32;
+        let r0 = (rf.floor() as usize).min(CW_RADIAL_RINGS);
+        let r1 = (r0 + 1).min(CW_RADIAL_RINGS);
+        let rt = (rf - r0 as f32).clamp(0.0, 1.0);
+
+        let lf = v * 5.0;
+        let l0 = (lf.floor() as usize).min(5);
+        let l1 = (l0 + 1).min(5);
+        let lt = (lf - l0 as f32).clamp(0.0, 1.0);
+
+        for x in 0..CW_LUT_W {
+            let h = x as f32 / (CW_LUT_W - 1) as f32;
+            let hf = h * CW_HUE_SECTORS as f32;
+            let h0 = (hf.floor() as usize) % CW_HUE_SECTORS;
+            let h1 = (h0 + 1) % CW_HUE_SECTORS;
+            let ht = (hf - hf.floor()).clamp(0.0, 1.0);
+
+            let a = h * std::f32::consts::TAU;
+            let (wx, wy) = if hs_pts.is_some() {
+                let p00 = get_hs(h0, r0);
+                let p10 = get_hs(h1, r0);
+                let p01 = get_hs(h0, r1);
+                let p11 = get_hs(h1, r1);
+                let dx = lerp(lerp(p00[0], p10[0], ht), lerp(p01[0], p11[0], ht), rt);
+                let dy = lerp(lerp(p00[1], p10[1], ht), lerp(p01[1], p11[1], ht), rt);
+                (v * a.cos() + dx, v * a.sin() + dy)
+            } else {
+                (v * a.cos(), v * a.sin())
+            };
+
+            let (dc, dl) = if cl_pts.is_some() {
+                let p00 = get_cl(h0, l0);
+                let p10 = get_cl(h1, l0);
+                let p01 = get_cl(h0, l1);
+                let p11 = get_cl(h1, l1);
+                (lerp(lerp(p00[0], p10[0], ht), lerp(p01[0], p11[0], ht), lt), lerp(lerp(p00[1], p10[1], ht), lerp(p01[1], p11[1], ht), lt))
+            } else {
+                (0.0, 0.0)
+            };
+
+            if let Some(dst) = texels.get_mut(y * CW_LUT_W + x) {
+                *dst = [wx, wy, dc, dl];
+            }
+        }
+    }
+    let arc = Arc::new(texels);
+    let mut cache = warper_table_cache().lock().unwrap_or_else(PoisonError::into_inner);
+    if cache.len() >= 32 {
+        cache.clear();
+    }
+    cache.insert(key, arc.clone());
+    Some(ColorWarperTable { texels: arc, active_mask })
+}
+
+#[inline]
+fn sample_warper_2d(texels: &[[f32; 4]], u: f32, v: f32) -> [f32; 4] {
+    let fx = u.clamp(0.0, 1.0) * (CW_LUT_W - 1) as f32;
+    let fy = v.clamp(0.0, 1.0) * (CW_LUT_H - 1) as f32;
+    let x0 = (fx as usize).min(CW_LUT_W - 1);
+    let y0 = (fy as usize).min(CW_LUT_H - 1);
+    let x1 = (x0 + 1).min(CW_LUT_W - 1);
+    let y1 = (y0 + 1).min(CW_LUT_H - 1);
+    let tx = (fx - x0 as f32).clamp(0.0, 1.0);
+    let ty = (fy - y0 as f32).clamp(0.0, 1.0);
+    let p00 = texels.get(y0 * CW_LUT_W + x0).copied().unwrap_or([0.0; 4]);
+    let p10 = texels.get(y0 * CW_LUT_W + x1).copied().unwrap_or([0.0; 4]);
+    let p01 = texels.get(y1 * CW_LUT_W + x0).copied().unwrap_or([0.0; 4]);
+    let p11 = texels.get(y1 * CW_LUT_W + x1).copied().unwrap_or([0.0; 4]);
+    [
+        lerp(lerp(p00[0], p10[0], tx), lerp(p01[0], p11[0], tx), ty),
+        lerp(lerp(p00[1], p10[1], tx), lerp(p01[1], p11[1], tx), ty),
+        lerp(lerp(p00[2], p10[2], tx), lerp(p01[2], p11[2], tx), ty),
+        lerp(lerp(p00[3], p10[3], tx), lerp(p01[3], p11[3], tx), ty),
+    ]
+}
+
+#[inline]
+pub(crate) fn apply_color_warper_unit(u: [f32; 3], cw: &ColorWarperTable) -> [f32; 3] {
+    let mut h = rgb_to_hsl(u[0], u[1], u[2]);
+    if cw.active_mask & 1 != 0 {
+        let s = sample_warper_2d(&cw.texels, h[0], h[1]);
+        let s2 = (s[0] * s[0] + s[1] * s[1]).sqrt().clamp(0.0, 1.0);
+        if s2 > 1e-4 {
+            h[0] = s[1].atan2(s[0]).rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU;
+        }
+        h[1] = s2;
+    }
+    if cw.active_mask & 2 != 0 {
+        let s = sample_warper_2d(&cw.texels, h[0], h[2]);
+        h[1] = (h[1] * (1.0 + s[2] * 1.5)).clamp(0.0, 1.0);
+        h[2] = (h[2] + s[3] * 0.4).clamp(0.0, 1.0);
+    }
+    hsl_to_rgb(h[0], h[1], h[2])
+}
+
 fn lumetri(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
+    lumetri_with_mask(img, e, cx, None);
+}
+
+pub(crate) fn lumetri_masked(img: &mut Image, e: &EffectInstance, cx: &FxCtx, window_cov: &[f32]) {
+    lumetri_with_mask(img, e, cx, Some(window_cov));
+}
+
+fn lumetri_with_mask(img: &mut Image, e: &EffectInstance, cx: &FxCtx, window_cov: Option<&[f32]>) {
+    let gs_key = grade_space(e, cx, "curves_hdr_range");
+    let qual = qualifier_params_from_effect(e, cx.t, cx.px_scale, img.w, img.h);
+    let key_gain = (e.param("key_gain").map_or(100.0, |p| p.f64_at(cx.t)) as f32 / 100.0).clamp(0.0, 1.0);
+    let show_mask = choice(e, "hsl_show_mask");
+    let is_node_key = qual.as_ref().is_some_and(|q| q.key_scope == 0);
+    let is_legacy_sec = qual.as_ref().is_some_and(|q| q.key_scope == 1);
+    let node_highlight = if !is_legacy_sec && (is_node_key || window_cov.is_some()) { show_mask } else { 0 };
+    let need_outer_blend = is_node_key || window_cov.is_some() || key_gain < 0.9999 || node_highlight > 0;
+    let orig_img = need_outer_blend.then(|| img.clone());
+    let pre_qual_matte =
+        if is_node_key && let (Some(q), Some(orig)) = (qual.as_ref(), orig_img.as_ref()) { Some(compute_qualifier_matte(orig, q, &gs_key)) } else { None };
+
     let (basic_on, creative_on, vignette_on) = (on(e, "basic_on"), on(e, "creative_on"), on(e, "vignette_on"));
     let input_lut = if basic_on { crate::luts::resolve(cx.project, text(e, "input_lut")) } else { None };
     let bf = |id: &str| if basic_on { f(e, id, cx) } else { 0.0 };
@@ -661,6 +985,10 @@ fn lumetri(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
     let tint = bf("tint") / 100.0;
     let exposure = 2f32.powf(bf("exposure"));
     let contrast = bf("contrast") / 100.0;
+    let pivot = if basic_on { (e.param("contrast_pivot").map_or(50.0, |p| p.f64_at(cx.t)) as f32) / 100.0 } else { 0.5 };
+    let color_boost = bf("color_boost") / 100.0;
+    let midtone_detail = bf("midtone_detail") / 100.0;
+    let primary_hue = if basic_on { ((e.param("primary_hue").map_or(50.0, |p| p.f64_at(cx.t)) as f32) - 50.0) / 100.0 } else { 0.0 };
     let hl = bf("highlights") / 100.0;
     let sh = bf("shadows") / 100.0;
     let wh = bf("whites") / 100.0;
@@ -700,18 +1028,10 @@ fn lumetri(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
         // speck; below LIFT_LUMA_FLOOR the scale is held and the rest is added equally
         let (k, add) = lift_scale(l, nl);
         v = v.map(|q| q * k + add);
-        // contrast: smooth S-curve around mid grey (HDR: over 0 … HDR White; speculars above it
+        // contrast: smooth S-curve around pivot (HDR: over 0 … HDR White; speculars above it
         // keep their distance from white)
         if contrast.abs() > 1e-4 {
-            let k = 1.0 + contrast;
-            v = v.map(|q| {
-                if hdr && q > 1.0 {
-                    return q;
-                }
-                let q = q.clamp(0.0, 1.0);
-                let s = q * q * (3.0 - 2.0 * q);
-                if k >= 1.0 { q + (s - q) * (k - 1.0) } else { 0.5 + (q - 0.5) * k }
-            });
+            v = v.map(|q| if hdr && q > 1.0 { q } else { apply_contrast_pivot(q, contrast, pivot) });
         }
         // HDR Specular: brightness of the highlights above HDR White
         if specular.abs() > 1e-4 {
@@ -728,11 +1048,16 @@ fn lumetri(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
                 v[k] += (st[k] - 0.5) * 0.3 * (1.0 - l2) + (ht[k] - 0.5) * 0.3 * l2;
             }
         }
-        // saturation & vibrance
-        let l3 = 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
-        let cur_sat = v[0].max(v[1]).max(v[2]) - v[0].min(v[1]).min(v[2]);
-        let s = sat * (1.0 + vib * (1.0 - cur_sat.clamp(0.0, 1.0)));
-        v = v.map(|q| l3 + (q - l3) * s);
+        // primary hue rotation
+        if primary_hue.abs() > 1e-5 {
+            v = within_unit(v, hdr, |u| {
+                let mut h = rgb_to_hsl(u[0], u[1], u[2]);
+                h[0] = (h[0] + primary_hue).rem_euclid(1.0);
+                hsl_to_rgb(h[0], h[1], h[2])
+            });
+        }
+        // saturation, vibrance & color boost
+        v = apply_sat_vib_boost(v, sat, vib, color_boost);
         // vignette
         if va.abs() > 1e-4 {
             let nx = (x as f32 / w - 0.5) * 2.0 * crate::gpufx::lumetri_vignette_aspect(aspect, vround);
@@ -746,9 +1071,31 @@ fn lumetri(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
         gs.decode(v)
     });
     lumetri_advanced(img, e, cx);
-    hsl_secondary(img, e, cx);
+    if is_node_key
+        && let Some(q) = qual.as_ref()
+        && (q.htemp.abs() > 1e-4 || q.htint.abs() > 1e-4 || (q.hsat - 1.0).abs() > 1e-4 || q.hshift.abs() > 1e-4)
+    {
+        let hdr_sec = gs_key.is_hdr();
+        img.map_rgb(|c, _, _| {
+            let v = gs_key.encode(c);
+            let scale = if hdr_sec { v[0].max(v[1]).max(v[2]).max(1.0) } else { 1.0 };
+            let u = if hdr_sec { v.map(|x| (x / scale).max(0.0)) } else { v.map(|x| x.clamp(0.0, 1.0)) };
+            let out = apply_hsl_secondary_color_unit(u, q);
+            gs_key.decode(out.map(|x| x * scale))
+        });
+    } else if !is_node_key {
+        hsl_secondary(img, e, cx);
+    }
+    if midtone_detail.abs() > 1e-3 {
+        let r = 2.4 * cx.px_scale.max(0.35);
+        let (rx, ry) = gaussian_boxes(img.w, img.h, r, r);
+        midtone_detail_boxes(img, &rx, &ry, midtone_detail);
+    }
     if sharpen.abs() > 1e-3 {
         unsharp(img, 1.2 * cx.px_scale.max(0.35), sharpen.max(-1.0), 0.0);
+    }
+    if let Some(orig) = orig_img.as_ref() {
+        apply_node_key_output(img, orig, pre_qual_matte.as_deref(), window_cov, node_highlight, key_gain, &gs_key);
     }
 }
 
@@ -873,6 +1220,25 @@ pub(crate) fn unsharp_boxes(img: &mut Image, rx: &[u32], ry: &[u32], amount: f32
                 p[k] = (p[k] + d * amount).clamp(0.0, p[3].max(p[k] + d * amount).max(0.0));
                 p[k] = p[k].max(0.0);
             }
+        }
+    });
+}
+
+/// Midtone Detail: microcontrast weighted by a midtone bell `4 * l * (1 - l)` on encoded luma.
+pub(crate) fn midtone_detail_boxes(img: &mut Image, rx: &[u32], ry: &[u32], amount: f32) {
+    let mut blurred = img.clone();
+    box_blur(&mut blurred, rx, ry, true);
+    img.px.par_chunks_mut(4).zip(blurred.px.par_chunks(4)).for_each(|(p, bq)| {
+        let a = p[3];
+        if a <= 1e-6 {
+            return;
+        }
+        let c = enc([p[0] / a, p[1] / a, p[2] / a]);
+        let l = (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]).clamp(0.0, 1.0);
+        let gain = amount * 0.8 * 4.0 * l * (1.0 - l);
+        for k in 0..3 {
+            let d = p[k] - bq[k];
+            p[k] = (p[k] + d * gain).max(0.0);
         }
     });
 }
@@ -1304,6 +1670,518 @@ pub(crate) fn wheel_rgb(v: Vec2) -> [f32; 3] {
     [a.cos() * len, (a - tau / 3.0).cos() * len, (a + tau / 3.0).cos() * len]
 }
 
+/// Resolve-style vs legacy primary wheels grading model.
+/// Projects saved before `grade_model` existed default to `1` (Legacy Lumetri) for backwards compatibility.
+pub(crate) fn grade_model_from_effect(e: &EffectInstance) -> u32 {
+    e.param("grade_model").map_or(1, |p| match p.value {
+        ParamValue::Choice(c) => c,
+        _ => 1,
+    })
+}
+
+/// Smoothstep helper on `[a, b]` with safe denominator.
+#[inline]
+fn wheel_smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a).max(1e-4)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Evaluate primary color wheels (`grade_model == 0`: Resolve LGG; `grade_model == 1`: Legacy Lumetri).
+///
+/// `lift`, `gamma`, `gain`, `offset` are already scaled per-channel (`ws * 0.3 + ls * 0.3`, etc.).
+pub fn apply_primaries_wheels_unit(mut v: [f32; 3], grade_model: u32, lift: [f32; 3], gamma: [f32; 3], gain: [f32; 3], offset: [f32; 3]) -> [f32; 3] {
+    if grade_model == 0 {
+        for k in 0..3 {
+            let g = (1.0 + gain[k]).max(0.01);
+            let mut x = v[k] * g;
+            x += lift[k] * (1.0 - x);
+            if gamma[k].abs() > 1e-6 && x > 0.0 {
+                let exp = 2.0_f32.powf(-gamma[k] * 2.0);
+                x = x.powf(exp);
+            }
+            v[k] = x + offset[k];
+        }
+    } else {
+        let l = (0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]).clamp(0.0, 1.0);
+        let wsh = (1.0 - l).powi(2);
+        let whi = l * l;
+        let wmid = (1.0 - wsh - whi).max(0.0);
+        for k in 0..3 {
+            v[k] += lift[k] * wsh;
+            v[k] += gamma[k] * wmid;
+            v[k] *= 1.0 + gain[k] * whi;
+            v[k] += offset[k];
+        }
+    }
+    v
+}
+
+/// Pre-evaluated Log Wheels parameters (zero-cost when identity).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LogWheelsParams {
+    pub shadows: [f32; 3],
+    pub midtones: [f32; 3],
+    pub highlights: [f32; 3],
+    pub offset: [f32; 3],
+    pub low_range: f32,
+    pub high_range: f32,
+}
+
+impl LogWheelsParams {
+    pub fn from_effect(e: &EffectInstance, t: Tick, lum_mix: f32) -> Option<Self> {
+        if !on(e, "wheels_on") {
+            return None;
+        }
+        let v2 = |id: &str| e.param(id).map(|p| p.vec2_at(t)).unwrap_or_default();
+        let fv = |id: &str, def: f32| e.param(id).map_or(def, |p| p.f64_at(t) as f32);
+        let ws = apply_lum_mix_offset(wheel_rgb(v2("log_shadows")), lum_mix);
+        let wm = apply_lum_mix_offset(wheel_rgb(v2("log_midtones")), lum_mix);
+        let wh = apply_lum_mix_offset(wheel_rgb(v2("log_highlights")), lum_mix);
+        let wo = apply_lum_mix_offset(wheel_rgb(v2("log_offset")), lum_mix);
+        let ls = fv("log_shadows_l", 0.0) / 100.0;
+        let lm = fv("log_midtones_l", 0.0) / 100.0;
+        let lh = fv("log_highlights_l", 0.0) / 100.0;
+        let lo = fv("log_offset_l", 0.0) / 100.0;
+        let shadows = [ws[0] * 0.3 + ls * 0.3, ws[1] * 0.3 + ls * 0.3, ws[2] * 0.3 + ls * 0.3];
+        let midtones = [wm[0] * 0.3 + lm * 0.3, wm[1] * 0.3 + lm * 0.3, wm[2] * 0.3 + lm * 0.3];
+        let highlights = [wh[0] * 0.3 + lh * 0.3, wh[1] * 0.3 + lh * 0.3, wh[2] * 0.3 + lh * 0.3];
+        let offset = [wo[0] * 0.3 + lo * 0.3, wo[1] * 0.3 + lo * 0.3, wo[2] * 0.3 + lo * 0.3];
+        if !shadows.iter().chain(&midtones).chain(&highlights).chain(&offset).any(|v| v.abs() > 1e-5) {
+            return None;
+        }
+        let low_range = (fv("log_low_range", 33.0) / 100.0).clamp(0.02, 0.96);
+        let high_range = (fv("log_high_range", 55.0) / 100.0).clamp(low_range + 0.02, 0.98);
+        Some(Self { shadows, midtones, highlights, offset, low_range, high_range })
+    }
+}
+
+/// Apply Log Wheels with sharp, smoothstep-bounded Shadow / Midtone / Highlight ranges.
+pub fn apply_log_wheels_unit(mut v: [f32; 3], p: &LogWheelsParams) -> [f32; 3] {
+    let l = (0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]).clamp(0.0, 1.0);
+    let w_sh = 1.0 - wheel_smoothstep(0.0, p.low_range, l);
+    let w_hi = wheel_smoothstep(p.high_range, 1.0, l);
+    let w_mid = (1.0 - w_sh - w_hi).clamp(0.0, 1.0);
+    for k in 0..3 {
+        v[k] += p.shadows[k] * w_sh + p.midtones[k] * w_mid + p.highlights[k] * w_hi + p.offset[k];
+    }
+    v
+}
+
+/// Pre-evaluated HDR Color Wheels parameters in EV stops (zero-cost when identity).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HdrWheelsParams {
+    /// Per-zone combined EV shift `[r, g, b]` for Black, Dark, Shadow, Light, Highlight, Specular.
+    pub zones: [[f32; 3]; 6],
+    /// Global EV shift `[r, g, b]`.
+    pub global: [f32; 3],
+    /// Gaussian / shelf transition width in EV stops (`0.75..2.25`).
+    pub sigma: f32,
+    /// Global EV offset applied to zone centers (`-4..4` EV).
+    pub wheel_range: f32,
+}
+
+impl HdrWheelsParams {
+    pub fn from_effect(e: &EffectInstance, t: Tick, lum_mix: f32) -> Option<Self> {
+        if !on(e, "wheels_on") {
+            return None;
+        }
+        let v2 = |id: &str| e.param(id).map(|p| p.vec2_at(t)).unwrap_or_default();
+        let fv = |id: &str, def: f32| e.param(id).map_or(def, |p| p.f64_at(t) as f32);
+        let zone_ids = [
+            ("hdr_w_black", "hdr_w_black_exp"),
+            ("hdr_w_dark", "hdr_w_dark_exp"),
+            ("hdr_w_shadow", "hdr_w_shadow_exp"),
+            ("hdr_w_light", "hdr_w_light_exp"),
+            ("hdr_w_highlight", "hdr_w_highlight_exp"),
+            ("hdr_w_specular", "hdr_w_specular_exp"),
+        ];
+        let mut zones = [[0.0f32; 3]; 6];
+        let mut active = false;
+        for (i, (w_id, e_id)) in zone_ids.iter().enumerate() {
+            let rgb = apply_lum_mix_offset(wheel_rgb(v2(w_id)), lum_mix);
+            let exp = fv(e_id, 0.0).clamp(-4.0, 4.0);
+            zones[i] = [exp + rgb[0] * 0.75, exp + rgb[1] * 0.75, exp + rgb[2] * 0.75];
+            if zones[i].iter().any(|x| x.abs() > 1e-5) {
+                active = true;
+            }
+        }
+        let g_rgb = apply_lum_mix_offset(wheel_rgb(v2("hdr_w_global")), lum_mix);
+        let g_exp = fv("hdr_w_global_exp", 0.0).clamp(-4.0, 4.0);
+        let global = [g_exp + g_rgb[0] * 0.75, g_exp + g_rgb[1] * 0.75, g_exp + g_rgb[2] * 0.75];
+        if global.iter().any(|x| x.abs() > 1e-5) {
+            active = true;
+        }
+        if !active {
+            return None;
+        }
+        let falloff = (fv("hdr_zone_falloff", 50.0) / 100.0).clamp(0.0, 1.0);
+        let sigma = 0.75 + falloff * 1.5;
+        let wheel_range = fv("hdr_wheel_range", 0.0).clamp(-4.0, 4.0);
+        Some(Self { zones, global, sigma, wheel_range })
+    }
+}
+
+/// Apply HDR Color Wheels in scene-linear light (EV stops relative to 18% middle gray).
+pub fn apply_hdr_wheels_linear(lin: [f32; 3], p: &HdrWheelsParams) -> [f32; 3] {
+    let y = (0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]).max(1e-5);
+    let ev = (y / 0.18).log2() - p.wheel_range;
+    let s = p.sigma.max(0.25);
+    let inv_2s2 = 0.5 / (s * s);
+    let w0 = 1.0 - wheel_smoothstep(-4.5 - s, -4.5 + s, ev);
+    let w1 = (-((ev + 2.5) * (ev + 2.5)) * inv_2s2).exp();
+    let w2 = (-((ev + 1.0) * (ev + 1.0)) * inv_2s2).exp();
+    let w3 = (-((ev - 0.5) * (ev - 0.5)) * inv_2s2).exp();
+    let w4 = (-((ev - 2.0) * (ev - 2.0)) * inv_2s2).exp();
+    let w5 = wheel_smoothstep(3.5 - s, 3.5 + s, ev);
+    let mut out = [0.0f32; 3];
+    for k in 0..3 {
+        let shift = (p.global[k] + w0 * p.zones[0][k] + w1 * p.zones[1][k] + w2 * p.zones[2][k] + w3 * p.zones[3][k] + w4 * p.zones[4][k] + w5 * p.zones[5][k])
+            .clamp(-12.0, 12.0);
+        out[k] = lin[k] * 2.0_f32.powf(shift);
+    }
+    out
+}
+
+/// Pre-evaluated 3×3 RGB Mixer matrix (with `Monochrome` and `Preserve Luminance` already folded in).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RgbMixerParams {
+    pub mat: [[f32; 3]; 3],
+}
+
+impl RgbMixerParams {
+    pub fn from_effect(e: &EffectInstance, t: Tick) -> Option<Self> {
+        if !on(e, "rgb_mix_on") {
+            return None;
+        }
+        let fv = |id: &str, def: f32| e.param(id).map_or(def, |p| p.f64_at(t) as f32) / 100.0;
+        let mono = e.param("mix_monochrome").is_some_and(|p| matches!(p.value, ParamValue::Bool(true)));
+        let preserve = e.param("mix_preserve_lum").is_none_or(|p| matches!(p.value, ParamValue::Bool(true)));
+        let mut mat = [
+            [fv("mix_rr", 100.0), fv("mix_rg", 0.0), fv("mix_rb", 0.0)],
+            [fv("mix_gr", 0.0), fv("mix_gg", 100.0), fv("mix_gb", 0.0)],
+            [fv("mix_br", 0.0), fv("mix_bg", 0.0), fv("mix_bb", 100.0)],
+        ];
+        if mono {
+            mat[1] = mat[0];
+            mat[2] = mat[0];
+        }
+        if preserve {
+            for row in &mut mat {
+                let s = row[0] + row[1] + row[2];
+                if s.abs() > 1e-4 {
+                    row[0] /= s;
+                    row[1] /= s;
+                    row[2] /= s;
+                }
+            }
+        }
+        let is_id = (mat[0][0] - 1.0).abs() < 1e-5
+            && mat[0][1].abs() < 1e-5
+            && mat[0][2].abs() < 1e-5
+            && mat[1][0].abs() < 1e-5
+            && (mat[1][1] - 1.0).abs() < 1e-5
+            && mat[1][2].abs() < 1e-5
+            && mat[2][0].abs() < 1e-5
+            && mat[2][1].abs() < 1e-5
+            && (mat[2][2] - 1.0).abs() < 1e-5;
+        if is_id { None } else { Some(Self { mat }) }
+    }
+}
+
+/// Apply 3×3 RGB Mixer matrix in display/encoded space.
+#[inline]
+pub fn apply_rgb_mixer_unit(v: [f32; 3], p: &RgbMixerParams) -> [f32; 3] {
+    [
+        p.mat[0][0] * v[0] + p.mat[0][1] * v[1] + p.mat[0][2] * v[2],
+        p.mat[1][0] * v[0] + p.mat[1][1] * v[1] + p.mat[1][2] * v[2],
+        p.mat[2][0] * v[0] + p.mat[2][1] * v[1] + p.mat[2][2] * v[2],
+    ]
+}
+
+fn cst_gamut(idx: u32) -> Gamut {
+    match idx {
+        1 => Gamut::Bt2020,
+        2 => Gamut::P3D65,
+        3 => Gamut::DaVinciWideGamut,
+        4 => Gamut::AcesAp1,
+        5 => Gamut::SGamut3Cine,
+        6 => Gamut::SGamut3,
+        7 => Gamut::VGamut,
+        8 => Gamut::CinemaGamut,
+        9 => Gamut::Awg3,
+        10 => Gamut::Awg4,
+        11 => Gamut::DGamut,
+        12 => Gamut::FGamutC,
+        _ => Gamut::Bt709,
+    }
+}
+
+fn cst_curve(idx: u32) -> Curve {
+    match idx {
+        1 => Curve::Srgb,
+        2 => Curve::Linear,
+        3 => Curve::Pq,
+        4 => Curve::Hlg,
+        5 => Curve::Log(LogCurve::DaVinciIntermediate),
+        6 => Curve::Log(LogCurve::AcesCct),
+        7 => Curve::Log(LogCurve::SLog3),
+        8 => Curve::Log(LogCurve::VLog),
+        9 => Curve::Log(LogCurve::CLog2),
+        10 => Curve::Log(LogCurve::CLog3),
+        11 => Curve::Log(LogCurve::LogC3),
+        12 => Curve::Log(LogCurve::LogC4),
+        13 => Curve::Log(LogCurve::AppleLog),
+        14 => Curve::Log(LogCurve::DLog),
+        15 => Curve::Log(LogCurve::FLog),
+        16 => Curve::Log(LogCurve::FLog2),
+        _ => Curve::Sdr,
+    }
+}
+
+fn cst_curve_peak_nits(curve: Curve, user_peak: f32) -> f32 {
+    match curve {
+        Curve::Pq => user_peak.clamp(100.0, 10_000.0),
+        Curve::Hlg => 1000.0,
+        Curve::Log(_) => filmcraft_color::transform::LOG_PEAK_NITS as f32,
+        _ => filmcraft_color::REFERENCE_WHITE_NITS as f32,
+    }
+}
+
+/// Pre-evaluated Color Space Transform (CST) parameters (zero-cost when disabled or identity).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CstParams {
+    pub in_gamma: u32,
+    pub out_gamma: u32,
+    pub mat: [[f32; 3]; 3],
+    pub out_luma: [f32; 3],
+    pub tone_map: u32,
+    pub gamut_map: u32,
+    pub src_peak_nits: f32,
+    pub dst_peak_nits: f32,
+}
+
+impl CstParams {
+    pub fn from_effect(e: &EffectInstance, t: Tick) -> Option<Self> {
+        if !e.param("cst_on").and_then(|p| p.value.as_bool()).unwrap_or(false) {
+            return None;
+        }
+        let ch = |id: &str| match e.param(id).map(|p| &p.value) {
+            Some(ParamValue::Choice(c)) => *c,
+            _ => 0,
+        };
+        let in_space = ch("cst_in_space");
+        let out_space = ch("cst_out_space");
+        let in_gamma = ch("cst_in_gamma");
+        let out_gamma = ch("cst_out_gamma");
+        if in_space == out_space && in_gamma == out_gamma {
+            return None;
+        }
+        let in_g = cst_gamut(in_space);
+        let out_g = cst_gamut(out_space);
+        let mat = filmcraft_color::spaces::to_f32(&gamut_matrix(in_g, out_g));
+        let l = out_g.luma();
+        let out_luma = [l[0] as f32, l[1] as f32, l[2] as f32];
+        let tone_map = ch("cst_tone_map");
+        let gamut_map = ch("cst_gamut_map");
+        let peak_nits = e.param("cst_peak_nits").map_or(1000.0, |p| p.f64_at(t) as f32).clamp(100.0, 10_000.0);
+        let src_peak_nits = cst_curve_peak_nits(cst_curve(in_gamma), peak_nits);
+        let dst_peak_nits = cst_curve_peak_nits(cst_curve(out_gamma), peak_nits);
+        Some(Self { in_gamma, out_gamma, mat, out_luma, tone_map, gamut_map, src_peak_nits, dst_peak_nits })
+    }
+}
+
+#[inline]
+fn bt2390_ratio(lum: f32, src_peak: f32, dst_peak: f32) -> f32 {
+    if dst_peak >= src_peak || lum <= 1e-6 {
+        return 1.0;
+    }
+    let nits = lum * (filmcraft_color::REFERENCE_WHITE_NITS as f32);
+    let smax = filmcraft_color::pq_inverse_eotf((src_peak / 10_000.0).clamp(0.0, 1.0));
+    let e1 = (filmcraft_color::pq_inverse_eotf((nits / 10_000.0).clamp(0.0, 1.0)) / smax.max(1e-5)).min(1.0);
+    let max_lum = filmcraft_color::pq_inverse_eotf((dst_peak / 10_000.0).clamp(0.0, 1.0)) / smax.max(1e-5);
+    let ks = 1.5 * max_lum - 0.5;
+    let e2 = if e1 < ks {
+        e1
+    } else {
+        let t = (e1 - ks) / (1.0 - ks).max(1e-5);
+        let t2 = t * t;
+        let t3 = t2 * t;
+        (2.0 * t3 - 3.0 * t2 + 1.0) * ks + (t3 - 2.0 * t2 + t) * (1.0 - ks) + (-2.0 * t3 + 3.0 * t2) * max_lum
+    };
+    let mapped_nits = (filmcraft_color::pq_eotf((e2 * smax).clamp(0.0, 1.0)) * 10_000.0).max(0.0);
+    (mapped_nits / (filmcraft_color::REFERENCE_WHITE_NITS as f32)) / lum
+}
+
+#[inline]
+fn cst_gamut_compress_rgb(c: [f32; 3]) -> [f32; 3] {
+    let ach = c[0].max(c[1]).max(c[2]);
+    if ach <= 1e-6 {
+        return c.map(|v| v.max(0.0));
+    }
+    let thr = 0.8_f32;
+    let lim = 1.25_f32;
+    let pwr = 1.2_f32;
+    let scale = (lim - thr) / ((1.0 - thr) / ((lim - 1.0).max(1e-4) / (lim - thr)).powf(-pwr) - 1.0).max(1e-5);
+    c.map(|v| {
+        let dist = (ach - v) / ach;
+        if dist <= thr {
+            v
+        } else {
+            let nd = dist - thr;
+            let comp = thr + scale * (nd / scale) / (1.0 + (nd / scale).powf(pwr)).powf(1.0 / pwr);
+            (ach * (1.0 - comp)).max(0.0)
+        }
+    })
+}
+
+#[inline]
+fn cst_desaturate_rgb(c: [f32; 3], luma_w: [f32; 3]) -> [f32; 3] {
+    let mn = c[0].min(c[1]).min(c[2]);
+    if mn >= 0.0 {
+        return c;
+    }
+    let y = (luma_w[0] * c[0] + luma_w[1] * c[1] + luma_w[2] * c[2]).max(0.0);
+    if y <= 1e-6 {
+        return [0.0; 3];
+    }
+    let k = (y / (y - mn)).clamp(0.0, 1.0);
+    [y + (c[0] - y) * k, y + (c[1] - y) * k, y + (c[2] - y) * k]
+}
+
+/// Apply Color Space Transform on display-encoded `v` (curve_in → gamut matrix → tone/gamut map → curve_out).
+pub fn apply_cst_unit(v: [f32; 3], p: &CstParams) -> [f32; 3] {
+    let in_c = cst_curve(p.in_gamma);
+    let out_c = cst_curve(p.out_gamma);
+    let mut lin = v.map(|q| filmcraft_color::transform::decode_channel(q as f64, in_c, Range::Full) as f32);
+    lin = filmcraft_color::spaces::apply3(&p.mat, lin);
+
+    if p.tone_map != 0 && p.dst_peak_nits < p.src_peak_nits {
+        let m = if p.tone_map == 1 {
+            lin[0].max(lin[1]).max(lin[2]).max(0.0)
+        } else {
+            (p.out_luma[0] * lin[0] + p.out_luma[1] * lin[1] + p.out_luma[2] * lin[2]).max(0.0)
+        };
+        let ratio = bt2390_ratio(m, p.src_peak_nits, p.dst_peak_nits);
+        lin = [lin[0] * ratio, lin[1] * ratio, lin[2] * ratio];
+    }
+
+    lin = match p.gamut_map {
+        1 => cst_gamut_compress_rgb(lin),
+        2 => cst_desaturate_rgb(lin, p.out_luma),
+        _ => lin,
+    };
+
+    lin.map(|q| filmcraft_color::transform::encode_channel(q as f64, out_c, Range::Full) as f32)
+}
+
+/// Pre-evaluated Node / Input Sizing geometric transform (zero-cost when identity).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeSizingParams {
+    pub pan: f32,
+    pub tilt: f32,
+    pub zoom_inv: f32,
+    pub width_inv: f32,
+    pub height_inv: f32,
+    pub cos_r: f32,
+    pub sin_r: f32,
+    pub flip_h: bool,
+    pub flip_v: bool,
+    pub blanking_aspect: f32,
+}
+
+impl NodeSizingParams {
+    pub fn from_effect(e: &EffectInstance, t: Tick) -> Option<Self> {
+        if !on(e, "sizing_on") {
+            return None;
+        }
+        let fv = |id: &str, def: f32| e.param(id).map_or(def, |p| p.f64_at(t) as f32);
+        let bv = |id: &str| e.param(id).and_then(|p| p.value.as_bool()).unwrap_or(false);
+        let pan = (fv("sizing_pan", 0.0) / 100.0).clamp(-1.0, 1.0);
+        let tilt = (fv("sizing_tilt", 0.0) / 100.0).clamp(-1.0, 1.0);
+        let zoom = (fv("sizing_zoom", 100.0) / 100.0).clamp(0.1, 4.0);
+        let width = (fv("sizing_width", 100.0) / 100.0).clamp(0.1, 4.0);
+        let height = (fv("sizing_height", 100.0) / 100.0).clamp(0.1, 4.0);
+        let rot = fv("sizing_rotate", 0.0).clamp(-180.0, 180.0).to_radians();
+        let flip_h = bv("sizing_flip_h");
+        let flip_v = bv("sizing_flip_v");
+        let blanking_idx = match e.param("sizing_blanking").map(|p| &p.value) {
+            Some(ParamValue::Choice(c)) => *c,
+            _ => 0,
+        };
+        let blanking_aspect = match blanking_idx {
+            1 => 1.85,
+            2 => 2.00,
+            3 => 2.35,
+            4 => 2.39,
+            5 => 2.40,
+            _ => 0.0,
+        };
+        if pan.abs() < 1e-5
+            && tilt.abs() < 1e-5
+            && (zoom - 1.0).abs() < 1e-5
+            && (width - 1.0).abs() < 1e-5
+            && (height - 1.0).abs() < 1e-5
+            && rot.abs() < 1e-5
+            && !flip_h
+            && !flip_v
+            && blanking_aspect == 0.0
+        {
+            return None;
+        }
+        Some(Self {
+            pan,
+            tilt,
+            zoom_inv: 1.0 / zoom,
+            width_inv: 1.0 / width,
+            height_inv: 1.0 / height,
+            cos_r: rot.cos(),
+            sin_r: rot.sin(),
+            flip_h,
+            flip_v,
+            blanking_aspect,
+        })
+    }
+
+    pub fn apply_image(&self, img: &mut Image) {
+        if img.w == 0 || img.h == 0 {
+            return;
+        }
+        let src = img.clone();
+        let w = img.w as f32;
+        let h = img.h as f32;
+        let cx = w * 0.5;
+        let cy = h * 0.5;
+        let bar = if self.blanking_aspect > 0.0 {
+            let target_h = (w / self.blanking_aspect).min(h);
+            0.5 * (h - target_h)
+        } else {
+            0.0
+        };
+        let row_stride = img.w * 4;
+        img.px.par_chunks_mut(row_stride).enumerate().for_each(|(y, row)| {
+            let py = y as f32 + 0.5;
+            if bar > 0.0 && (py < bar || py > h - bar) {
+                for x in 0..src.w {
+                    row[x * 4..x * 4 + 4].copy_from_slice(&[0.0, 0.0, 0.0, 1.0]);
+                }
+                return;
+            }
+            let dy = py - cy - self.tilt * cy;
+            for x in 0..src.w {
+                let dx = (x as f32 + 0.5) - cx - self.pan * cx;
+                let rx = dx * self.cos_r + dy * self.sin_r;
+                let ry = -dx * self.sin_r + dy * self.cos_r;
+                let sx_off = rx * self.zoom_inv * self.width_inv;
+                let sy_off = ry * self.zoom_inv * self.height_inv;
+                let sx = cx + if self.flip_h { -sx_off } else { sx_off };
+                let sy = cy + if self.flip_v { -sy_off } else { sy_off };
+                let sample = src.sample_bilinear(sx, sy);
+                row[x * 4..x * 4 + 4].copy_from_slice(&sample);
+            }
+        });
+    }
+}
+
 /// Looks: our own procedural grades (no third-party LUTs), applied on display-encoded colour.
 pub fn apply_look(look: u32, c: [f32; 3]) -> [f32; 3] {
     let l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
@@ -1341,15 +2219,37 @@ fn lumetri_advanced(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
     let (luma_c, red_c, green_c, blue_c) = (lut("curve_luma"), lut("curve_red"), lut("curve_green"), lut("curve_blue"));
     let hue = |id: &str| curve_param(e, id).filter(|_| curves_on).and_then(|c| hue_lut(&c, N));
     let vs_sat = |id: &str| curve_param(e, id).filter(|_| curves_on).and_then(|c| vs_sat_lut(&c, N));
-    let (hvs, hvh, hvl, lvs, svs) = (hue("hue_vs_sat"), hue("hue_vs_hue"), hue("hue_vs_luma"), vs_sat("luma_vs_sat"), vs_sat("sat_vs_sat"));
+    let (hvs, hvh, hvl, lvs, svs, svl) =
+        (hue("hue_vs_sat"), hue("hue_vs_hue"), hue("hue_vs_luma"), vs_sat("luma_vs_sat"), vs_sat("sat_vs_sat"), vs_sat("sat_vs_luma"));
+    let low_soft = if curves_on { (f(e, "curve_low_soft", cx) / 100.0).clamp(0.0, 1.0) } else { 0.0 };
+    let high_soft = if curves_on { (f(e, "curve_high_soft", cx) / 100.0).clamp(0.0, 1.0) } else { 0.0 };
+    let color_slice = ColorSliceParams::from_effect(e, cx.t);
+    let warper = build_warper_table(e);
     // Creative ▸ Look: a LUT ("Browse…" / built-in) takes precedence over the procedural menu
     let look_lut = if creative_on { crate::luts::resolve(cx.project, text(e, "look_lut")) } else { None };
     let look = if creative_on && look_lut.is_none() { choice(e, "look") } else { 0 };
     let look_k = f(e, "look_intensity", cx) / 100.0;
     let v2 = |id: &str| e.param(id).map(|p| p.vec2_at(cx.t)).unwrap_or_default();
-    let (ws, wm, wh) = (wheel_rgb(v2("wheel_shadows")), wheel_rgb(v2("wheel_midtones")), wheel_rgb(v2("wheel_highlights")));
-    let (ls, lm, lh) = (f(e, "wheel_shadows_l", cx) / 100.0, f(e, "wheel_midtones_l", cx) / 100.0, f(e, "wheel_highlights_l", cx) / 100.0);
-    let wheels = wheels_on && (ws.iter().chain(&wm).chain(&wh).any(|v| v.abs() > 1e-5) || ls.abs() + lm.abs() + lh.abs() > 1e-5);
+    let lum_mix = if on(e, "basic_on") { (e.param("lum_mix").map_or(100.0, |p| p.f64_at(cx.t)) as f32 / 100.0).clamp(0.0, 1.0) } else { 1.0 };
+    let grade_model = grade_model_from_effect(e);
+    let (ws, wm, wh, wo) = (
+        apply_lum_mix_offset(wheel_rgb(v2("wheel_shadows")), lum_mix),
+        apply_lum_mix_offset(wheel_rgb(v2("wheel_midtones")), lum_mix),
+        apply_lum_mix_offset(wheel_rgb(v2("wheel_highlights")), lum_mix),
+        apply_lum_mix_offset(wheel_rgb(v2("wheel_offset")), lum_mix),
+    );
+    let (ls, lm, lh, lo) =
+        (f(e, "wheel_shadows_l", cx) / 100.0, f(e, "wheel_midtones_l", cx) / 100.0, f(e, "wheel_highlights_l", cx) / 100.0, f(e, "wheel_offset_l", cx) / 100.0);
+    let lift_k = [ws[0] * 0.3 + ls * 0.3, ws[1] * 0.3 + ls * 0.3, ws[2] * 0.3 + ls * 0.3];
+    let gamma_k = [wm[0] * 0.3 + lm * 0.3, wm[1] * 0.3 + lm * 0.3, wm[2] * 0.3 + lm * 0.3];
+    let gain_k = [wh[0] * 0.5 + lh * 0.5, wh[1] * 0.5 + lh * 0.5, wh[2] * 0.5 + lh * 0.5];
+    let offset_k = [wo[0] * 0.3 + lo * 0.3, wo[1] * 0.3 + lo * 0.3, wo[2] * 0.3 + lo * 0.3];
+    let wheels = wheels_on && lift_k.iter().chain(&gamma_k).chain(&gain_k).chain(&offset_k).any(|v| v.abs() > 1e-5);
+    let log_wheels = LogWheelsParams::from_effect(e, cx.t, lum_mix);
+    let hdr_wheels = HdrWheelsParams::from_effect(e, cx.t, lum_mix);
+    let rgb_mixer = RgbMixerParams::from_effect(e, cx.t);
+    let cst = CstParams::from_effect(e, cx.t);
+    let sizing = NodeSizingParams::from_effect(e, cx.t);
     let any = luma_c.is_some()
         || red_c.is_some()
         || green_c.is_some()
@@ -1359,87 +2259,213 @@ fn lumetri_advanced(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
         || hvl.is_some()
         || lvs.is_some()
         || svs.is_some()
+        || svl.is_some()
+        || low_soft > 1e-5
+        || high_soft > 1e-5
+        || color_slice.is_some()
+        || warper.is_some()
         || look > 0
         || look_lut.is_some()
-        || wheels;
-    if !any {
+        || wheels
+        || log_wheels.is_some()
+        || hdr_wheels.is_some()
+        || rgb_mixer.is_some()
+        || cst.is_some();
+    if !any && sizing.is_none() {
         return;
     }
-    // HDR: curves, wheels and looks span 0 … the curves' HDR Range (cd/m²)
-    let gs = grade_space(e, cx, "curves_hdr_range");
-    let hdr = gs.is_hdr();
-    let sample = |l: &Vec<f32>, x: f32| {
-        // above HDR White a curve continues with slope 1 from its end point
-        if hdr && x > 1.0 {
-            return l[N - 1] + (x - 1.0);
-        }
-        let p = x.clamp(0.0, 1.0) * (N - 1) as f32;
-        let i = p as usize;
-        let j = (i + 1).min(N - 1);
-        l[i] + (l[j] - l[i]) * (p - i as f32)
-    };
-    img.map_rgb(|c, _, _| {
-        let mut v = gs.encode(c);
-        if let Some(l) = &look_lut {
-            let lk = within_unit(v, hdr, |u| l.apply(u));
-            v = [v[0] + (lk[0] - v[0]) * look_k, v[1] + (lk[1] - v[1]) * look_k, v[2] + (lk[2] - v[2]) * look_k];
-        } else if look > 0 {
-            let lk = if hdr { within_unit(v, true, |u| apply_look(look, u)) } else { apply_look(look, v) };
-            v = [v[0] + (lk[0] - v[0]) * look_k, v[1] + (lk[1] - v[1]) * look_k, v[2] + (lk[2] - v[2]) * look_k];
-        }
-        if wheels {
-            let l = (0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]).clamp(0.0, 1.0);
-            let wsh = (1.0 - l).powi(2);
-            let whi = l * l;
-            let wmid = (1.0 - wsh - whi).max(0.0);
-            for k in 0..3 {
-                // lift (shadows), gamma-ish (midtones), gain (highlights)
-                v[k] += (ws[k] * 0.3 + ls * 0.3) * wsh;
-                v[k] += (wm[k] * 0.3 + lm * 0.3) * wmid;
-                v[k] *= 1.0 + (wh[k] * 0.5 + lh * 0.5) * whi;
+    if any {
+        // HDR: curves, wheels and looks span 0 … the curves' HDR Range (cd/m²)
+        let gs = grade_space(e, cx, "curves_hdr_range");
+        let hdr = gs.is_hdr();
+        let sample = |l: &Vec<f32>, x: f32| {
+            // above HDR White a curve continues with slope 1 from its end point
+            if hdr && x > 1.0 {
+                return l[N - 1] + (x - 1.0);
             }
-        }
-        if let Some(l) = &luma_c {
-            v = v.map(|q| sample(l, q));
-        }
-        if let Some(l) = &red_c {
-            v[0] = sample(l, v[0]);
-        }
-        if let Some(l) = &green_c {
-            v[1] = sample(l, v[1]);
-        }
-        if let Some(l) = &blue_c {
-            v[2] = sample(l, v[2]);
-        }
-        if hvs.is_some() || hvh.is_some() || hvl.is_some() || lvs.is_some() || svs.is_some() {
-            v = within_unit(v, hdr, |u| {
-                let mut h = rgb_to_hsl(u[0], u[1], u[2]);
-                let (h0, s0, l0) = (h[0], h[1], h[2]);
-                if let Some(t) = &hvh {
-                    h[0] = (h[0] + (sample(t, h0) - 0.5)).rem_euclid(1.0);
-                }
-                let mut sm = 1.0;
-                if let Some(t) = &hvs {
-                    sm *= sample(t, h0) * 2.0;
-                }
-                if let Some(t) = &lvs {
-                    sm *= sample(t, l0) * 2.0;
-                }
-                if let Some(t) = &svs {
-                    sm *= sample(t, s0) * 2.0;
-                }
-                h[1] = (h[1] * sm).clamp(0.0, 1.0);
-                if let Some(t) = &hvl {
-                    h[2] = (h[2] + (sample(t, h0) - 0.5) * 0.5).clamp(0.0, 1.0);
-                }
-                hsl_to_rgb(h[0], h[1], h[2])
-            });
-        }
-        gs.decode(v)
-    });
+            let p = x.clamp(0.0, 1.0) * (N - 1) as f32;
+            let i = p as usize;
+            let j = (i + 1).min(N - 1);
+            l[i] + (l[j] - l[i]) * (p - i as f32)
+        };
+        img.map_rgb(|c, _, _| {
+            let mut v = gs.encode(c);
+            if let Some(l) = &look_lut {
+                let lk = within_unit(v, hdr, |u| l.apply(u));
+                v = [v[0] + (lk[0] - v[0]) * look_k, v[1] + (lk[1] - v[1]) * look_k, v[2] + (lk[2] - v[2]) * look_k];
+            } else if look > 0 {
+                let lk = if hdr { within_unit(v, true, |u| apply_look(look, u)) } else { apply_look(look, v) };
+                v = [v[0] + (lk[0] - v[0]) * look_k, v[1] + (lk[1] - v[1]) * look_k, v[2] + (lk[2] - v[2]) * look_k];
+            }
+            if wheels {
+                v = apply_primaries_wheels_unit(v, grade_model, lift_k, gamma_k, gain_k, offset_k);
+            }
+            if let Some(lw) = &log_wheels {
+                v = apply_log_wheels_unit(v, lw);
+            }
+            if let Some(hw) = &hdr_wheels {
+                v = gs.encode(apply_hdr_wheels_linear(gs.decode(v), hw));
+            }
+            if let Some(rm) = &rgb_mixer {
+                v = apply_rgb_mixer_unit(v, rm);
+            }
+            if let Some(l) = &luma_c {
+                v = v.map(|q| sample(l, q));
+            }
+            if let Some(l) = &red_c {
+                v[0] = sample(l, v[0]);
+            }
+            if let Some(l) = &green_c {
+                v[1] = sample(l, v[1]);
+            }
+            if let Some(l) = &blue_c {
+                v[2] = sample(l, v[2]);
+            }
+            if low_soft > 1e-5 || high_soft > 1e-5 {
+                v = v.map(|q| apply_soft_clip(q, low_soft, high_soft));
+            }
+            if hvs.is_some() || hvh.is_some() || hvl.is_some() || lvs.is_some() || svs.is_some() || svl.is_some() {
+                v = within_unit(v, hdr, |u| {
+                    let mut h = rgb_to_hsl(u[0], u[1], u[2]);
+                    let (h0, s0, l0) = (h[0], h[1], h[2]);
+                    if let Some(t) = &hvh {
+                        h[0] = (h[0] + (sample(t, h0) - 0.5)).rem_euclid(1.0);
+                    }
+                    let mut sm = 1.0;
+                    if let Some(t) = &hvs {
+                        sm *= sample(t, h0) * 2.0;
+                    }
+                    if let Some(t) = &lvs {
+                        sm *= sample(t, l0) * 2.0;
+                    }
+                    if let Some(t) = &svs {
+                        sm *= sample(t, s0) * 2.0;
+                    }
+                    h[1] = (h[1] * sm).clamp(0.0, 1.0);
+                    if let Some(t) = &hvl {
+                        h[2] = (h[2] + (sample(t, h0) - 0.5) * 0.5).clamp(0.0, 1.0);
+                    }
+                    if let Some(t) = &svl {
+                        h[2] = (h[2] + (sample(t, s0) - 0.5) * 0.5).clamp(0.0, 1.0);
+                    }
+                    hsl_to_rgb(h[0], h[1], h[2])
+                });
+            }
+            if let Some(cs) = &color_slice {
+                v = within_unit(v, hdr, |u| apply_color_slice_unit(u, cs));
+            }
+            if let Some(cw) = &warper {
+                v = within_unit(v, hdr, |u| apply_color_warper_unit(u, cw));
+            }
+            if let Some(cst) = &cst {
+                v = apply_cst_unit(v, cst);
+            }
+            gs.decode(v)
+        });
+    }
+    if let Some(sz) = &sizing {
+        sz.apply_image(img);
+    }
 }
 
-/// The HSL Secondary key of one pixel's grading signal (0…1 per channel).
+/// Parse JSON `[[r, g, b, tol_signed], ...]` for 3D Qualifier samples safely (bounded at 64 entries).
+pub(crate) fn parse_3d_samples(raw: &str) -> Arc<Vec<[f32; 4]>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Arc::new(Vec::new());
+    }
+    let parsed = serde_json::from_str::<Vec<[f32; 4]>>(trimmed).unwrap_or_default();
+    let clean: Vec<[f32; 4]> = parsed
+        .into_iter()
+        .filter(|s| s.iter().all(|v| v.is_finite()))
+        .take(64)
+        .map(|s| {
+            let tol = s[3].clamp(-0.6, 0.6);
+            [s[0].clamp(0.0, 1.0), s[1].clamp(0.0, 1.0), s[2].clamp(0.0, 1.0), if tol.abs() < 1e-3 { 0.1 } else { tol }]
+        })
+        .collect();
+    Arc::new(clean)
+}
+
+pub(crate) fn qualifier_params_from_effect(e: &EffectInstance, t: Tick, px_scale: f32, w: usize, h: usize) -> Option<crate::gpufx::HslSecondaryParams> {
+    if !on(e, "hsl_on") {
+        return None;
+    }
+    let pf = |id: &str, def: f64| e.param(id).map_or(def, |p| p.f64_at(t)) as f32;
+    let pc = |id: &str, def: u32| {
+        e.param(id)
+            .and_then(|p| match p.value {
+                ParamValue::Choice(c) => Some(c),
+                _ => None,
+            })
+            .unwrap_or(def)
+    };
+    let pb = |id: &str, def: bool| e.param(id).and_then(|p| p.value.as_bool()).unwrap_or(def);
+    let key_scope = pc("hsl_key_scope", 1);
+    let mode = pc("hsl_mode", 0);
+    let denoise = pf("hsl_denoise", 0.0).clamp(0.0, 100.0) / 100.0;
+    let blur = pf("hsl_blur", 0.0).clamp(0.0, 100.0) / 100.0;
+    let denoise_r = if denoise > 0.0 { ((1.0 + 2.0 * denoise) * px_scale).round().max(1.0) as u32 } else { 0 };
+    let in_out = (pf("hsl_in_out", 0.0) / 100.0).clamp(-1.0, 1.0);
+    let in_out_r = if in_out.abs() > 1e-3 { ((1.0 + 2.0 * in_out.abs()) * px_scale).round().max(1.0) as u32 } else { 0 };
+    let (blur_rx, blur_ry) = if blur > 0.0 && w > 0 && h > 0 {
+        let sigma = blur * 20.0 * px_scale;
+        if sigma >= 0.3 { gaussian_boxes(w, h, sigma, sigma) } else { (Vec::new(), Vec::new()) }
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let soft = (pf("hsl_soft", 20.0) / 100.0 * 0.3).max(0.01);
+    let sat_soft = e.param("hsl_sat_soft").map_or(soft, |p| ((p.f64_at(t) as f32) / 100.0 * 0.3).max(0.01));
+    let luma_soft = e.param("hsl_luma_soft").map_or(soft, |p| ((p.f64_at(t) as f32) / 100.0 * 0.3).max(0.01));
+    let rgb_soft = e.param("hsl_rgb_soft").map_or(soft, |p| ((p.f64_at(t) as f32) / 100.0 * 0.3).max(0.01));
+    let samples_raw = e
+        .param("hsl_3d_samples")
+        .and_then(|p| match &p.value {
+            ParamValue::Text(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .unwrap_or("");
+    Some(crate::gpufx::HslSecondaryParams {
+        key_scope,
+        mode,
+        hc: pf("hsl_hue", 0.0) / 360.0,
+        hr: (pf("hsl_hue_range", 30.0) / 360.0).max(1e-3),
+        smin: pf("hsl_sat_min", 10.0) / 100.0,
+        smax: pf("hsl_sat_max", 100.0) / 100.0,
+        lmin: pf("hsl_luma_min", 5.0) / 100.0,
+        lmax: pf("hsl_luma_max", 95.0) / 100.0,
+        soft,
+        sat_soft,
+        luma_soft,
+        rgb_min: [pf("hsl_r_min", 0.0) / 100.0, pf("hsl_g_min", 0.0) / 100.0, pf("hsl_b_min", 0.0) / 100.0],
+        rgb_max: [pf("hsl_r_max", 100.0) / 100.0, pf("hsl_g_max", 100.0) / 100.0, pf("hsl_b_max", 100.0) / 100.0],
+        rgb_soft,
+        samples_3d: if mode == 3 { parse_3d_samples(samples_raw) } else { Arc::new(Vec::new()) },
+        show_mask: pc("hsl_show_mask", 0),
+        clean_black: (pf("hsl_clean_black", 0.0) / 100.0).clamp(0.0, 1.0),
+        clean_white: (pf("hsl_clean_white", 0.0) / 100.0).clamp(0.0, 1.0),
+        in_out,
+        in_out_r,
+        invert_key: pb("hsl_invert_key", false),
+        key_gain: (pf("key_gain", 100.0) / 100.0).clamp(0.0, 1.0),
+        htemp: pf("hsl_temp", 0.0) / 100.0,
+        htint: pf("hsl_tint", 0.0) / 100.0,
+        hsat: pf("hsl_sat", 100.0) / 100.0,
+        hshift: pf("hsl_hue_shift", 0.0) / 360.0,
+        denoise,
+        denoise_r,
+        blur_rx,
+        blur_ry,
+    })
+}
+
+#[inline]
+fn range_gate(val: f32, lo: f32, hi: f32, soft: f32) -> f32 {
+    let low_g = if lo <= 0.001 { 1.0 } else { ((val - lo) / soft).clamp(0.0, 1.0) };
+    let high_g = if hi >= 0.999 { 1.0 } else { ((hi - val) / soft).clamp(0.0, 1.0) };
+    low_g.min(high_g)
+}
+
 #[inline]
 pub(crate) fn hsl_key(v: [f32; 3], hc: f32, hr: f32, smin: f32, lmin: f32, lmax: f32, soft: f32) -> f32 {
     let h = rgb_to_hsl(v[0], v[1], v[2]);
@@ -1450,81 +2476,233 @@ pub(crate) fn hsl_key(v: [f32; 3], hc: f32, hr: f32, smin: f32, lmin: f32, lmax:
     mh * ms * ml
 }
 
-/// Color Grading ▸ HSL Secondary: key on hue / saturation / lightness, Refine (Denoise, Blur) the key,
-/// then correct inside it (or show the mask).
-///
-/// - **Denoise** removes speckle from the key: a median filter (radius 1–3 px at full
-///   resolution, scaled with the playback resolution) mixed in by the amount.
-/// - **Blur** softens the key's edges: a Gaussian (σ up to 20 px at full resolution, three box
-///   passes) on the key.
-fn hsl_secondary(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
-    if !b(e, "hsl_on") {
-        return;
+#[inline]
+pub(crate) fn eval_qualifier_unit(v: [f32; 3], q: &crate::gpufx::HslSecondaryParams) -> f32 {
+    match q.mode {
+        1 => {
+            let r = range_gate(v[0], q.rgb_min[0], q.rgb_max[0], q.rgb_soft);
+            let g = range_gate(v[1], q.rgb_min[1], q.rgb_max[1], q.rgb_soft);
+            let b_ch = range_gate(v[2], q.rgb_min[2], q.rgb_max[2], q.rgb_soft);
+            r * g * b_ch
+        }
+        2 => {
+            let y = luma709(v[0], v[1], v[2]);
+            range_gate(y, q.lmin, q.lmax, q.luma_soft)
+        }
+        3 => {
+            if q.samples_3d.is_empty() {
+                return 0.0;
+            }
+            let yp = luma709(v[0], v[1], v[2]);
+            let (cb, cr) = (v[2] - yp, v[0] - yp);
+            let mut w_pos = 0.0f32;
+            let mut w_neg = 0.0f32;
+            for &s in q.samples_3d.iter() {
+                let sy = luma709(s[0], s[1], s[2]);
+                let (scb, scr) = (s[2] - sy, s[0] - sy);
+                let dy = (yp - sy) * 0.45;
+                let dcb = cb - scb;
+                let dcr = cr - scr;
+                let dist = (dy * dy + dcb * dcb + dcr * dcr).sqrt();
+                let tol = s[3].abs();
+                let w = 1.0 - ((dist - tol) / q.soft).clamp(0.0, 1.0);
+                if s[3] >= 0.0 {
+                    w_pos = w_pos.max(w);
+                } else {
+                    w_neg = w_neg.max(w);
+                }
+            }
+            (w_pos * (1.0 - w_neg)).clamp(0.0, 1.0)
+        }
+        _ => {
+            if q.smax >= 0.999 && (q.sat_soft - q.soft).abs() < 1e-5 && (q.luma_soft - q.soft).abs() < 1e-5 && q.lmin > 0.001 && q.lmax < 0.999 {
+                return hsl_key(v, q.hc, q.hr, q.smin, q.lmin, q.lmax, q.soft);
+            }
+            let h = rgb_to_hsl(v[0], v[1], v[2]);
+            let dh = (h[0] - q.hc).abs().min(1.0 - (h[0] - q.hc).abs());
+            let mh = 1.0 - ((dh - q.hr / 2.0) / q.soft).clamp(0.0, 1.0);
+            let ms = range_gate(h[1], q.smin, q.smax, q.sat_soft);
+            let ml = range_gate(h[2], q.lmin, q.lmax, q.luma_soft);
+            mh * ms * ml
+        }
     }
-    let gs = grade_space(e, cx, "curves_hdr_range");
+}
+
+#[inline]
+pub(crate) fn apply_matte_clean(m: f32, clean_black: f32, clean_white: f32, invert: bool) -> f32 {
+    let m = if clean_black > 1e-4 || clean_white > 1e-4 {
+        let lo = clean_black.clamp(0.0, 0.99) * 0.85;
+        let hi = (1.0 - clean_white.clamp(0.0, 0.99) * 0.85).max(lo + 1e-3);
+        ((m - lo) / (hi - lo)).clamp(0.0, 1.0)
+    } else {
+        m.clamp(0.0, 1.0)
+    };
+    if invert { 1.0 - m } else { m }
+}
+
+#[inline]
+pub(crate) fn apply_hsl_secondary_color_unit(u: [f32; 3], q: &crate::gpufx::HslSecondaryParams) -> [f32; 3] {
+    let mut hh = rgb_to_hsl(u[0], u[1], u[2]);
+    hh[0] = (hh[0] + q.hshift).rem_euclid(1.0);
+    hh[1] = (hh[1] * q.hsat).clamp(0.0, 1.0);
+    let mut c2 = hsl_to_rgb(hh[0], hh[1], hh[2]);
+    c2[0] *= 1.0 + 0.25 * q.htemp;
+    c2[2] *= 1.0 - 0.25 * q.htemp;
+    c2[1] *= 1.0 - 0.2 * q.htint;
+    c2
+}
+
+#[inline]
+pub(crate) fn apply_highlight_unit(u: [f32; 3], m: f32, show_mask: u32) -> [f32; 3] {
+    match show_mask {
+        1 => {
+            let g = rgb_to_hsl(u[0], u[1], u[2])[2];
+            [g + (u[0] - g) * m, g + (u[1] - g) * m, g + (u[2] - g) * m]
+        }
+        2 => u.map(|q| q * m),
+        3 => [m, m, m],
+        _ => u,
+    }
+}
+
+pub(crate) fn refine_qualifier_matte(mask: &mut [f32], w: usize, h: usize, q: &crate::gpufx::HslSecondaryParams) {
+    if q.denoise > 0.0 && q.denoise_r > 0 {
+        let med = median_filter(mask, w, h, q.denoise_r as usize);
+        mask.iter_mut().zip(med).for_each(|(m, d)| *m += (d - *m) * q.denoise.min(1.0));
+    }
+    if q.in_out.abs() > 1e-3 && q.in_out_r > 0 {
+        let dilate = q.in_out > 0.0;
+        let k = q.in_out.abs().min(1.0);
+        let morphed = morph_filter(mask, w, h, q.in_out_r as usize, dilate);
+        mask.iter_mut().zip(morphed).for_each(|(m, d)| *m += (d - *m) * k);
+    }
+    if !q.blur_rx.is_empty() || !q.blur_ry.is_empty() {
+        let mut mimg = Image::new(w, h);
+        for (i, &m) in mask.iter().enumerate() {
+            if let Some(slot) = mimg.px.get_mut(i * 4) {
+                *slot = m;
+            }
+            if let Some(slot) = mimg.px.get_mut(i * 4 + 3) {
+                *slot = 1.0;
+            }
+        }
+        box_blur(&mut mimg, &q.blur_rx, &q.blur_ry, true);
+        for (i, m) in mask.iter_mut().enumerate() {
+            *m = mimg.px.get(i * 4).copied().unwrap_or(0.0);
+        }
+    }
+    if q.clean_black > 1e-4 || q.clean_white > 1e-4 || q.invert_key {
+        for m in mask.iter_mut() {
+            *m = apply_matte_clean(*m, q.clean_black, q.clean_white, q.invert_key);
+        }
+    }
+}
+
+pub(crate) fn compute_qualifier_matte(img: &Image, q: &crate::gpufx::HslSecondaryParams, gs: &GradeSpace) -> Vec<f32> {
     let hdr = gs.is_hdr();
-    let (hc, hr) = (f(e, "hsl_hue", cx) / 360.0, (f(e, "hsl_hue_range", cx) / 360.0).max(1e-3));
-    let (smin, lmin, lmax) = (f(e, "hsl_sat_min", cx) / 100.0, f(e, "hsl_luma_min", cx) / 100.0, f(e, "hsl_luma_max", cx) / 100.0);
-    let soft = (f(e, "hsl_soft", cx) / 100.0 * 0.3).max(0.01);
-    let show_mask = choice(e, "hsl_show_mask");
-    let (htemp, htint, hsat, hshift) =
-        (f(e, "hsl_temp", cx) / 100.0, f(e, "hsl_tint", cx) / 100.0, f(e, "hsl_sat", cx) / 100.0, f(e, "hsl_hue_shift", cx) / 360.0);
-    let (denoise, blur) = (f(e, "hsl_denoise", cx).clamp(0.0, 100.0) / 100.0, f(e, "hsl_blur", cx).clamp(0.0, 100.0) / 100.0);
-    let (w, h) = (img.w, img.h);
     let unit = |c: [f32; 3]| {
         let v = gs.encode(c);
         if hdr {
             let m = v[0].max(v[1]).max(v[2]).max(1.0);
-            v.map(|q| (q / m).max(0.0))
+            v.map(|x| (x / m).max(0.0))
         } else {
-            v.map(|q| q.clamp(0.0, 1.0))
+            v.map(|x| x.clamp(0.0, 1.0))
         }
     };
-    // the key
-    let mut mask: Vec<f32> = img
-        .px
-        .par_chunks(4)
-        .map(|p| if p[3] <= 1e-6 { 0.0 } else { hsl_key(unit(Image::unpremul([p[0], p[1], p[2], p[3]])), hc, hr, smin, lmin, lmax, soft) })
-        .collect();
-    if denoise > 0.0 {
-        let r = ((1.0 + 2.0 * denoise) * cx.px_scale).round().max(1.0) as usize;
-        let med = median_filter(&mask, w, h, r);
-        mask.iter_mut().zip(med).for_each(|(m, d)| *m += (d - *m) * denoise.min(1.0));
-    }
-    if blur > 0.0 {
-        let sigma = blur * 20.0 * cx.px_scale;
-        if sigma >= 0.3 {
-            blur_plane(&mut mask, w, h, sigma);
+    let mut mask: Vec<f32> =
+        img.px.par_chunks(4).map(|p| if p[3] <= 1e-6 { 0.0 } else { eval_qualifier_unit(unit(Image::unpremul([p[0], p[1], p[2], p[3]])), q) }).collect();
+    refine_qualifier_matte(&mut mask, img.w, img.h, q);
+    mask
+}
+
+pub(crate) fn apply_node_key_output(
+    img: &mut Image,
+    orig: &Image,
+    qual_matte: Option<&[f32]>,
+    window_cov: Option<&[f32]>,
+    show_mask: u32,
+    key_gain: f32,
+    gs: &GradeSpace,
+) {
+    let w = img.w;
+    img.px.par_chunks_mut(4).zip(orig.px.par_chunks(4)).enumerate().for_each(|(i, (dst, src))| {
+        let _ = w;
+        let qk = qual_matte.and_then(|v| v.get(i).copied()).unwrap_or(1.0);
+        let wk = window_cov.and_then(|v| v.get(i).copied()).unwrap_or(1.0);
+        let k = (qk * wk * key_gain).clamp(0.0, 1.0);
+        if show_mask > 0 {
+            let a = src[3];
+            if a <= 1e-6 {
+                dst.copy_from_slice(src);
+                return;
+            }
+            let u = gs.encode(Image::unpremul([src[0], src[1], src[2], a])).map(|x| x.clamp(0.0, 1.0));
+            let dec = gs.decode(apply_highlight_unit(u, k, show_mask));
+            dst[0] = dec[0] * a;
+            dst[1] = dec[1] * a;
+            dst[2] = dec[2] * a;
+            dst[3] = a;
+        } else {
+            for c in 0..4 {
+                dst[c] = src[c] + (dst[c] - src[c]) * k;
+            }
         }
-    }
-    let mask = &mask;
+    });
+}
+
+fn hsl_secondary(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
+    let Some(q) = qualifier_params_from_effect(e, cx.t, cx.px_scale, img.w, img.h) else {
+        return;
+    };
+    let gs = grade_space(e, cx, "curves_hdr_range");
+    let hdr = gs.is_hdr();
+    let unit = |c: [f32; 3]| {
+        let v = gs.encode(c);
+        if hdr {
+            let m = v[0].max(v[1]).max(v[2]).max(1.0);
+            v.map(|x| (x / m).max(0.0))
+        } else {
+            v.map(|x| x.clamp(0.0, 1.0))
+        }
+    };
+    let mask = compute_qualifier_matte(img, &q, &gs);
+    let w = img.w;
     img.map_rgb(|c, x, y| {
-        let m = mask[y * w + x];
+        let m = mask.get(y * w + x).copied().unwrap_or(0.0);
         let v = gs.encode(c);
         let u = unit(c);
         let scale = if hdr { v[0].max(v[1]).max(v[2]).max(1.0) } else { 1.0 };
-        let out = match show_mask {
-            1 => {
-                let g = rgb_to_hsl(u[0], u[1], u[2])[2];
-                [g + (u[0] - g) * m, g + (u[1] - g) * m, g + (u[2] - g) * m]
-            }
-            2 => u.map(|q| q * m),
-            3 => [m, m, m],
-            _ => {
-                let mut hh = rgb_to_hsl(u[0], u[1], u[2]);
-                hh[0] = (hh[0] + hshift).rem_euclid(1.0);
-                hh[1] = (hh[1] * hsat).clamp(0.0, 1.0);
-                let mut c2 = hsl_to_rgb(hh[0], hh[1], hh[2]);
-                c2[0] *= 1.0 + 0.25 * htemp;
-                c2[2] *= 1.0 - 0.25 * htemp;
-                c2[1] *= 1.0 - 0.2 * htint;
-                [u[0] + (c2[0] - u[0]) * m, u[1] + (c2[1] - u[1]) * m, u[2] + (c2[2] - u[2]) * m]
-            }
+        let out = if q.show_mask > 0 {
+            apply_highlight_unit(u, m, q.show_mask)
+        } else {
+            let c2 = apply_hsl_secondary_color_unit(u, &q);
+            [u[0] + (c2[0] - u[0]) * m, u[1] + (c2[1] - u[1]) * m, u[2] + (c2[2] - u[2]) * m]
         };
-        // the mask views are display images (no HDR scaling)
-        let out = if show_mask == 0 { out.map(|q| q * scale) } else { out };
+        let out = if q.show_mask == 0 { out.map(|x| x * scale) } else { out };
         gs.decode(out)
     });
+}
+
+pub(crate) fn morph_filter(src: &[f32], w: usize, h: usize, r: usize, dilate: bool) -> Vec<f32> {
+    let mut out = vec![0f32; src.len()];
+    if w == 0 || h == 0 {
+        return out;
+    }
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, o) in row.iter_mut().enumerate() {
+            let mut best = if dilate { f32::NEG_INFINITY } else { f32::INFINITY };
+            for yy in y.saturating_sub(r)..(y + r + 1).min(h) {
+                let row_off = yy * w;
+                for xx in x.saturating_sub(r)..(x + r + 1).min(w) {
+                    if let Some(&v) = src.get(row_off + xx) {
+                        best = if dilate { best.max(v) } else { best.min(v) };
+                    }
+                }
+            }
+            *o = if best.is_finite() { best } else { 0.0 };
+        }
+    });
+    out
 }
 
 /// Median of the `(2r+1)²` neighbourhood of every sample of a single-channel plane (edges
@@ -1544,44 +2722,6 @@ pub(crate) fn median_filter(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f3
         }
     });
     out
-}
-
-/// Gaussian blur of a single-channel plane (three box passes per axis, edges clamped).
-fn blur_plane(p: &mut [f32], w: usize, h: usize, sigma: f32) {
-    let radii = boxes_for_gauss(sigma, 3);
-    let pass = |p: &mut [f32], w: usize, h: usize, r: usize| {
-        if r == 0 {
-            return;
-        }
-        p.par_chunks_mut(w).for_each(|row| {
-            let src = row.to_vec();
-            let n = (2 * r + 1) as f32;
-            let at = |i: isize| src[i.clamp(0, w as isize - 1) as usize];
-            let mut acc: f32 = (-(r as isize)..=r as isize).map(at).sum();
-            for x in 0..w {
-                row[x] = acc / n;
-                acc += at(x as isize + r as isize + 1) - at(x as isize - r as isize);
-            }
-        });
-        let _ = h;
-    };
-    let transpose = |p: &[f32], w: usize, h: usize| {
-        let mut t = vec![0f32; p.len()];
-        for y in 0..h {
-            for x in 0..w {
-                t[x * h + y] = p[y * w + x];
-            }
-        }
-        t
-    };
-    for &r in &radii {
-        pass(p, w, h, r);
-    }
-    let mut t = transpose(p, w, h);
-    for &r in &radii {
-        pass(&mut t, h, w, r);
-    }
-    p.copy_from_slice(&transpose(&t, h, w));
 }
 
 #[cfg(test)]
@@ -1774,21 +2914,8 @@ mod lumetri_cpu_parity_tests {
                     ("blacks", fl(-100.0)),
                 ],
             ),
-            (
-                "wheels_offset",
-                vec![
-                    ("wheel_shadows", pt(0.3, -0.2)),
-                    ("wheel_highlights", pt(-0.2, 0.3)),
-                ],
-            ),
-            (
-                "wheels_lightness",
-                vec![
-                    ("wheel_shadows_l", fl(-15.0)),
-                    ("wheel_midtones_l", fl(20.0)),
-                    ("wheel_highlights_l", fl(10.0)),
-                ],
-            ),
+            ("wheels_offset", vec![("wheel_shadows", pt(0.3, -0.2)), ("wheel_highlights", pt(-0.2, 0.3))]),
+            ("wheels_lightness", vec![("wheel_shadows_l", fl(-15.0)), ("wheel_midtones_l", fl(20.0)), ("wheel_highlights_l", fl(10.0))]),
             (
                 "basic_and_wheels",
                 vec![
@@ -1801,27 +2928,9 @@ mod lumetri_cpu_parity_tests {
                     ("wheel_highlights_l", fl(-5.0)),
                 ],
             ),
-            (
-                "look_1_teal_orange",
-                vec![
-                    ("look", ch(1)),
-                    ("look_intensity", fl(80.0)),
-                ],
-            ),
-            (
-                "look_3_and_wheels",
-                vec![
-                    ("look", ch(3)),
-                    ("look_intensity", fl(100.0)),
-                    ("wheel_shadows", pt(0.1, -0.2)),
-                ],
-            ),
-            (
-                "sharpen_alone",
-                vec![
-                    ("sharpen", fl(40.0)),
-                ],
-            ),
+            ("look_1_teal_orange", vec![("look", ch(1)), ("look_intensity", fl(80.0))]),
+            ("look_3_and_wheels", vec![("look", ch(3)), ("look_intensity", fl(100.0)), ("wheel_shadows", pt(0.1, -0.2))]),
+            ("sharpen_alone", vec![("sharpen", fl(40.0))]),
             (
                 "all_together",
                 vec![
@@ -1959,6 +3068,127 @@ mod lumetri_cpu_parity_tests {
                     ("luma_vs_sat", curve(vec![[0.2, 0.3], [0.8, 0.75]])),
                     ("sat_vs_sat", curve(vec![[0.2, 0.65], [0.8, 0.4]])),
                     ("hue_vs_luma", curve(vec![[0.3, 0.62], [0.7, 0.38]])),
+                    ("sat_vs_luma", curve(vec![[0.2, 0.62], [0.8, 0.35]])),
+                    ("curve_low_soft", fl(35.0)),
+                    ("curve_high_soft", fl(40.0)),
+                ],
+            ),
+            (
+                "resolve_primaries_extra",
+                vec![
+                    ("contrast", fl(40.0)),
+                    ("contrast_pivot", fl(35.0)),
+                    ("color_boost", fl(45.0)),
+                    ("midtone_detail", fl(50.0)),
+                    ("primary_hue", fl(56.0)),
+                    ("lum_mix", fl(25.0)),
+                    ("wheel_shadows", ParamValue::Vec2(filmcraft_geom::Vec2::new(0.4, -0.2))),
+                ],
+            ),
+            (
+                "color_slice",
+                vec![
+                    ("cs_on", ParamValue::Bool(true)),
+                    ("cs_red_sat", fl(40.0)),
+                    ("cs_red_den", fl(-25.0)),
+                    ("cs_red_hue", fl(15.0)),
+                    ("cs_yellow_sat", fl(-30.0)),
+                    ("cs_yellow_den", fl(35.0)),
+                    ("cs_yellow_hue", fl(-10.0)),
+                    ("cs_green_sat", fl(25.0)),
+                    ("cs_cyan_den", fl(30.0)),
+                    ("cs_blue_sat", fl(50.0)),
+                    ("cs_blue_den", fl(-40.0)),
+                    ("cs_magenta_hue", fl(20.0)),
+                    ("cs_skin_sat", fl(-20.0)),
+                    ("cs_skin_den", fl(15.0)),
+                    ("cs_skin_hue", fl(-12.0)),
+                ],
+            ),
+            (
+                "color_warper",
+                vec![
+                    ("cw_on", ParamValue::Bool(true)),
+                    (
+                        "cw_hs_grid",
+                        curve(
+                            (0..48)
+                                .map(|i| {
+                                    let s = i / 4;
+                                    let r = i % 4;
+                                    let dh = if s == 2 && r >= 2 { 0.06 } else { -0.02 * ((s % 3) as f32) };
+                                    let ds = if r == 2 { 0.14 } else { -0.05 };
+                                    [dh, ds]
+                                })
+                                .collect(),
+                        ),
+                    ),
+                    (
+                        "cw_cl_grid",
+                        curve(
+                            (0..48)
+                                .map(|i| {
+                                    let s = i / 4;
+                                    let r = i % 4;
+                                    let dc = if s % 4 == 1 { 0.09 } else { -0.04 };
+                                    let dl = if r >= 2 { 0.08 } else { -0.03 };
+                                    [dc, dl]
+                                })
+                                .collect(),
+                        ),
+                    ),
+                ],
+            ),
+            (
+                "qualifier_node_key_hsl_masks_primaries",
+                vec![
+                    ("hsl_on", ParamValue::Bool(true)),
+                    ("hsl_key_scope", ch(0)),
+                    ("hsl_hue", fl(120.0)),
+                    ("hsl_hue_range", fl(90.0)),
+                    ("hsl_sat_max", fl(85.0)),
+                    ("hsl_clean_black", fl(15.0)),
+                    ("hsl_clean_white", fl(10.0)),
+                    ("hsl_in_out", fl(40.0)),
+                    ("key_gain", fl(80.0)),
+                    ("exposure", fl(1.5)),
+                    ("contrast", fl(45.0)),
+                ],
+            ),
+            (
+                "qualifier_rgb_inverted",
+                vec![
+                    ("hsl_on", ParamValue::Bool(true)),
+                    ("hsl_key_scope", ch(0)),
+                    ("hsl_mode", ch(1)),
+                    ("hsl_r_min", fl(30.0)),
+                    ("hsl_r_max", fl(90.0)),
+                    ("hsl_g_max", fl(65.0)),
+                    ("hsl_invert_key", ParamValue::Bool(true)),
+                    ("temperature", fl(-45.0)),
+                ],
+            ),
+            (
+                "qualifier_luma_in_out_highlight",
+                vec![
+                    ("hsl_on", ParamValue::Bool(true)),
+                    ("hsl_key_scope", ch(0)),
+                    ("hsl_mode", ch(2)),
+                    ("hsl_luma_min", fl(25.0)),
+                    ("hsl_luma_max", fl(75.0)),
+                    ("hsl_in_out", fl(-50.0)),
+                    ("hsl_show_mask", ch(1)),
+                ],
+            ),
+            (
+                "qualifier_3d_samples",
+                vec![
+                    ("hsl_on", ParamValue::Bool(true)),
+                    ("hsl_key_scope", ch(0)),
+                    ("hsl_mode", ch(3)),
+                    ("hsl_3d_samples", ParamValue::Text("[[0.85,0.2,0.2,0.18],[0.2,0.8,0.2,-0.15]]".into())),
+                    ("hsl_blur", fl(15.0)),
+                    ("saturation", fl(20.0)),
                 ],
             ),
             (
@@ -2004,5 +3234,95 @@ mod lumetri_cpu_parity_tests {
                 assert!(diff <= 1e-6, "{name}: sample {i} differed: {a} vs {b} ({diff:.2e})");
             }
         }
+    }
+
+    #[test]
+    fn lumetri_phase2_invariants_and_legacy_fallback() {
+        // 1. Resolve LGG invariants:
+        //    - Lift keeps pure white (1, 1, 1) fixed.
+        let white_after_lift = apply_primaries_wheels_unit([1.0, 1.0, 1.0], 0, [0.25, -0.15, 0.10], [0.0; 3], [0.0; 3], [0.0; 3]);
+        for k in 0..3 {
+            assert!((white_after_lift[k] - 1.0).abs() < 1e-6, "Lift must keep white fixed, got {white_after_lift:?}");
+        }
+        //    - Gain keeps pure black (0, 0, 0) fixed.
+        let black_after_gain = apply_primaries_wheels_unit([0.0, 0.0, 0.0], 0, [0.0; 3], [0.0; 3], [0.4, -0.3, 0.2], [0.0; 3]);
+        for k in 0..3 {
+            assert!(black_after_gain[k].abs() < 1e-6, "Gain must keep black fixed, got {black_after_gain:?}");
+        }
+        //    - Gamma keeps both (0, 0, 0) and (1, 1, 1) fixed while shifting midtones.
+        let black_after_gamma = apply_primaries_wheels_unit([0.0, 0.0, 0.0], 0, [0.0; 3], [0.2, -0.2, 0.1], [0.0; 3], [0.0; 3]);
+        let white_after_gamma = apply_primaries_wheels_unit([1.0, 1.0, 1.0], 0, [0.0; 3], [0.2, -0.2, 0.1], [0.0; 3], [0.0; 3]);
+        let mid_after_gamma = apply_primaries_wheels_unit([0.5, 0.5, 0.5], 0, [0.0; 3], [0.2, -0.2, 0.0], [0.0; 3], [0.0; 3]);
+        for k in 0..3 {
+            assert!(black_after_gamma[k].abs() < 1e-6);
+            assert!((white_after_gamma[k] - 1.0).abs() < 1e-6);
+        }
+        assert!(mid_after_gamma[0] > 0.5 && mid_after_gamma[1] < 0.5 && (mid_after_gamma[2] - 0.5).abs() < 1e-6);
+
+        // 2. Legacy fallback: missing `grade_model` param resolves to Legacy Lumetri (1).
+        let mut legacy_e = find_effect("lumetri").unwrap().instance();
+        legacy_e.params.remove("grade_model");
+        assert_eq!(grade_model_from_effect(&legacy_e), 1);
+
+        // 3. Log Wheels range isolation: shadows wheel does not affect luma >= low_range.
+        let lw = LogWheelsParams { shadows: [0.3, -0.2, 0.1], midtones: [0.0; 3], highlights: [0.0; 3], offset: [0.0; 3], low_range: 0.33, high_range: 0.66 };
+        let high_px = apply_log_wheels_unit([0.5, 0.5, 0.5], &lw);
+        for k in 0..3 {
+            assert!((high_px[k] - 0.5).abs() < 1e-6, "Log shadows leaked above low_range: {high_px:?}");
+        }
+        let low_px = apply_log_wheels_unit([0.1, 0.1, 0.1], &lw);
+        assert!(low_px[0] > 0.1 && low_px[1] < 0.1);
+
+        // 4. HDR Wheels: +1 EV global doubles linear light.
+        let hw = HdrWheelsParams { zones: [[0.0; 3]; 6], global: [1.0, 1.0, 1.0], sigma: 1.5, wheel_range: 0.0 };
+        let lin_out = apply_hdr_wheels_linear([0.18, 0.18, 0.18], &hw);
+        for k in 0..3 {
+            assert!((lin_out[k] - 0.36).abs() < 1e-5, "HDR +1 EV should double linear light: {lin_out:?}");
+        }
+
+        // 5. RGB Mixer: Preserve Luminance preserves neutral gray, Monochrome outputs equal channels.
+        let mut e = find_effect("lumetri").unwrap().instance();
+        e.params.insert("mix_rr".into(), filmcraft_project::Param::new(fl(150.0)));
+        e.params.insert("mix_rg".into(), filmcraft_project::Param::new(fl(50.0)));
+        e.params.insert("mix_preserve_lum".into(), filmcraft_project::Param::new(ParamValue::Bool(true)));
+        let rm = RgbMixerParams::from_effect(&e, Tick::ZERO).expect("active mixer");
+        let gray = apply_rgb_mixer_unit([0.4, 0.4, 0.4], &rm);
+        for k in 0..3 {
+            assert!((gray[k] - 0.4).abs() < 1e-5, "Preserve Luminance must keep neutral gray: {gray:?}");
+        }
+        e.params.insert("mix_monochrome".into(), filmcraft_project::Param::new(ParamValue::Bool(true)));
+        let rm_mono = RgbMixerParams::from_effect(&e, Tick::ZERO).expect("active mono mixer");
+        let mono = apply_rgb_mixer_unit([0.8, 0.3, 0.1], &rm_mono);
+        assert!((mono[0] - mono[1]).abs() < 1e-6 && (mono[1] - mono[2]).abs() < 1e-6, "Monochrome must yield equal channels: {mono:?}");
+    }
+
+    #[test]
+    fn lumetri_phase5_cst_and_sizing_invariants() {
+        let mut e = find_effect("lumetri").unwrap().instance();
+        assert!(CstParams::from_effect(&e, Tick::ZERO).is_none());
+        assert!(NodeSizingParams::from_effect(&e, Tick::ZERO).is_none());
+
+        // CST: S-Log3 / S-Gamut3.Cine (in=5, gamma=7) -> DaVinci Wide Gamut / DaVinci Intermediate (out=3, gamma=5) -> back
+        e.params.insert("cst_on".into(), filmcraft_project::Param::new(ParamValue::Bool(true)));
+        e.params.insert("cst_in_space".into(), filmcraft_project::Param::new(ch(5)));
+        e.params.insert("cst_in_gamma".into(), filmcraft_project::Param::new(ch(7)));
+        e.params.insert("cst_out_space".into(), filmcraft_project::Param::new(ch(0)));
+        e.params.insert("cst_out_gamma".into(), filmcraft_project::Param::new(ch(0)));
+        e.params.insert("cst_tone_map".into(), filmcraft_project::Param::new(ch(1)));
+        e.params.insert("cst_gamut_map".into(), filmcraft_project::Param::new(ch(1)));
+        let cst = CstParams::from_effect(&e, Tick::ZERO).expect("active cst");
+        let mid_gray_slog3 = LogCurve::SLog3.encode(0.18) as f32;
+        let out_mid = apply_cst_unit([mid_gray_slog3; 3], &cst);
+        assert!(out_mid[0].is_finite() && (0.35..0.55).contains(&out_mid[0]), "S-Log3 18% gray -> Rec.709 landed at {out_mid:?}");
+
+        // Sizing: 2.39:1 blanking leaves middle active and top/bottom black
+        e.params.insert("sizing_zoom".into(), filmcraft_project::Param::new(fl(120.0)));
+        e.params.insert("sizing_blanking".into(), filmcraft_project::Param::new(ch(4))); // 2.39:1
+        let sz = NodeSizingParams::from_effect(&e, Tick::ZERO).expect("active sizing");
+        let mut img = Image::filled(160, 90, [0.5, 0.3, 0.2, 1.0]);
+        sz.apply_image(&mut img);
+        assert_eq!(img.px[0..4], [0.0, 0.0, 0.0, 1.0], "Top blanking bar must be black");
+        let mid_i = (45 * 160 + 80) * 4;
+        assert!(img.px[mid_i] > 0.4, "Center pixel after zoom + blanking should remain lit");
     }
 }

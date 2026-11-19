@@ -177,6 +177,7 @@ fn set_params(base: &EffectInstance, x: &[f32; 10]) -> EffectInstance {
     put("wheel_highlights_l", ParamValue::Float(x[8] as f64 * 100.0));
     put("saturation", ParamValue::Float((1.0 + x[9] as f64) * 100.0));
     put("wheels_on", ParamValue::Bool(true));
+    put("grade_model", ParamValue::Choice(1));
     put("basic_on", ParamValue::Bool(true));
     e.enabled = true;
     e

@@ -115,9 +115,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let insp_g = p.layout_no_wrap(insp_label.to_string(), Tokens::semibold(11.0), if insp_open { Color32::WHITE } else { t.text_dim });
     let insp_w = insp_g.size().x + 20.0;
     let insp_r = Rect::from_min_size(pos2(wr.min.x - insp_w - 10.0, rect.center().y - 11.0), vec2(insp_w, 22.0));
-    let insp_resp = ui
-        .interact(insp_r, egui::Id::unique("hdr-inspector"), Sense::click())
-        .on_hover_text(tl!("Show or hide the Inspector (Video / Audio / Properties)"));
+    let insp_resp =
+        ui.interact(insp_r, egui::Id::unique("hdr-inspector"), Sense::click()).on_hover_text(tl!("Show or hide the Inspector (Video / Audio / Properties)"));
     app.auto.add("header.inspector", insp_r, insp_label);
     let insp_bg = if insp_open {
         if insp_resp.hovered() { t.accent_hover } else { t.accent.gamma_multiply(0.85) }
@@ -127,12 +126,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         t.tl_header_bg
     };
     ui.painter().rect_filled(insp_r, 4.0, insp_bg);
-    ui.painter().rect_stroke(
-        insp_r,
-        4.0,
-        Stroke::new(1.0, if insp_open { t.accent } else { t.separator }),
-        egui::StrokeKind::Inside,
-    );
+    ui.painter().rect_stroke(insp_r, 4.0, Stroke::new(1.0, if insp_open { t.accent } else { t.separator }), egui::StrokeKind::Inside);
     ui.painter().galley(
         pos2(insp_r.center().x - insp_g.size().x * 0.5, insp_r.center().y - insp_g.size().y * 0.5),
         insp_g,
@@ -145,18 +139,18 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Localized menus and user titles can be wider than English. Use the actual gap.
     let left = left_end + 12.0;
     let right = insp_r.min.x - 12.0;
-        if right > left + 40.0 {
-            let mut job = egui::text::LayoutJob::simple_singleline(title, Tokens::ui(14.0), t.tab_text_active);
-            job.wrap.max_width = right - left;
-            job.wrap.max_rows = 1;
-            let galley = p.layout_job(job);
-            let half = galley.size().x / 2.0;
-            let center = if rect.center().x - half >= left && rect.center().x + half <= right { rect.center().x } else { (left + right) / 2.0 };
-            p.with_clip_rect(Rect::from_min_max(pos2(left, rect.min.y), pos2(right, rect.max.y))).galley(
-                pos2(center - half, rect.center().y - galley.size().y / 2.0),
-                galley,
-                t.tab_text_active,
-            );
+    if right > left + 40.0 {
+        let mut job = egui::text::LayoutJob::simple_singleline(title, Tokens::ui(14.0), t.tab_text_active);
+        job.wrap.max_width = right - left;
+        job.wrap.max_rows = 1;
+        let galley = p.layout_job(job);
+        let half = galley.size().x / 2.0;
+        let center = if rect.center().x - half >= left && rect.center().x + half <= right { rect.center().x } else { (left + right) / 2.0 };
+        p.with_clip_rect(Rect::from_min_max(pos2(left, rect.min.y), pos2(right, rect.max.y))).galley(
+            pos2(center - half, rect.center().y - galley.size().y / 2.0),
+            galley,
+            t.tab_text_active,
+        );
     }
     let popup_id = egui::Id::unique("workspaces-popup");
     if ws_resp.clicked() || wresp.clicked() {
@@ -182,8 +176,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         }
                     }
                     ui.separator();
-                    let has_active = !app.ui.active_preset.is_empty()
-                        && app.header_presets.saved.iter().any(|s| s.name == app.ui.active_preset);
+                    let has_active = !app.ui.active_preset.is_empty() && app.header_presets.saved.iter().any(|s| s.name == app.ui.active_preset);
                     if has_active {
                         let reset_resp = ui.button(tl!("Reset Preset"));
                         app.auto.add("header.presets.reset", reset_resp.rect, tl!("Reset Preset"));

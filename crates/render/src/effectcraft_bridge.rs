@@ -33,12 +33,7 @@ pub fn to_ec_image(img: &Image) -> EcImage {
             let a = p[3];
             if a > 1e-7 {
                 let inv_a = 1.0 / a;
-                *dst = [
-                    linear_to_srgb(p[0] * inv_a) * a,
-                    linear_to_srgb(p[1] * inv_a) * a,
-                    linear_to_srgb(p[2] * inv_a) * a,
-                    a,
-                ];
+                *dst = [linear_to_srgb(p[0] * inv_a) * a, linear_to_srgb(p[1] * inv_a) * a, linear_to_srgb(p[2] * inv_a) * a, a];
             } else {
                 *dst = [0.0, 0.0, 0.0, a.max(0.0)];
             }
@@ -102,10 +97,7 @@ impl EffectHost for BridgeHost<'_> {
         let track_img = env.track(track_idx)?;
         let ec_img = to_ec_image(&track_img);
         let size = [f64::from(ec_img.width) / self.scale, f64::from(ec_img.height) / self.scale];
-        Some(LayerPixels {
-            buf: Buf { img: ec_img, offset: [0.0, 0.0], scale: self.scale },
-            size,
-        })
+        Some(LayerPixels { buf: Buf { img: ec_img, offset: [0.0, 0.0], scale: self.scale }, size })
     }
 
     fn audio(&self, _id: u64, _start: f64, _frames: usize, _rate: u32) -> Option<Vec<f32>> {
@@ -120,11 +112,7 @@ impl EffectHost for BridgeHost<'_> {
         }
         let frame_img = env.frame(dt, self.inst)?;
         let _ = self.layer_size;
-        Some(Buf {
-            img: to_ec_image(&frame_img),
-            offset: [0.0, 0.0],
-            scale: self.scale,
-        })
+        Some(Buf { img: to_ec_image(&frame_img), offset: [0.0, 0.0], scale: self.scale })
     }
 }
 
@@ -148,14 +136,10 @@ pub fn build_params(spec: &filmcraft_effects::EffectSpec, e: &EffectInstance, cx
                         let y = if v.y.is_finite() { v.y } else { layer_size[1] * dfy };
                         Value::Vec3([x, y, dfz])
                     }
-                    (ParamUi::Color, ParamValue::Color(c)) => {
-                        Value::Color([f64::from(c[0]), f64::from(c[1]), f64::from(c[2]), f64::from(c[3])])
-                    }
+                    (ParamUi::Color, ParamValue::Color(c)) => Value::Color([f64::from(c[0]), f64::from(c[1]), f64::from(c[2]), f64::from(c[3])]),
                     (ParamUi::Checkbox, ParamValue::Bool(b)) => Value::Bool(b),
                     (ParamUi::Popup { .. }, ParamValue::Choice(c)) => Value::Enum(c),
-                    (ParamUi::Layer, ParamValue::Choice(c)) => {
-                        Value::Layer(if c == 0 { None } else { Some(u64::from(c)) })
-                    }
+                    (ParamUi::Layer, ParamValue::Choice(c)) => Value::Layer(if c == 0 { None } else { Some(u64::from(c)) }),
                     (ParamUi::Mask, ParamValue::Choice(c)) => Value::Scalar(f64::from(c)),
                     (ParamUi::Text | ParamUi::File { .. }, ParamValue::Text(s)) => Value::Str(s),
                     (_, ParamValue::Float(f)) => Value::Scalar(if f.is_finite() { f } else { ps.default.as_f64() }),
@@ -185,10 +169,7 @@ pub fn apply(img: &mut Image, e: &EffectInstance, cx: &FxCtx) -> bool {
         return false;
     };
     let scale = f64::from(cx.px_scale).clamp(0.0625, 16.0);
-    let layer_size = [
-        (img.w as f64 / scale).max(1.0),
-        (img.h as f64 / scale).max(1.0),
-    ];
+    let layer_size = [(img.w as f64 / scale).max(1.0), (img.h as f64 / scale).max(1.0)];
     let params = build_params(spec, e, cx, layer_size);
     let masks: Vec<MaskShape> = e
         .masks
@@ -201,26 +182,11 @@ pub fn apply(img: &mut Image, e: &EffectInstance, cx: &FxCtx) -> bool {
                 .as_path()
                 .map(|verts| verts.vertices.iter().map(|v| [v.p.x * layer_size[0], v.p.y * layer_size[1]]).collect())
                 .unwrap_or_default();
-            MaskShape {
-                name: format!("Mask {}", i + 1),
-                points: pts,
-                closed: true,
-                inverted: m.inverted,
-            }
+            MaskShape { name: format!("Mask {}", i + 1), points: pts, closed: true, inverted: m.inverted }
         })
         .collect();
-    let in_buf = Buf {
-        img: to_ec_image(img),
-        offset: [0.0, 0.0],
-        scale,
-    };
-    let host = BridgeHost {
-        orig: in_buf.clone(),
-        inst: e,
-        cx,
-        scale,
-        layer_size,
-    };
+    let in_buf = Buf { img: to_ec_image(img), offset: [0.0, 0.0], scale };
+    let host = BridgeHost { orig: in_buf.clone(), inst: e, cx, scale, layer_size };
     let env = EffectEnv {
         masks: &masks,
         host: Some(&host),
@@ -233,14 +199,7 @@ pub fn apply(img: &mut Image, e: &EffectInstance, cx: &FxCtx) -> bool {
         shutter: None,
         layer_span: None,
     };
-    let ectx = EffectCtx {
-        params: &params,
-        time: cx.seconds,
-        layer_size,
-        seed: 1,
-        adjustment: false,
-        env,
-    };
+    let ectx = EffectCtx { params: &params, time: cx.seconds, layer_size, seed: 1, adjustment: false, env };
     let out_buf = (spec.render)(&ectx, in_buf);
     from_ec_buf(img, &out_buf);
     true
