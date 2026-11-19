@@ -287,13 +287,7 @@ pub(super) fn curve_editor(
         {
             has_focus = true;
             let near = nearest(pos);
-            dragging = near.or_else(|| {
-                let np = from_screen(pos);
-                new_pts.push(np);
-                new_pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
-                changed = true;
-                new_pts.iter().position(|q| *q == np)
-            });
+            dragging = near.or_else(|| pick_or_insert_curve_point(&mut new_pts, from_screen(pos), &mut changed));
             selected_pt = dragging;
         }
         if resp.dragged()
@@ -330,11 +324,7 @@ pub(super) fn curve_editor(
                     selected_pt = Some(i);
                 }
                 None if line.iter().any(|pt| pt.distance(pos) < 9.0) => {
-                    let np = from_screen(pos);
-                    new_pts.push(np);
-                    new_pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
-                    selected_pt = new_pts.iter().position(|q| *q == np);
-                    changed = true;
+                    selected_pt = pick_or_insert_curve_point(&mut new_pts, from_screen(pos), &mut changed);
                 }
                 _ => {
                     selected_pt = None;
@@ -668,6 +658,20 @@ fn format_curve_readout(id: &str, hue: bool, ctx: &ColorPanelCtx<'_>, q: [f32; 2
     format!("X:{xv:.xd$}{xu} Y:{y_prefix}{yv:.yd$}{yu}")
 }
 
+/// Pick an existing control point near `np[0]` (within `0.004` in normalized X) instead of
+/// stacking duplicate points at the same X coordinate (e.g. along `X = 0.0` or `X = 1.0`).
+fn pick_or_insert_curve_point(pts: &mut Vec<[f32; 2]>, np: [f32; 2], changed: &mut bool) -> Option<usize> {
+    if let Some((idx, _)) =
+        pts.iter().enumerate().filter(|(_, q)| (q[0] - np[0]).abs() < 0.004).min_by(|(_, a), (_, b)| (a[1] - np[1]).abs().total_cmp(&(b[1] - np[1]).abs()))
+    {
+        return Some(idx);
+    }
+    pts.push(np);
+    pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    *changed = true;
+    pts.iter().position(|q| *q == np)
+}
+
 /// `pts` without point `i` (double-click), or `None` for a point that stays: the leftmost and
 /// rightmost points of an RGB curve.
 pub(super) fn without_point(pts: &[[f32; 2]], i: usize, hue: bool) -> Option<Vec<[f32; 2]>> {
@@ -683,7 +687,7 @@ pub(super) fn without_point(pts: &[[f32; 2]], i: usize, hue: bool) -> Option<Vec
 
 #[cfg(test)]
 mod tests {
-    use super::without_point;
+    use super::{pick_or_insert_curve_point, without_point};
 
     #[test]
     fn a_curve_point_is_removed_by_position_not_by_list_order() {
@@ -693,5 +697,20 @@ mod tests {
         assert_eq!(without_point(&pts, 0, false), None, "the left end stays");
         assert_eq!(without_point(&pts, 0, true), Some(vec![[1.0, 1.0], [0.5, 0.7]]));
         assert_eq!(without_point(&pts, 7, false), None);
+    }
+
+    #[test]
+    fn clicking_near_existing_x_picks_point_without_stacking_duplicates() {
+        let mut pts = vec![[0.0, 0.0], [1.0, 1.0]];
+        let mut changed = false;
+        let idx = pick_or_insert_curve_point(&mut pts, [1.0, 0.38], &mut changed);
+        assert!(!changed);
+        assert_eq!(idx, Some(1));
+        assert_eq!(pts.len(), 2);
+
+        let idx2 = pick_or_insert_curve_point(&mut pts, [0.5, 0.75], &mut changed);
+        assert!(changed);
+        assert_eq!(idx2, Some(1));
+        assert_eq!(pts, vec![[0.0, 0.0], [0.5, 0.75], [1.0, 1.0]]);
     }
 }
