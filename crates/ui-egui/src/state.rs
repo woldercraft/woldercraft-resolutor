@@ -165,6 +165,53 @@ impl PlaybackRes {
     }
 }
 
+/// Visual style for audio waveforms on Timeline clips (Resolve-inspired modes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaveformStyle {
+    /// Rectified waveform rising from the bottom of the waveform area (default).
+    #[default]
+    Rectified,
+    /// Classic bipolar waveform centered on the zero line (positive up, negative down).
+    Centered,
+    /// Semitransparent fill with a crisp peak outline stroke.
+    Bordered,
+    /// Separate Left (top) and Right (bottom) lanes for stereo/multichannel clips.
+    StereoSplit,
+}
+
+impl WaveformStyle {
+    pub const ALL: [WaveformStyle; 4] = [WaveformStyle::Rectified, WaveformStyle::Centered, WaveformStyle::Bordered, WaveformStyle::StereoSplit];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            WaveformStyle::Rectified => "rectified",
+            WaveformStyle::Centered => "centered",
+            WaveformStyle::Bordered => "bordered",
+            WaveformStyle::StereoSplit => "stereo_split",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WaveformStyle::Rectified => "Rectified",
+            WaveformStyle::Centered => "Centered",
+            WaveformStyle::Bordered => "Bordered",
+            WaveformStyle::StereoSplit => "Stereo (L/R)",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "rectified" => Some(Self::Rectified),
+            "centered" | "bipolar" => Some(Self::Centered),
+            "bordered" | "outline" => Some(Self::Bordered),
+            "stereo_split" | "stereo" | "split" => Some(Self::StereoSplit),
+            _ => None,
+        }
+    }
+}
+
 /// Header mode (Import / Edit / Export).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
@@ -195,6 +242,12 @@ pub struct TimelineView {
     #[serde(default)]
     pub thumbnail_mode: ThumbnailMode,
     pub show_waveforms: bool,
+    /// Visual style of audio waveforms in the Timeline.
+    #[serde(default)]
+    pub waveform_style: WaveformStyle,
+    /// Draw audio waveforms across the full clip height instead of the lower 42%.
+    #[serde(default)]
+    pub waveform_full_height: bool,
     /// The wrench menu's Show Video Names / Show Audio Names: the name strip of the clips on video
     /// and audio tracks (on by default; off leaves the clip picture or waveform uncovered).
     #[serde(default = "yes")]
@@ -249,6 +302,8 @@ impl Default for TimelineView {
             show_thumbnails: true,
             thumbnail_mode: ThumbnailMode::Head,
             show_waveforms: true,
+            waveform_style: WaveformStyle::default(),
+            waveform_full_height: false,
             show_video_names: true,
             show_audio_names: true,
             follow: true,

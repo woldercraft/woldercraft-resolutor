@@ -108,6 +108,8 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("view.guideTemplates.delete", "Delete Guide Template", [], None),
     uic!("view.compare.setReference", "Set Comparison Reference", [], None),
     uic!("view.dynamicAudioWaveforms", "Dynamic Audio Waveforms", ["View"], None),
+    uic!("timeline.waveformStyle", "Waveform Style", [], None),
+    uic!("timeline.refreshWaveforms", "Refresh All Waveforms", ["Sequence"], None),
     uic!("view.toggleGlobalBypass", "Bypass Color Grades & Effects", ["View"], None),
     uic!("color.toggleHighlight", "Highlight Key Matte", ["View"], Some("Shift+H")),
     uic!("multicam.toggleView", "Multi-Camera View", ["View"], Some("Shift+0")),
