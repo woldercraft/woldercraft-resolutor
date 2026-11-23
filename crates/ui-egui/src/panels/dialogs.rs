@@ -473,6 +473,7 @@ fn about_tab(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     ui.add_space(6.0);
     ui.heading("Resolutor");
     ui.label(tlf!("Version {version}", version = env!("CARGO_PKG_VERSION")));
+    ui.label(egui::RichText::new(tlf!("FilmCraft Engine {fc} · EffectCraft VFX {ec}", fc = "0.19.0", ec = "0.23.0")).color(t.text_dim));
     ui.label(tl!("A clean-room, pure-Rust non-linear video editor. Based on FilmCraft and powered by EffectCraft VFX."));
     ui.add_space(10.0);
     let mut link = |ui: &mut egui::Ui, id: &str, icon: Icon, label: &str, url: &str, primary: bool| {
