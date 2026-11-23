@@ -3819,6 +3819,7 @@
 	Keylight (1.2)	Keylight (1.2)
 	Optics Compensation	Compensación óptica
 	A clean-room, pure-Rust non-linear video editor. Based on FilmCraft (ArtCraft family) and powered by EffectCraft VFX.	Un editor de video no lineal en Rust puro. Basado en FilmCraft (familia ArtCraft) e impulsado por EffectCraft VFX.
+	A clean-room, pure-Rust non-linear video editor. Based on FilmCraft and powered by EffectCraft VFX.	Un editor de vídeo no lineal en Rust puro. Basado en FilmCraft e impulsado por EffectCraft VFX.
 	FilmCraft Engine {fc} · EffectCraft VFX {ec}	Motor FilmCraft {fc} · EffectCraft VFX {ec}
 	Resolutor Updates	Actualizaciones de Resolutor
 
