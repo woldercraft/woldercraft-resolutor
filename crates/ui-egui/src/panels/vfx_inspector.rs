@@ -25,7 +25,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     let Some((clip_id, _clip_name)) = resolve_target_clip(app) else {
         ui.centered_and_justified(|ui| {
-            ui.label(egui::RichText::new("Selecciona un clip de vídeo para inspeccionar su nodo VFX").color(t.text_dim));
+            ui.label(egui::RichText::new(tl!("Select a video clip to inspect its VFX node")).color(t.text_dim));
         });
         return;
     };
@@ -39,7 +39,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     if graph.nodes.is_empty() {
         ui.centered_and_justified(|ui| {
-            ui.label(egui::RichText::new("Sin nodos VFX en este clip. Añade un efecto o usa Shift+Space en Nodos VFX.").color(t.text_dim));
+            ui.label(egui::RichText::new(tl!("No VFX nodes on this clip. Add an effect or press Shift+Space in VFX Nodes.")).color(t.text_dim));
         });
         return;
     }
@@ -96,7 +96,7 @@ fn render_node_header(app: &mut FilmcraftApp, ui: &mut egui::Ui, t: &Tokens, cli
         let led_col = if node.enabled { Color32::from_rgb(52, 211, 153) } else { t.text_dim };
         ui.painter().circle_filled(led_r.center(), 4.5, led_col);
         app.auto.add("vfxInspector.passThrough", led_r, "Toggle Pass-Through");
-        if led_resp.on_hover_text("Activar / desactivar nodo (Ctrl+P)").clicked() {
+        if led_resp.on_hover_text(tl!("Enable / bypass node (Ctrl+P)")).clicked() {
             let _ = app.session.execute("vfxGraph.togglePassThrough", json!({"clip": clip_id.0, "node": node.id.0}));
         }
 
@@ -112,8 +112,8 @@ fn render_node_header(app: &mut FilmcraftApp, ui: &mut egui::Ui, t: &Tokens, cli
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(6.0);
             for (tab_idx, auto_id, label, tip) in [
-                (1u8, "vfxInspector.tab.settings", "Ajustes", "Blend universal, máscara y canales RGBA"),
-                (0u8, "vfxInspector.tab.controls", "Controles", "Parámetros propios del nodo"),
+                (1u8, "vfxInspector.tab.settings", tl!("Settings"), tl!("Universal Blend, mask and RGBA channels")),
+                (0u8, "vfxInspector.tab.controls", tl!("Controls"), tl!("Node parameters")),
             ] {
                 let active = app.ui.vfx_inspector_tab == tab_idx;
                 let resp = ui.selectable_label(active, egui::RichText::new(label).size(11.5).strong()).on_hover_text(tip);
@@ -132,14 +132,14 @@ fn render_filter_bar(app: &mut FilmcraftApp, ui: &mut egui::Ui, t: &Tokens) {
         let w = (ui.available_width() - 40.0).max(80.0);
         let te = ui.add(
             egui::TextEdit::singleline(&mut app.ui.effect_controls_search)
-                .hint_text("Filtrar parámetros…")
+                .hint_text(tl!("Filter parameters…"))
                 .desired_width(w),
         );
         app.auto.add("vfxInspector.search", te.rect, "Filter parameters");
         let anim_on = app.ui.effect_controls_animated_only;
         let btn = ui
             .selectable_label(anim_on, egui::RichText::new("◆").color(if anim_on { t.hot_text } else { t.text_dim }))
-            .on_hover_text("Mostrar solo parámetros animados o modificados");
+            .on_hover_text(tl!("Show animated or modified parameters only"));
         app.auto.add("vfxInspector.animatedOnly", btn.rect, "Animated Only");
         if btn.clicked() {
             app.ui.effect_controls_animated_only = !anim_on;
@@ -175,7 +175,7 @@ fn node_keyframe_nav(
             let c = r.center();
             let pts = vec![c + vec2(2.5, -4.5), c + vec2(2.5, 4.5), c + vec2(-3.0, 0.0)];
             ui.painter().add(egui::Shape::convex_polygon(pts, if prev.is_some() { t.text } else { t.text_faint }, Stroke::NONE));
-            if resp.on_hover_text("Keyframe anterior").clicked()
+            if resp.on_hover_text(tl!("Previous keyframe")).clicked()
                 && let Some(tk) = prev
             {
                 let target = item.start + Tick(((tk.0 - item.effect_time_at(item.start).0) as f64 / item.speed.max(1e-6)) as i64);
@@ -202,7 +202,7 @@ fn node_keyframe_nav(
             ui.painter().add(egui::Shape::closed_line(pts, Stroke::new(1.3, col)));
         }
         app.auto.add(&format!("vfxInspector.kf.{}.{param_id}", node_id.0), dr, "Toggle Keyframe");
-        if dresp.on_hover_text("Agregar / quitar keyframe en este frame").clicked() {
+        if dresp.on_hover_text(tl!("Add or remove keyframe at current frame")).clicked() {
             if is_settings_blend {
                 let _ = app
                     .session
@@ -221,7 +221,7 @@ fn node_keyframe_nav(
             let c = r.center();
             let pts = vec![c + vec2(-2.5, -4.5), c + vec2(-2.5, 4.5), c + vec2(3.0, 0.0)];
             ui.painter().add(egui::Shape::convex_polygon(pts, if next.is_some() { t.text } else { t.text_faint }, Stroke::NONE));
-            if resp.on_hover_text("Siguiente keyframe").clicked()
+            if resp.on_hover_text(tl!("Next keyframe")).clicked()
                 && let Some(tk) = next
             {
                 let target = item.start + Tick(((tk.0 - item.effect_time_at(item.start).0) as f64 / item.speed.max(1e-6)) as i64);
@@ -307,7 +307,7 @@ fn resolve_slider_row(
         // Reset `↺`
         let (rr, rresp) = ui.allocate_exact_size(vec2(14.0, 16.0), Sense::click());
         icons::paint(ui.painter(), rr.shrink(1.0), Icon::Reset, if rresp.hovered() { t.text } else { t.text_dim });
-        if rresp.on_hover_text("Restablecer valor por defecto").clicked() {
+        if rresp.on_hover_text(tl!("Reset to default")).clicked() {
             val = default_val;
             changed = true;
         }
@@ -360,14 +360,14 @@ fn render_settings_tab(
     ui.horizontal(|ui| {
         ui.add_space(6.0);
         let mut inv_m = node.settings.invert_mask;
-        if ui.checkbox(&mut inv_m, "Invertir máscara").changed() {
+        if ui.checkbox(&mut inv_m, tl!("Apply Mask Inverted")).changed() {
             let _ = app.session.execute("vfxGraph.setNodeSetting", json!({"clip": clip_id.0, "node": node.id.0, "invertMask": inv_m}));
         }
     });
     ui.horizontal(|ui| {
         ui.add_space(6.0);
         let mut mul_m = node.settings.multiply_by_mask;
-        if ui.checkbox(&mut mul_m, "Multiplicar por máscara").changed() {
+        if ui.checkbox(&mut mul_m, tl!("Multiply by Mask")).changed() {
             let _ = app
                 .session
                 .execute("vfxGraph.setNodeSetting", json!({"clip": clip_id.0, "node": node.id.0, "multiplyByMask": mul_m}));
@@ -377,7 +377,7 @@ fn render_settings_tab(
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("Canales:").size(11.5).color(t.text_dim));
+        ui.label(egui::RichText::new(tl!("Channels:")).size(11.5).color(t.text_dim));
         let mut ch = node.settings.channels;
         let mut changed = false;
         for (i, (lbl, col)) in [
@@ -404,7 +404,7 @@ fn render_settings_tab(
     let mut lbl = node.label.clone().unwrap_or_default();
     ui.horizontal(|ui| {
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("Etiqueta:").size(11.5).color(t.text_dim));
+        ui.label(egui::RichText::new(tl!("Label:")).size(11.5).color(t.text_dim));
         let te = ui.add(egui::TextEdit::singleline(&mut lbl).desired_width((ui.available_width() - 20.0).max(80.0)));
         if te.lost_focus() || (te.changed() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
             let _ = app.session.execute("vfxGraph.setNodeSetting", json!({"clip": clip_id.0, "node": node.id.0, "label": lbl}));
@@ -430,20 +430,20 @@ fn render_controls_tab(
         VfxNodeKind::PipeRouter => {
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("Enrutador de cables sin parámetros propios.").color(t.text_dim));
+                ui.label(egui::RichText::new(tl!("Cable router with no image parameters.")).color(t.text_dim));
             });
         }
         VfxNodeKind::Merge { blend_mode, operator, center, size, angle } => {
             ui.horizontal(|ui| {
                 ui.add_space(6.0);
-                if ui.small_button("Intercambiar BG / FG (Ctrl+T)").clicked() {
+                if ui.small_button(tl!("Swap BG / FG (Ctrl+T)")).clicked() {
                     let _ = app.session.execute("vfxGraph.swapInputs", json!({"clip": clip_id.0, "node": node.id.0}));
                 }
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.add_space(6.0);
-                ui.label("Operador:");
+                ui.label(tl!("Operator:"));
                 craft_ui::ComboBox::from_id_salt(("vfx_ins_op", node.id.0))
                     .selected_text(operator.label())
                     .show_ui(ui, |ui| {
@@ -453,7 +453,7 @@ fn render_controls_tab(
                             }
                         }
                     });
-                ui.label("Fusión:");
+                ui.label(tl!("Blend Mode:"));
                 craft_ui::ComboBox::from_id_salt(("vfx_ins_bm", node.id.0))
                     .selected_text(blend_mode.label())
                     .show_ui(ui, |ui| {
@@ -503,7 +503,7 @@ fn render_controls_tab(
             ui.horizontal(|ui| {
                 ui.add_space(6.0);
                 let mut inv = mask.inverted;
-                if ui.checkbox(&mut inv, "Invertida").changed() {
+                if ui.checkbox(&mut inv, tl!("Inverted")).changed() {
                     let _ = app.session.execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node.id.0, "param": "inverted", "value": inv}));
                 }
             });
@@ -513,7 +513,7 @@ fn render_controls_tab(
                 ui.horizontal_wrapped(|ui| {
                     ui.add_space(6.0);
                     ui.label(
-                        egui::RichText::new(format!("Instancia vinculada al Nodo #{}", source.0))
+                        egui::RichText::new(tlf!("Instance linked to Node #{id}", id = source.0))
                             .strong()
                             .size(11.0)
                             .color(Color32::from_rgb(16, 185, 129)),

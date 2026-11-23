@@ -270,7 +270,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let ui = &mut ui;
     let Some((clip_id, clip_name)) = resolve_target_clip(app) else {
         ui.centered_and_justified(|ui| {
-            ui.label(egui::RichText::new("Selecciona un clip de vídeo para editar sus nodos VFX").color(t.text_dim));
+            ui.label(egui::RichText::new(tl!("Select a video clip to edit its VFX nodes")).color(t.text_dim));
         });
         return;
     };
@@ -328,10 +328,10 @@ fn render_toolbar(
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 5.0;
         ui.label(egui::RichText::new(format!("VFX · {clip_name}")).strong().size(12.0).color(t.text));
-        ui.label(egui::RichText::new(format!("({} nodos)", graph.nodes.len())).size(11.0).color(t.text_dim));
+        ui.label(egui::RichText::new(tlf!("({n} nodes)", n = graph.nodes.len())).size(11.0).color(t.text_dim));
         ui.separator();
 
-        let add_btn = ui.small_button("+ Efecto").on_hover_text("Shift+Space: Buscar e insertar herramienta VFX");
+        let add_btn = ui.small_button(tl!("+ Effect")).on_hover_text(tl!("Shift+Space: Search and insert VFX tool"));
         app.auto.add("vfxNodes.addTool", add_btn.rect, "Add VFX Tool");
         if add_btn.clicked() {
             ui.ctx().data_mut(|d| {
@@ -343,7 +343,7 @@ fn render_toolbar(
         }
 
         let after_val = app.ui.vfx_active_node_id;
-        let merge_btn = ui.small_button("+ Merge").on_hover_text("Añadir nodo Merge (BG amarillo + FG verde)");
+        let merge_btn = ui.small_button("+ Merge").on_hover_text(tl!("Add Merge node (yellow BG + green FG)"));
         app.auto.add("vfxNodes.addMerge", merge_btn.rect, "Add Merge Node");
         if merge_btn.clicked() {
             let mut body = json!({"clip": clip_id.0, "kind": "merge"});
@@ -357,7 +357,7 @@ fn render_toolbar(
             }
         }
 
-        let mask_btn = ui.small_button("+ Mask").on_hover_text("Añadir nodo Mask reutilizable (puerto azul EffectMask)");
+        let mask_btn = ui.small_button("+ Mask").on_hover_text(tl!("Add reusable Mask node (blue EffectMask port)"));
         app.auto.add("vfxNodes.addMask", mask_btn.rect, "Add Mask Node");
         if mask_btn.clicked() {
             let mut body = json!({"clip": clip_id.0, "kind": "mask", "maskKind": "ellipse"});
@@ -371,7 +371,7 @@ fn render_toolbar(
             }
         }
 
-        let router_btn = ui.small_button("+ Router").on_hover_text("Añadir PipeRouter para organizar cables");
+        let router_btn = ui.small_button("+ Router").on_hover_text(tl!("Add PipeRouter to organize wires"));
         app.auto.add("vfxNodes.addRouter", router_btn.rect, "Add PipeRouter");
         if router_btn.clicked() {
             let mut body = json!({"clip": clip_id.0, "kind": "pipeRouter"});
@@ -382,7 +382,7 @@ fn render_toolbar(
         }
 
         if let Some(aid) = after_val {
-            let inst_btn = ui.small_button("+ Inst").on_hover_text("Crear nodo Instance vinculado al nodo seleccionado");
+            let inst_btn = ui.small_button("+ Inst").on_hover_text(tl!("Create Instance node linked to selection"));
             app.auto.add("vfxNodes.createInstance", inst_btn.rect, "Create Instance");
             if inst_btn.clicked()
                 && let Ok(res) = app.session.execute("vfxGraph.createInstance", json!({"clip": clip_id.0, "source": aid}))
@@ -392,23 +392,23 @@ fn render_toolbar(
             }
         }
 
-        let ul_btn = ui.small_button("+ Grupo").on_hover_text("Añadir Underlay visual para agrupar nodos");
+        let ul_btn = ui.small_button(tl!("+ Group")).on_hover_text(tl!("Add visual Underlay to group nodes"));
         app.auto.add("vfxNodes.addUnderlay", ul_btn.rect, "Add Underlay");
         if ul_btn.clicked() {
             let _ = app.session.execute(
                 "vfxGraph.addUnderlay",
-                json!({"clip": clip_id.0, "title": "Grupo VFX", "rect": [90.0, 70.0, 380.0, 170.0]}),
+                json!({"clip": clip_id.0, "title": tl!("VFX Group"), "rect": [90.0, 70.0, 380.0, 170.0]}),
             );
         }
 
         ui.separator();
-        let org_btn = ui.small_button("Organizar").on_hover_text("Auto-organizar topológicamente de izquierda a derecha");
+        let org_btn = ui.small_button(tl!("Auto Layout")).on_hover_text(tl!("Topologically arrange left to right"));
         app.auto.add("vfxNodes.autoLayout", org_btn.rect, "Auto Layout");
         if org_btn.clicked() {
             let _ = app.session.execute("vfxGraph.autoLayout", json!({"clip": clip_id.0}));
         }
 
-        let fit_btn = ui.small_button("Encuadrar");
+        let fit_btn = ui.small_button(tl!("Fit View"));
         if fit_btn.clicked() {
             ui.ctx().data_mut(|d| {
                 d.insert_temp(zoom_id, 1.0f32);
@@ -420,7 +420,7 @@ fn render_toolbar(
         let kf_on = app.ui.vfx_bottom_drawer == 1;
         let kf_btn = ui
             .selectable_label(kf_on, "Keyframes")
-            .on_hover_text("Mostrar solo las pistas de keyframes del nodo seleccionado");
+            .on_hover_text(tl!("Show keyframes for selected node only"));
         app.auto.add("vfxNodes.drawer.keyframes", kf_btn.rect, "Toggle Node Keyframes");
         if kf_btn.clicked() {
             app.ui.vfx_bottom_drawer = if kf_on { 0 } else { 1 };
@@ -429,7 +429,7 @@ fn render_toolbar(
         let sp_on = app.ui.vfx_bottom_drawer == 2;
         let sp_btn = ui
             .selectable_label(sp_on, "Spline")
-            .on_hover_text("Mostrar solo las curvas Spline del nodo seleccionado");
+            .on_hover_text(tl!("Show spline curves for selected node only"));
         app.auto.add("vfxNodes.drawer.spline", sp_btn.rect, "Toggle Node Spline");
         if sp_btn.clicked() {
             app.ui.vfx_bottom_drawer = if sp_on { 0 } else { 2 };
@@ -1013,7 +1013,7 @@ fn render_select_tool_popup(app: &mut FilmcraftApp, ui: &mut egui::Ui, clip_id: 
         .default_width(300.0)
         .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
         .show(ui.ctx(), |ui| {
-            let te = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text("Buscar efecto, Merge, Mask, Router…").desired_width(280.0));
+            let te = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text(tl!("Search effect, Merge, Mask, Router…")).desired_width(280.0));
             te.request_focus();
             let q = st.query.trim().to_ascii_lowercase();
             let mut choices: Vec<(&'static str, String, &'static str)> = vec![

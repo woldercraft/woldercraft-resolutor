@@ -3933,3 +3933,46 @@
 	Effect Overlay	Superposición de efectos
 	On-Screen Controls ({mode})	Controles en pantalla ({mode})
 	On-Screen Controls Mode	Modo de controles en pantalla
+
+# VFX Inspector & Keyframes UI.
+	Select a video clip to inspect its VFX node	Selecciona un clip de vídeo para inspeccionar su nodo VFX
+	No VFX nodes on this clip. Add an effect or press Shift+Space in VFX Nodes.	Sin nodos VFX en este clip. Añade un efecto o usa Shift+Space en Nodos VFX.
+	Enable / bypass node (Ctrl+P)	Activar / desactivar nodo (Ctrl+P)
+	Universal Blend, mask and RGBA channels	Blend universal, máscara y canales RGBA
+	Node parameters	Parámetros propios del nodo
+	Filter parameters…	Filtrar parámetros…
+	Show animated or modified parameters only	Mostrar solo parámetros animados o modificados
+	Previous keyframe	Keyframe anterior
+	Add or remove keyframe at current frame	Agregar / quitar keyframe en este frame
+	Next keyframe	Siguiente keyframe
+	Reset to default	Restablecer valor por defecto
+	Apply Mask Inverted	Invertir máscara
+	Multiply by Mask	Multiplicar por máscara
+	Channels:	Canales:
+	Label:	Etiqueta:
+	Cable router with no image parameters.	Enrutador de cables sin parámetros de imagen.
+	Swap BG / FG (Ctrl+T)	Intercambiar BG / FG (Ctrl+T)
+	Operator:	Operador:
+	Blend Mode:	Modo de fusión:
+	Instance linked to Node #{id}	Instancia vinculada al Nodo #{id}
+	Select a video clip to view its VFX keyframes	Selecciona un clip de vídeo para ver sus keyframes VFX
+	No VFX nodes on this clip	Sin nodos VFX en este clip
+	({n} parameters)	({n} parámetros)
+	Add or remove keyframe	Agregar / quitar keyframe
+	Click ◆ in VFX Inspector to animate a parameter and view its curve here	Haz clic en ◆ en Inspector VFX para animar un parámetro y ver su curva aquí
+	Select a video clip to edit its VFX nodes	Selecciona un clip de vídeo para editar sus nodos VFX
+	({n} nodes)	({n} nodos)
+	+ Effect	+ Efecto
+	Shift+Space: Search and insert VFX tool	Shift+Space: Buscar e insertar herramienta VFX
+	Add Merge node (yellow BG + green FG)	Añadir nodo Merge (BG amarillo + FG verde)
+	Add reusable Mask node (blue EffectMask port)	Añadir nodo Mask reutilizable (puerto azul EffectMask)
+	Add PipeRouter to organize wires	Añadir PipeRouter para organizar cables
+	Create Instance node linked to selection	Crear nodo Instance vinculado al nodo seleccionado
+	Add visual Underlay to group nodes	Añadir Underlay visual para agrupar nodos
+	VFX Group	Grupo VFX
+	Auto Layout	Organizar
+	Topologically arrange left to right	Auto-organizar topológicamente de izquierda a derecha
+	Fit View	Encuadrar
+	Show keyframes for selected node only	Mostrar solo las pistas de keyframes del nodo seleccionado
+	Show spline curves for selected node only	Mostrar solo las curvas Spline del nodo seleccionado
+	Search effect, Merge, Mask, Router…	Buscar efecto, Merge, Mask, Router…

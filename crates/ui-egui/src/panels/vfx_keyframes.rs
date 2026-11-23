@@ -23,7 +23,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     let Some((clip_id, _clip_name)) = resolve_target_clip(app) else {
         ui.centered_and_justified(|ui| {
-            ui.label(egui::RichText::new("Selecciona un clip de vídeo para ver sus keyframes VFX").color(t.text_dim));
+            ui.label(egui::RichText::new(tl!("Select a video clip to view its VFX keyframes")).color(t.text_dim));
         });
         return;
     };
@@ -33,7 +33,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let graph = it.effective_vfx_graph().into_owned();
     if graph.nodes.is_empty() {
         ui.centered_and_justified(|ui| {
-            ui.label(egui::RichText::new("Sin nodos VFX en este clip").color(t.text_dim));
+            ui.label(egui::RichText::new(tl!("No VFX nodes on this clip")).color(t.text_dim));
         });
         return;
     }
@@ -74,7 +74,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
         ui.separator();
         ui.label(egui::RichText::new(title).strong().size(11.5).color(t.accent));
-        ui.label(egui::RichText::new(format!("({} parámetros)", params.len())).size(10.5).color(t.text_dim));
+        ui.label(egui::RichText::new(tlf!("({n} parameters)", n = params.len())).size(10.5).color(t.text_dim));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(8.0);
@@ -133,7 +133,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     let col = if prm.is_animated() { t.accent } else { t.text_dim };
                     p.add(egui::Shape::closed_line(pts, Stroke::new(1.2, col)));
                 }
-                if kf_resp.on_hover_text("Agregar / quitar keyframe").clicked() {
+                if kf_resp.on_hover_text(tl!("Add or remove keyframe")).clicked() {
                     if pid == "__settings.blend" {
                         let _ = app
                             .session
@@ -227,7 +227,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 p.text(
                     graph_r.center(),
                     Align2::CENTER_CENTER,
-                    "Haz clic en ◆ en Inspector VFX para animar un parámetro y ver su curva aquí",
+                    tl!("Click ◆ in VFX Inspector to animate a parameter and view its curve here"),
                     Tokens::ui(11.5),
                     t.text_dim,
                 );
