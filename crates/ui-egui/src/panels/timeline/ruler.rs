@@ -237,7 +237,30 @@ fn timeline_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
             }
         }
     });
-    ui.checkbox(&mut app.ui.timeline.show_waveforms, tl!("Show Audio Waveform"));
+    let wf = ui.checkbox(&mut app.ui.timeline.show_waveforms, tl!("Show Audio Waveform"));
+    app.auto.add("timeline.settings.showWaveforms", wf.rect, "Show Audio Waveform");
+    let wf_on = app.ui.timeline.show_waveforms;
+    ui.indent("timeline.settings.waveforms", |ui| {
+        for style in crate::state::WaveformStyle::ALL {
+            let label = crate::i18n::t(style.label());
+            let r = ui.add_enabled(wf_on, egui::RadioButton::new(app.ui.timeline.waveform_style == style, label));
+            app.auto.add(&format!("timeline.settings.waveform.{}", style.name()), r.rect, label);
+            if r.clicked() {
+                app.ui.timeline.waveform_style = style;
+            }
+        }
+        let fh = ui.add_enabled(wf_on, egui::Checkbox::new(&mut app.ui.timeline.waveform_full_height, tl!("Full Height Waveform")));
+        app.auto.add("timeline.settings.waveform.fullHeight", fh.rect, "Full Height Waveform");
+        let dyn_wf = ui.add_enabled(wf_on, egui::Checkbox::new(&mut app.ui.extras.dynamic_waveforms, tl!("Logarithmic Scale (dB)")));
+        app.auto.add("timeline.settings.waveform.dynamic", dyn_wf.rect, "Logarithmic Scale (dB)");
+        let rf = ui.add_enabled(wf_on, egui::Button::new(tl!("Refresh All Waveforms")));
+        app.auto.add("timeline.settings.refreshWaveforms", rf.rect, "Refresh All Waveforms");
+        if rf.clicked() {
+            app.tl.refresh_all_waveforms();
+            ui.ctx().request_repaint();
+            ui.close();
+        }
+    });
     let c = ui.checkbox(&mut app.ui.timeline.show_video_names, tl!("Show Video Names"));
     app.auto.add("timeline.settings.showVideoNames", c.rect, "Show Video Names");
     let c = ui.checkbox(&mut app.ui.timeline.show_audio_names, tl!("Show Audio Names"));

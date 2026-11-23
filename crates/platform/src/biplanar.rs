@@ -76,17 +76,14 @@ pub fn to_frame(src: &Biplanar, g: &Geometry) -> Result<VideoFrame, String> {
         }
         let mut u = pool::take_u8_overwritten(cw * ch);
         let mut v = pool::take_u8_overwritten(cw * ch);
-        u.chunks_exact_mut(cw)
-            .zip(v.chunks_exact_mut(cw))
-            .enumerate()
-            .for_each(|(y, (u_row, v_row))| {
-                if let Ok(src_row) = row(src.chroma, src.stride, coy + y, cox * 2, cw * 2) {
-                    for ((dst_u, dst_v), &[ub, vb]) in u_row.iter_mut().zip(v_row.iter_mut()).zip(src_row.as_chunks::<2>().0) {
-                        *dst_u = ub;
-                        *dst_v = vb;
-                    }
+        u.chunks_exact_mut(cw).zip(v.chunks_exact_mut(cw)).enumerate().for_each(|(y, (u_row, v_row))| {
+            if let Ok(src_row) = row(src.chroma, src.stride, coy + y, cox * 2, cw * 2) {
+                for ((dst_u, dst_v), &[ub, vb]) in u_row.iter_mut().zip(v_row.iter_mut()).zip(src_row.as_chunks::<2>().0) {
+                    *dst_u = ub;
+                    *dst_v = vb;
                 }
-            });
+            }
+        });
         PixelData::Yuv8 { planes: [Arc::new(yp), Arc::new(u), Arc::new(v)], chroma: Chroma::C420, alpha: None }
     } else {
         let shift = 16 - g.bits;
@@ -100,17 +97,14 @@ pub fn to_frame(src: &Biplanar, g: &Geometry) -> Result<VideoFrame, String> {
         });
         let mut u = pool::take_u16_overwritten(cw * ch);
         let mut v = pool::take_u16_overwritten(cw * ch);
-        u.chunks_exact_mut(cw)
-            .zip(v.chunks_exact_mut(cw))
-            .enumerate()
-            .for_each(|(y, (u_row, v_row))| {
-                if let Ok(src_row) = row(src.chroma, src.stride, coy + y, cox * 4, cw * 4) {
-                    for ((dst_u, dst_v), q) in u_row.iter_mut().zip(v_row.iter_mut()).zip(src_row.as_chunks::<4>().0) {
-                        *dst_u = u16::from_le_bytes([q[0], q[1]]) >> shift;
-                        *dst_v = u16::from_le_bytes([q[2], q[3]]) >> shift;
-                    }
+        u.chunks_exact_mut(cw).zip(v.chunks_exact_mut(cw)).enumerate().for_each(|(y, (u_row, v_row))| {
+            if let Ok(src_row) = row(src.chroma, src.stride, coy + y, cox * 4, cw * 4) {
+                for ((dst_u, dst_v), q) in u_row.iter_mut().zip(v_row.iter_mut()).zip(src_row.as_chunks::<4>().0) {
+                    *dst_u = u16::from_le_bytes([q[0], q[1]]) >> shift;
+                    *dst_v = u16::from_le_bytes([q[2], q[3]]) >> shift;
                 }
-            });
+            }
+        });
         PixelData::Yuv16 { planes: [Arc::new(yp), Arc::new(u), Arc::new(v)], chroma: Chroma::C420, bits: g.bits, alpha: None }
     };
     Ok(VideoFrame { width: w as u32, height: h as u32, data, color: g.color, par: g.par, pts: filmcraft_time::Tick::ZERO })

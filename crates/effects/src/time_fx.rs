@@ -878,8 +878,8 @@ pub fn timewarp_plan(ctx: &EffectCtx) -> Option<TimewarpPlan> {
         frames.len() - 1
     };
     // Motion fields: per source frame pair (keyed), or per masked pair (unkeyed).
-    let mut flows: Vec<(Option<i64>, Flow)> = vec![];
-    let mut steps = vec![];
+    let mut flows: Vec<(Option<i64>, Flow)> = Vec::with_capacity(instants.len());
+    let mut steps = Vec::with_capacity(instants.len());
     for &(s, wgt) in &instants {
         let (f0, frac) = tw_split(s, fps);
         let (i0, i1) = (idx(f0 / fps), idx((f0 + 1.0) / fps));

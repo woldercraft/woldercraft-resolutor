@@ -453,7 +453,9 @@ fn create_proxies(app: &mut FilmcraftApp, ctx: &egui::Context) {
             if d.preset.starts_with("h264") {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("⚡").color(Color32::from_rgb(80, 200, 120)));
-                    ui.label(RichText::new(tl!("Aceleración por GPU activada (Render Vulkan + VA-API/NVENC)")).color(Color32::from_rgb(80, 200, 120)).size(11.5));
+                    ui.label(
+                        RichText::new(tl!("Aceleración por GPU activada (Render Vulkan + VA-API/NVENC)")).color(Color32::from_rgb(80, 200, 120)).size(11.5),
+                    );
                 });
             }
             let r = ui.checkbox(&mut d.render_buffer, tl!("Búfer de aceleración y pre-fetching (Recomendado)"));

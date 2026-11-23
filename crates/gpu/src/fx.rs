@@ -15,6 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use filmcraft_render::effects::{CW_LUT_H, CW_LUT_W, ColorWarperTable};
 use filmcraft_render::gpufx::{FxOp, LUMETRI_CURVE_LEN, LumetriCurveTable, MaskCoverage};
 use filmcraft_render::plan::LayerFx;
 
@@ -66,8 +67,41 @@ const OP_HSL_KEY: u32 = 41;
 const OP_HSL_MEDIAN: u32 = 42;
 const OP_HSL_APPLY: u32 = 43;
 const OP_MASK_MIX: u32 = 44;
+const OP_MIDTONE_DETAIL: u32 = 45;
+const OP_COLOR_SLICE: u32 = 46;
+const OP_COLOR_WARPER: u32 = 47;
+const OP_HSL_MORPH: u32 = 48;
+const OP_NODE_KEY_FINISH: u32 = 49;
+const OP_RESTORE_ORIG: u32 = 50;
+const OP_NODE_KEY_MIX: u32 = 51;
+const OP_DAG_KEY_COMBINE: u32 = 52;
+const OP_DAG_PARALLEL: u32 = 53;
+const OP_DAG_LAYER: u32 = 54;
+const OP_DAG_SPLIT: u32 = 55;
+const OP_DAG_COMBINE: u32 = 56;
+const OP_LOG_WHEELS: u32 = 57;
+const OP_HDR_WHEELS: u32 = 58;
+const OP_RGB_MIXER: u32 = 59;
+const OP_CST: u32 = 60;
+const OP_NODE_SIZING: u32 = 61;
 
 type Target = (wgpu::Texture, wgpu::TextureView);
+
+struct CachedTex<T> {
+    _keep: Arc<T>,
+    _tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    last_used: u64,
+}
+
+fn evict_lru_tex<T>(cache: &mut HashMap<usize, CachedTex<T>>, limit: usize) {
+    while cache.len() >= limit {
+        let Some(&oldest_key) = cache.iter().min_by_key(|(_, v)| v.last_used).map(|(k, _)| k) else {
+            break;
+        };
+        cache.remove(&oldest_key);
+    }
+}
 
 pub(crate) struct FxStage {
     px: wgpu::ComputePipeline,
@@ -77,9 +111,10 @@ pub(crate) struct FxStage {
     source: wgpu::RenderPipeline,
     pool: HashMap<(u32, u32), Vec<Target>>,
     used: HashSet<(u32, u32)>,
-    lut_cache: HashMap<usize, (Arc<filmcraft_color::Lut3d>, wgpu::Texture, wgpu::TextureView)>,
-    curve_cache: HashMap<usize, (Arc<Vec<[f32; 4]>>, wgpu::Texture, wgpu::TextureView)>,
-    mask_cache: HashMap<usize, (Arc<Vec<f32>>, wgpu::Texture, wgpu::TextureView)>,
+    lut_cache: HashMap<usize, CachedTex<filmcraft_color::Lut3d>>,
+    curve_cache: HashMap<usize, CachedTex<Vec<[f32; 4]>>>,
+    mask_cache: HashMap<usize, CachedTex<Vec<f32>>>,
+    cache_tick: u64,
     uniform_buffers: Vec<wgpu::Buffer>,
     uniform_buffer_idx: usize,
     /// Open [`begin_frame`](Self::begin_frame)s.
@@ -111,7 +146,7 @@ struct Step {
     run: bool,
     code: u32,
     i1: [u32; 4],
-    p: [f32; 24],
+    p: [f32; 28],
     /// Combine with the preserved original in `orig` (Unsharp Mask or HSL Secondary apply).
     combine: bool,
     /// Keeps `orig` untouched across intermediate passes (Unsharp blur or HSL key/denoise/blur).
@@ -121,15 +156,28 @@ struct Step {
     kernel: Vec<(i32, i32, f32)>,
     lut: Option<Arc<filmcraft_color::Lut3d>>,
     curves: Option<LumetriCurveTable>,
+    warper: Option<ColorWarperTable>,
+    samples_3d: Option<Arc<Vec<[f32; 4]>>>,
+    /// Save `dst` into `saved_key` after this pass.
+    save_key: bool,
+    /// Bind `saved_key` to `mask_tex` on this pass and release it afterwards.
+    use_key: bool,
     /// First pass of a masked op: save `cur` into `mask_stack`.
     mask_save: bool,
     /// Closing pass of a masked op: mix `cur` with saved original from `mask_stack` using `mask`.
     mask_mix: bool,
     mask: Option<MaskCoverage>,
+    /// DAG register routing (`ColorDagOp`).
+    dag_save_zero: bool,
+    dag_load_cur: Option<u8>,
+    dag_aux: Option<u8>,
+    dag_mask: Option<u8>,
+    dag_save: Option<u8>,
+    dag_final_cur: Option<u8>,
 }
 
 fn step(code: u32, i1: [u32; 4], p: &[f32]) -> Step {
-    let mut q = [0.0; 24];
+    let mut q = [0.0; 28];
     for (d, s) in q.iter_mut().zip(p) {
         *d = *s;
     }
@@ -143,9 +191,19 @@ fn step(code: u32, i1: [u32; 4], p: &[f32]) -> Step {
         kernel: Vec::new(),
         lut: None,
         curves: None,
+        warper: None,
+        samples_3d: None,
+        save_key: false,
+        use_key: false,
         mask_save: false,
         mask_mix: false,
         mask: None,
+        dag_save_zero: false,
+        dag_load_cur: None,
+        dag_aux: None,
+        dag_mask: None,
+        dag_save: None,
+        dag_final_cur: None,
     }
 }
 
@@ -296,164 +354,8 @@ fn steps(op: &FxOp, w: u32, h: u32) -> Vec<Step> {
         FxOp::VideoLimiter { max, comp, axis, warn, warning_color } => {
             out.push(step(OP_VIDEO_LIMITER, [*axis, *warn as u32, 0, 0], &[*max, *comp, warning_color[0], warning_color[1], warning_color[2]]));
         }
-        FxOp::Lumetri {
-            input_lut,
-            look_lut,
-            gains,
-            exposure,
-            contrast,
-            hl,
-            sh,
-            wh,
-            bl,
-            sat,
-            creative_on,
-            faded,
-            vib,
-            st,
-            ht,
-            vignette_on,
-            va,
-            vmid,
-            vround,
-            vfeather,
-            aspect,
-            look,
-            look_k,
-            sharpen,
-            sharpen_rx,
-            sharpen_ry,
-            wheels_on,
-            ws,
-            wm,
-            wh_rgb,
-            ls,
-            lm,
-            lh,
-            curves,
-            hsl,
-            ..
-        } => {
-            if let Some(lut) = input_lut {
-                let mut s = step(
-                    OP_LUT_3D,
-                    [lut.size as u32, 0, 0, 0],
-                    &[lut.domain_min[0], lut.domain_min[1], lut.domain_min[2], 1.0, lut.domain_max[0], lut.domain_max[1], lut.domain_max[2], 0.0],
-                );
-                s.lut = Some(lut.clone());
-                out.push(s);
-            }
-
-            let ge = [gains[0] * exposure, gains[1] * exposure, gains[2] * exposure];
-            let b0 = -bl * 0.15;
-            let w0 = 1.0 - wh * 0.15;
-            let sh_k = sh * 0.35;
-            let hl_k = hl * 0.35;
-            let vround_aspect = filmcraft_render::gpufx::lumetri_vignette_aspect(*aspect, *vround);
-            let st_k = [(st[0] - 0.5) * 0.3, (st[1] - 0.5) * 0.3, (st[2] - 0.5) * 0.3];
-            let ht_k = [(ht[0] - 0.5) * 0.3, (ht[1] - 0.5) * 0.3, (ht[2] - 0.5) * 0.3];
-
-            let p = [
-                ge[0],
-                ge[1],
-                ge[2],
-                b0,
-                w0,
-                sh_k,
-                hl_k,
-                *contrast,
-                *faded,
-                *sat,
-                *vib,
-                *va,
-                *vmid,
-                *vfeather,
-                vround_aspect,
-                0.0,
-                st_k[0],
-                st_k[1],
-                st_k[2],
-                0.0,
-                ht_k[0],
-                ht_k[1],
-                ht_k[2],
-                0.0,
-            ];
-            out.push(step(OP_LUMETRI, [*creative_on as u32, *vignette_on as u32, 0, 0], &p));
-
-            if let Some(lut) = look_lut {
-                if look_k.abs() > 1e-5 {
-                    let mut s = step(
-                        OP_LUT_3D,
-                        [lut.size as u32, 0, 0, 0],
-                        &[lut.domain_min[0], lut.domain_min[1], lut.domain_min[2], *look_k, lut.domain_max[0], lut.domain_max[1], lut.domain_max[2], 0.0],
-                    );
-                    s.lut = Some(lut.clone());
-                    out.push(s);
-                }
-            } else if *look > 0 && *look <= 8 && look_k.abs() > 1e-5 {
-                out.push(step(OP_LUMETRI_LOOK, [*look, 0, 0, 0], &[*look_k]));
-            }
-
-            let wheels_active = *wheels_on
-                && (ws.iter().chain(wm).chain(wh_rgb).any(|v| v.abs() > 1e-5) || (ls.abs() + lm.abs() + lh.abs() > 1e-5));
-            if wheels_active {
-                let lift_k = [ws[0] * 0.3 + ls * 0.3, ws[1] * 0.3 + ls * 0.3, ws[2] * 0.3 + ls * 0.3];
-                let gamma_k = [wm[0] * 0.3 + lm * 0.3, wm[1] * 0.3 + lm * 0.3, wm[2] * 0.3 + lm * 0.3];
-                let gain_k = [wh_rgb[0] * 0.5 + lh * 0.5, wh_rgb[1] * 0.5 + lh * 0.5, wh_rgb[2] * 0.5 + lh * 0.5];
-                let wheels_p = [
-                    lift_k[0], lift_k[1], lift_k[2], 0.0,
-                    gamma_k[0], gamma_k[1], gamma_k[2], 0.0,
-                    gain_k[0], gain_k[1], gain_k[2], 0.0,
-                    0.0, 0.0, 0.0, 0.0,
-                    0.0, 0.0, 0.0, 0.0,
-                    0.0, 0.0, 0.0, 0.0,
-                ];
-                out.push(step(OP_COLOR_WHEELS, [0; 4], &wheels_p));
-            }
-
-            if let Some(ct) = curves
-                && ct.active_mask != 0
-            {
-                let mut s = step(OP_LUMETRI_CURVES, [ct.active_mask, 0, 0, 0], &[]);
-                s.curves = Some(ct.clone());
-                out.push(s);
-            }
-
-            if let Some(hsl) = hsl {
-                let mut key_step = step(OP_HSL_KEY, [0; 4], &[hsl.hc, hsl.hr, hsl.smin, hsl.lmin, hsl.lmax, hsl.soft]);
-                key_step.preserve_orig = true;
-                out.push(key_step);
-                if hsl.denoise > 0.0 && hsl.denoise_r > 0 {
-                    let mut med_step = step(OP_HSL_MEDIAN, [hsl.denoise_r, 0, 0, 0], &[hsl.denoise]);
-                    med_step.preserve_orig = true;
-                    out.push(med_step);
-                }
-                if !hsl.blur_rx.is_empty() || !hsl.blur_ry.is_empty() {
-                    let blur_start = out.len();
-                    boxes(&hsl.blur_rx, false, true, &mut out);
-                    boxes(&hsl.blur_ry, true, true, &mut out);
-                    for bs in &mut out[blur_start..] {
-                        bs.preserve_orig = true;
-                    }
-                }
-                let mut apply_step = step(OP_HSL_APPLY, [hsl.show_mask, 0, 0, 0], &[hsl.htemp, hsl.htint, hsl.hsat, hsl.hshift]);
-                apply_step.combine = true;
-                out.push(apply_step);
-            }
-
-            if sharpen.abs() > 1e-3 && !sharpen_rx.is_empty() {
-                let start = out.len();
-                boxes(sharpen_rx, false, true, &mut out);
-                boxes(sharpen_ry, true, true, &mut out);
-                for s in &mut out[start..] {
-                    s.preserve_orig = true;
-                }
-                let mut s = step(OP_UNSHARP, [0; 4], &[sharpen.max(-1.0), 0.0]);
-                s.combine = true;
-                out.push(s);
-            }
-        }
+        FxOp::Lumetri(op) => push_lumetri_steps(op, false, &mut out),
+        FxOp::ColorDag(dag) => push_color_dag_steps(dag, &mut out),
         FxOp::Masked { inner, mask } => {
             if mask.w == w && mask.h == h && mask.cov.len() == (w as usize).saturating_mul(h as usize) {
                 let mut inner_steps = steps(inner, w, h);
@@ -469,6 +371,558 @@ fn steps(op: &FxOp, w: u32, h: u32) -> Vec<Step> {
         }
     }
     out
+}
+
+fn push_lumetri_steps(op: &filmcraft_render::gpufx::LumetriOp, dag_unmasked: bool, out: &mut Vec<Step>) {
+    let filmcraft_render::gpufx::LumetriOp {
+        input_lut,
+        look_lut,
+        gains,
+        exposure,
+        contrast,
+        pivot,
+        color_boost,
+        midtone_detail,
+        midtone_rx,
+        midtone_ry,
+        primary_hue,
+        hl,
+        sh,
+        wh,
+        bl,
+        sat,
+        creative_on,
+        faded,
+        vib,
+        st,
+        ht,
+        vignette_on,
+        va,
+        vmid,
+        vround,
+        vfeather,
+        aspect,
+        look,
+        look_k,
+        sharpen,
+        sharpen_rx,
+        sharpen_ry,
+        wheels_on,
+        grade_model,
+        ws,
+        wm,
+        wh_rgb,
+        wo,
+        ls,
+        lm,
+        lh,
+        lo,
+        log_wheels,
+        hdr_wheels,
+        rgb_mixer,
+        cst,
+        sizing,
+        curves,
+        low_soft,
+        high_soft,
+        color_slice,
+        warper,
+        hsl,
+        key_gain,
+        show_mask,
+        node_mask,
+        grade_space,
+        hdr_specular,
+        ..
+    } = op;
+
+    let is_node_key = hsl.as_ref().is_some_and(|h| h.key_scope == 0);
+    let is_legacy_sec = hsl.as_ref().is_some_and(|h| h.key_scope == 1);
+    let node_highlight = if !dag_unmasked && !is_legacy_sec && (is_node_key || node_mask.is_some()) { *show_mask } else { 0 };
+    let need_outer_blend = !dag_unmasked && (is_node_key || node_mask.is_some() || *key_gain < 0.9999 || node_highlight > 0);
+    let start_idx = out.len();
+
+    if !dag_unmasked
+        && is_node_key
+        && let Some(hsl) = hsl
+    {
+        push_qualifier_refine_steps(hsl, out);
+        let mut finish =
+            step(OP_NODE_KEY_FINISH, [u32::from(node_mask.is_some()), 1, 0, 0], &[hsl.clean_black, hsl.clean_white, f32::from(hsl.invert_key), *key_gain]);
+        finish.preserve_orig = true;
+        finish.save_key = true;
+        finish.mask = node_mask.clone();
+        out.push(finish);
+        let mut restore = step(OP_RESTORE_ORIG, [0; 4], &[]);
+        restore.combine = true;
+        out.push(restore);
+    }
+
+    if let Some(lut) = input_lut {
+        let mut s = step(
+            OP_LUT_3D,
+            [lut.size as u32, 0, 0, 0],
+            &[lut.domain_min[0], lut.domain_min[1], lut.domain_min[2], 1.0, lut.domain_max[0], lut.domain_max[1], lut.domain_max[2], 0.0],
+        );
+        s.lut = Some(lut.clone());
+        out.push(s);
+    }
+
+    let ge = [gains[0] * exposure, gains[1] * exposure, gains[2] * exposure];
+    let b0 = -bl * 0.15;
+    let w0 = 1.0 - wh * 0.15;
+    let sh_k = sh * 0.35;
+    let hl_k = hl * 0.35;
+    let vround_aspect = filmcraft_render::gpufx::lumetri_vignette_aspect(*aspect, *vround);
+    let st_k = [(st[0] - 0.5) * 0.3, (st[1] - 0.5) * 0.3, (st[2] - 0.5) * 0.3];
+    let ht_k = [(ht[0] - 0.5) * 0.3, (ht[1] - 0.5) * 0.3, (ht[2] - 0.5) * 0.3];
+
+    let (hdr_mode, hdr_a, hdr_b) = match grade_space {
+        filmcraft_color::GradeSpace::Sdr => (0u32, 0.0f32, 0.0f32),
+        filmcraft_color::GradeSpace::Pq { norm, .. } => (1u32, *norm, 0.0f32),
+        filmcraft_color::GradeSpace::Hlg { white, gamma } => (2u32, *white, *gamma),
+    };
+    let p = [
+        ge[0],
+        ge[1],
+        ge[2],
+        b0,
+        w0,
+        sh_k,
+        hl_k,
+        *contrast,
+        *faded,
+        *sat,
+        *vib,
+        *va,
+        *vmid,
+        *vfeather,
+        vround_aspect,
+        *pivot,
+        st_k[0],
+        st_k[1],
+        st_k[2],
+        *color_boost,
+        ht_k[0],
+        ht_k[1],
+        ht_k[2],
+        *primary_hue,
+        hdr_a,
+        hdr_b,
+        *hdr_specular,
+        0.0,
+    ];
+    out.push(step(OP_LUMETRI, [*creative_on as u32, *vignette_on as u32, hdr_mode, 0], &p));
+
+    if let Some(lut) = look_lut {
+        if look_k.abs() > 1e-5 {
+            let mut s = step(
+                OP_LUT_3D,
+                [lut.size as u32, 0, 0, 0],
+                &[lut.domain_min[0], lut.domain_min[1], lut.domain_min[2], *look_k, lut.domain_max[0], lut.domain_max[1], lut.domain_max[2], 0.0],
+            );
+            s.lut = Some(lut.clone());
+            out.push(s);
+        }
+    } else if *look > 0 && *look <= 8 && look_k.abs() > 1e-5 {
+        out.push(step(OP_LUMETRI_LOOK, [*look, 0, 0, 0], &[*look_k]));
+    }
+
+    let lift_k = [ws[0] * 0.3 + ls * 0.3, ws[1] * 0.3 + ls * 0.3, ws[2] * 0.3 + ls * 0.3];
+    let gamma_k = [wm[0] * 0.3 + lm * 0.3, wm[1] * 0.3 + lm * 0.3, wm[2] * 0.3 + lm * 0.3];
+    let gain_k = [wh_rgb[0] * 0.5 + lh * 0.5, wh_rgb[1] * 0.5 + lh * 0.5, wh_rgb[2] * 0.5 + lh * 0.5];
+    let offset_k = [wo[0] * 0.3 + lo * 0.3, wo[1] * 0.3 + lo * 0.3, wo[2] * 0.3 + lo * 0.3];
+    let wheels_active = *wheels_on && lift_k.iter().chain(&gamma_k).chain(&gain_k).chain(&offset_k).any(|v| v.abs() > 1e-5);
+    if wheels_active {
+        let wheels_p = [
+            lift_k[0],
+            lift_k[1],
+            lift_k[2],
+            0.0,
+            gamma_k[0],
+            gamma_k[1],
+            gamma_k[2],
+            0.0,
+            gain_k[0],
+            gain_k[1],
+            gain_k[2],
+            0.0,
+            offset_k[0],
+            offset_k[1],
+            offset_k[2],
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        out.push(step(OP_COLOR_WHEELS, [*grade_model, 0, 0, 0], &wheels_p));
+    }
+
+    if let Some(lw) = log_wheels.as_deref() {
+        let log_p = [
+            lw.shadows[0],
+            lw.shadows[1],
+            lw.shadows[2],
+            lw.low_range,
+            lw.midtones[0],
+            lw.midtones[1],
+            lw.midtones[2],
+            lw.high_range,
+            lw.highlights[0],
+            lw.highlights[1],
+            lw.highlights[2],
+            0.0,
+            lw.offset[0],
+            lw.offset[1],
+            lw.offset[2],
+            0.0,
+        ];
+        out.push(step(OP_LOG_WHEELS, [0; 4], &log_p));
+    }
+
+    if let Some(hw) = hdr_wheels.as_deref() {
+        let hdr_p = [
+            hw.zones[0][0],
+            hw.zones[0][1],
+            hw.zones[0][2],
+            hw.zones[1][0],
+            hw.zones[1][1],
+            hw.zones[1][2],
+            hw.zones[2][0],
+            hw.zones[2][1],
+            hw.zones[2][2],
+            hw.zones[3][0],
+            hw.zones[3][1],
+            hw.zones[3][2],
+            hw.zones[4][0],
+            hw.zones[4][1],
+            hw.zones[4][2],
+            hw.zones[5][0],
+            hw.zones[5][1],
+            hw.zones[5][2],
+            hw.global[0],
+            hw.global[1],
+            hw.global[2],
+            hw.sigma,
+            hw.wheel_range,
+            0.0,
+        ];
+        out.push(step(OP_HDR_WHEELS, [0; 4], &hdr_p));
+    }
+
+    if let Some(rm) = rgb_mixer.as_deref() {
+        let mix_p =
+            [rm.mat[0][0], rm.mat[0][1], rm.mat[0][2], 0.0, rm.mat[1][0], rm.mat[1][1], rm.mat[1][2], 0.0, rm.mat[2][0], rm.mat[2][1], rm.mat[2][2], 0.0];
+        out.push(step(OP_RGB_MIXER, [0; 4], &mix_p));
+    }
+
+    let active_mask = curves.as_ref().map_or(0, |ct| ct.active_mask);
+    if active_mask != 0 || *low_soft > 1e-5 || *high_soft > 1e-5 {
+        let mut s = step(OP_LUMETRI_CURVES, [active_mask, 0, 0, 0], &[*low_soft, *high_soft]);
+        s.curves = curves.clone();
+        out.push(s);
+    }
+
+    if let Some(cs) = color_slice {
+        let mut p = [0.0f32; 24];
+        for (i, band) in cs.0.iter().enumerate() {
+            p[i * 3] = band[0];
+            p[i * 3 + 1] = band[1];
+            p[i * 3 + 2] = band[2];
+        }
+        out.push(step(OP_COLOR_SLICE, [0; 4], &p));
+    }
+
+    if let Some(cw) = warper
+        && cw.active_mask != 0
+    {
+        let mut s = step(OP_COLOR_WARPER, [cw.active_mask, 0, 0, 0], &[]);
+        s.warper = Some(cw.clone());
+        out.push(s);
+    }
+
+    if let Some(c) = cst.as_deref() {
+        let p = [
+            c.mat[0][0],
+            c.mat[0][1],
+            c.mat[0][2],
+            c.out_luma[0],
+            c.mat[1][0],
+            c.mat[1][1],
+            c.mat[1][2],
+            c.out_luma[1],
+            c.mat[2][0],
+            c.mat[2][1],
+            c.mat[2][2],
+            c.out_luma[2],
+            c.src_peak_nits,
+            c.dst_peak_nits,
+            0.0,
+            0.0,
+        ];
+        out.push(step(OP_CST, [c.in_gamma, c.out_gamma, c.tone_map, c.gamut_map], &p));
+    }
+
+    if let Some(sz) = sizing.as_deref() {
+        let p = [sz.pan, sz.tilt, sz.zoom_inv, sz.cos_r, sz.width_inv, sz.height_inv, sz.sin_r, sz.blanking_aspect];
+        out.push(step(OP_NODE_SIZING, [u32::from(sz.flip_h), u32::from(sz.flip_v), 0, 0], &p));
+    }
+
+    if is_node_key
+        && let Some(hsl) = hsl
+        && (hsl.htemp.abs() > 1e-4 || hsl.htint.abs() > 1e-4 || (hsl.hsat - 1.0).abs() > 1e-4 || hsl.hshift.abs() > 1e-4)
+    {
+        out.push(step(OP_HSL_APPLY, [0, 1, 0, 0], &[hsl.htemp, hsl.htint, hsl.hsat, hsl.hshift]));
+    } else if !is_node_key && let Some(hsl) = hsl {
+        push_qualifier_refine_steps(hsl, out);
+        if hsl.clean_black > 1e-4 || hsl.clean_white > 1e-4 || hsl.invert_key {
+            let mut finish = step(OP_NODE_KEY_FINISH, [0, 1, 0, 0], &[hsl.clean_black, hsl.clean_white, f32::from(hsl.invert_key), 1.0]);
+            finish.preserve_orig = true;
+            out.push(finish);
+        }
+        let mut apply_step = step(OP_HSL_APPLY, [hsl.show_mask, 0, 0, 0], &[hsl.htemp, hsl.htint, hsl.hsat, hsl.hshift]);
+        apply_step.combine = true;
+        out.push(apply_step);
+    }
+
+    if midtone_detail.abs() > 1e-3 && !midtone_rx.is_empty() {
+        let start = out.len();
+        boxes(midtone_rx, false, true, out);
+        boxes(midtone_ry, true, true, out);
+        for s in &mut out[start..] {
+            s.preserve_orig = true;
+        }
+        let mut s = step(OP_MIDTONE_DETAIL, [0; 4], &[*midtone_detail]);
+        s.combine = true;
+        out.push(s);
+    }
+
+    if sharpen.abs() > 1e-3 && !sharpen_rx.is_empty() {
+        let start = out.len();
+        boxes(sharpen_rx, false, true, out);
+        boxes(sharpen_ry, true, true, out);
+        for s in &mut out[start..] {
+            s.preserve_orig = true;
+        }
+        let mut s = step(OP_UNSHARP, [0; 4], &[sharpen.max(-1.0), 0.0]);
+        s.combine = true;
+        out.push(s);
+    }
+
+    if need_outer_blend {
+        if let Some(first) = out.get_mut(start_idx) {
+            first.mask_save = true;
+        }
+        let mut mix_step =
+            step(OP_NODE_KEY_MIX, [node_highlight, u32::from(is_node_key || node_mask.is_some()), 0, 0], &[if is_node_key { 1.0 } else { *key_gain }]);
+        mix_step.mask_mix = true;
+        mix_step.use_key = is_node_key;
+        if !is_node_key {
+            mix_step.mask = node_mask.clone();
+        }
+        out.push(mix_step);
+    }
+}
+
+#[allow(clippy::cognitive_complexity)]
+fn push_color_dag_steps(dag: &filmcraft_render::color_graph::ColorDagOp, out: &mut Vec<Step>) {
+    use filmcraft_project::{LayerBlendMode, SplitSpace};
+    use filmcraft_render::color_graph::{DagInstr, MAX_DAG_SLOTS};
+
+    let dag_start = out.len();
+    // Temporary key register when a Corrector needs a key mix but does not export an `out_key` slot.
+    let scratch_key_slot = (dag.num_slots as usize).min(MAX_DAG_SLOTS - 1) as u8;
+
+    for instr in &dag.instrs {
+        match instr {
+            DagInstr::Corrector { in_rgb, in_key, out_rgb, out_key, op, key_input_gain, key_output_gain, key_invert } => {
+                let is_node_key = op.hsl.as_ref().is_some_and(|h| h.key_scope == 0);
+                let is_legacy_sec = op.hsl.as_ref().is_some_and(|h| h.key_scope == 1);
+                let has_local_mask = is_node_key || op.node_mask.is_some();
+                let need_key = out_key.is_some()
+                    || has_local_mask
+                    || in_key.is_some()
+                    || *key_invert
+                    || (*key_output_gain * op.key_gain) < 0.9999
+                    || (!is_legacy_sec && op.show_mask > 0);
+                let key_slot = out_key.unwrap_or(scratch_key_slot);
+
+                if need_key {
+                    let k_start = out.len();
+                    let (clean_b, clean_w, hsl_inv) = if is_node_key && let Some(hsl) = op.hsl.as_deref() {
+                        push_qualifier_refine_steps(hsl, out);
+                        (hsl.clean_black, hsl.clean_white, hsl.invert_key)
+                    } else {
+                        (0.0, 0.0, false)
+                    };
+                    for s in &mut out[k_start..] {
+                        s.preserve_orig = false;
+                    }
+                    let inv_edge = in_key.is_some_and(|(_, inv)| inv);
+                    let in_gain = key_input_gain.clamp(0.0, 2.0);
+                    let out_gain = (*key_output_gain * op.key_gain).clamp(0.0, 1.0);
+                    let mut k_comb = step(
+                        OP_DAG_KEY_COMBINE,
+                        [u32::from(is_node_key), u32::from(op.node_mask.is_some()), u32::from(in_key.is_some()), u32::from(inv_edge)],
+                        &[clean_b, clean_w, f32::from(hsl_inv), in_gain, out_gain, f32::from(*key_invert)],
+                    );
+                    k_comb.mask = op.node_mask.clone();
+                    k_comb.dag_aux = in_key.map(|(ks, _)| ks);
+                    k_comb.dag_save = Some(key_slot);
+                    out.push(k_comb);
+                    if let Some(first_k) = out.get_mut(k_start) {
+                        first_k.dag_load_cur = Some(*in_rgb);
+                    }
+                }
+
+                let rgb_start = out.len();
+                push_lumetri_steps(op, true, out);
+                if let Some(first_rgb) = out.get_mut(rgb_start) {
+                    first_rgb.dag_load_cur = Some(*in_rgb);
+                }
+
+                if need_key {
+                    let show_mask = if !is_legacy_sec { op.show_mask } else { 0 };
+                    let mut mix_s = step(OP_NODE_KEY_MIX, [show_mask, 1, 0, 0], &[1.0]);
+                    mix_s.dag_aux = Some(*in_rgb);
+                    mix_s.dag_mask = Some(key_slot);
+                    mix_s.dag_save = Some(*out_rgb);
+                    out.push(mix_s);
+                } else if let Some(last_rgb) = out.last_mut() {
+                    last_rgb.dag_save = Some(*out_rgb);
+                }
+            }
+            DagInstr::ParallelCombine { base_rgb, branches, out_rgb } => {
+                let Some(&first) = branches.first() else { continue };
+                let p_start = out.len();
+                for (idx, &b_slot) in branches.iter().enumerate().skip(1) {
+                    let w_branch = 1.0 / (idx + 1) as f32;
+                    let mut s = step(OP_DAG_PARALLEL, [u32::from(base_rgb.is_some()), 0, 0, 0], &[w_branch]);
+                    s.dag_aux = Some(b_slot);
+                    s.dag_mask = *base_rgb;
+                    out.push(s);
+                }
+                if let Some(first_s) = out.get_mut(p_start) {
+                    first_s.dag_load_cur = Some(first);
+                }
+                if let Some(last_s) = out.last_mut() {
+                    last_s.dag_save = Some(*out_rgb);
+                }
+            }
+            DagInstr::LayerComposite { branches, out_rgb } => {
+                let Some(&(first_rgb, _, _, _)) = branches.first() else { continue };
+                let l_start = out.len();
+                for &(top_rgb, top_key, mode, gain) in branches.iter().skip(1) {
+                    let mode_code = match mode {
+                        LayerBlendMode::Normal => 0,
+                        LayerBlendMode::Multiply => 1,
+                        LayerBlendMode::Screen => 2,
+                        LayerBlendMode::Overlay => 3,
+                        LayerBlendMode::SoftLight => 4,
+                        LayerBlendMode::HardLight => 5,
+                        LayerBlendMode::Add => 6,
+                        LayerBlendMode::Subtract => 7,
+                        LayerBlendMode::Darken => 8,
+                        LayerBlendMode::Lighten => 9,
+                        LayerBlendMode::Color => 10,
+                        LayerBlendMode::Luminosity => 11,
+                    };
+                    let inv_k = top_key.is_some_and(|(_, inv)| inv);
+                    let mut s = step(OP_DAG_LAYER, [mode_code, u32::from(top_key.is_some()), u32::from(inv_k), 0], &[gain]);
+                    s.dag_aux = Some(top_rgb);
+                    s.dag_mask = top_key.map(|(ks, _)| ks);
+                    out.push(s);
+                }
+                if let Some(first_s) = out.get_mut(l_start) {
+                    first_s.dag_load_cur = Some(first_rgb);
+                }
+                if let Some(last_s) = out.last_mut() {
+                    last_s.dag_save = Some(*out_rgb);
+                }
+            }
+            DagInstr::SplitChannel { in_rgb, space, channel, out_rgb } => {
+                let sp = match space {
+                    SplitSpace::Rgb => 0,
+                    SplitSpace::YCbCr => 1,
+                    SplitSpace::Hsl => 2,
+                };
+                let mut s = step(OP_DAG_SPLIT, [sp, u32::from(*channel), 0, 0], &[]);
+                s.dag_load_cur = Some(*in_rgb);
+                s.dag_save = Some(*out_rgb);
+                out.push(s);
+            }
+            DagInstr::CombineChannels { in_ch, space, out_rgb } => {
+                let sp = match space {
+                    SplitSpace::Rgb => 0,
+                    SplitSpace::YCbCr => 1,
+                    SplitSpace::Hsl => 2,
+                };
+                let mut s = step(OP_DAG_COMBINE, [sp, 0, 0, 0], &[]);
+                s.dag_load_cur = Some(in_ch[0]);
+                s.dag_aux = Some(in_ch[1]);
+                s.dag_mask = Some(in_ch[2]);
+                s.dag_save = Some(*out_rgb);
+                out.push(s);
+            }
+        }
+    }
+    if let Some(first) = out.get_mut(dag_start) {
+        first.dag_save_zero = true;
+    }
+    if let Some(last) = out.last_mut() {
+        last.dag_final_cur = Some(dag.out_rgb);
+    }
+}
+
+fn push_qualifier_refine_steps(hsl: &filmcraft_render::gpufx::HslSecondaryParams, out: &mut Vec<Step>) {
+    let sample_count = hsl.samples_3d.len().min(64) as u32;
+    let p = [
+        hsl.hc,
+        hsl.hr,
+        hsl.smin,
+        hsl.smax,
+        hsl.lmin,
+        hsl.lmax,
+        hsl.soft,
+        hsl.sat_soft,
+        hsl.luma_soft,
+        hsl.rgb_min[0],
+        hsl.rgb_min[1],
+        hsl.rgb_min[2],
+        hsl.rgb_max[0],
+        hsl.rgb_max[1],
+        hsl.rgb_max[2],
+        hsl.rgb_soft,
+    ];
+    let mut key_step = step(OP_HSL_KEY, [hsl.mode, sample_count, 0, 0], &p);
+    key_step.preserve_orig = true;
+    if hsl.mode == 3 && !hsl.samples_3d.is_empty() {
+        key_step.samples_3d = Some(hsl.samples_3d.clone());
+    }
+    out.push(key_step);
+    if hsl.denoise > 0.0 && hsl.denoise_r > 0 {
+        let mut med_step = step(OP_HSL_MEDIAN, [hsl.denoise_r, 0, 0, 0], &[hsl.denoise]);
+        med_step.preserve_orig = true;
+        out.push(med_step);
+    }
+    if hsl.in_out.abs() > 1e-3 && hsl.in_out_r > 0 {
+        let mut morph_step = step(OP_HSL_MORPH, [hsl.in_out_r, u32::from(hsl.in_out > 0.0), 0, 0], &[hsl.in_out.abs().min(1.0)]);
+        morph_step.preserve_orig = true;
+        out.push(morph_step);
+    }
+    if !hsl.blur_rx.is_empty() || !hsl.blur_ry.is_empty() {
+        let blur_start = out.len();
+        boxes(&hsl.blur_rx, false, true, out);
+        boxes(&hsl.blur_ry, true, true, out);
+        for bs in &mut out[blur_start..] {
+            bs.preserve_orig = true;
+        }
+    }
 }
 
 impl FxStage {
@@ -564,6 +1018,7 @@ impl FxStage {
             lut_cache: HashMap::new(),
             curve_cache: HashMap::new(),
             mask_cache: HashMap::new(),
+            cache_tick: 0,
             uniform_buffers: Vec::new(),
             uniform_buffer_idx: 0,
             frames: 0,
@@ -579,14 +1034,19 @@ impl FxStage {
         self.pool.clear();
     }
 
+    fn next_cache_tick(&mut self) -> u64 {
+        self.cache_tick = self.cache_tick.wrapping_add(1);
+        self.cache_tick
+    }
+
     fn lut_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, lut: &Arc<filmcraft_color::Lut3d>) -> wgpu::TextureView {
         let key = Arc::as_ptr(lut) as usize;
-        if let Some((_, _, view)) = self.lut_cache.get(&key) {
-            return view.clone();
+        let tick = self.next_cache_tick();
+        if let Some(entry) = self.lut_cache.get_mut(&key) {
+            entry.last_used = tick;
+            return entry.view.clone();
         }
-        if self.lut_cache.len() >= 32 {
-            self.lut_cache.clear();
-        }
+        evict_lru_tex(&mut self.lut_cache, 32);
         let size = lut.size as u32;
         let width = size * size;
         let height = size;
@@ -621,36 +1081,39 @@ impl FxStage {
         queue.write_texture(
             texture.as_image_copy(),
             &texels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(aligned_row_bytes),
-                rows_per_image: Some(height),
-            },
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(aligned_row_bytes), rows_per_image: Some(height) },
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
         let view = texture.create_view(&Default::default());
-        self.lut_cache.insert(key, (lut.clone(), texture, view.clone()));
+        self.lut_cache.insert(key, CachedTex { _keep: lut.clone(), _tex: texture, view: view.clone(), last_used: tick });
         view
     }
 
-    fn curve_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, ct: &LumetriCurveTable) -> wgpu::TextureView {
-        let key = Arc::as_ptr(&ct.texels) as usize;
-        if let Some((_, _, view)) = self.curve_cache.get(&key) {
-            return view.clone();
+    fn rgba32f_table_texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texels: &Arc<Vec<[f32; 4]>>,
+        width: u32,
+        height: u32,
+        label: &'static str,
+    ) -> wgpu::TextureView {
+        let key = Arc::as_ptr(texels) as usize;
+        let tick = self.next_cache_tick();
+        if let Some(entry) = self.curve_cache.get_mut(&key) {
+            entry.last_used = tick;
+            return entry.view.clone();
         }
-        if self.curve_cache.len() >= 32 {
-            self.curve_cache.clear();
-        }
-        let width = LUMETRI_CURVE_LEN as u32;
-        let height = 3u32;
+        evict_lru_tex(&mut self.curve_cache, 64);
+        let w = width as usize;
         let row_bytes = width * 16;
         let aligned_row_bytes = row_bytes.div_ceil(256) * 256;
         let mut bytes = vec![0u8; (aligned_row_bytes * height) as usize];
         for row in 0..height as usize {
             let row_off = row * (aligned_row_bytes as usize);
-            let src_start = row * LUMETRI_CURVE_LEN;
-            for x in 0..LUMETRI_CURVE_LEN {
-                if let Some(c) = ct.texels.get(src_start + x) {
+            let src_start = row * w;
+            for x in 0..w {
+                if let Some(c) = texels.get(src_start + x) {
                     let off = row_off + x * 16;
                     if let Some(dst) = bytes.get_mut(off..off + 16) {
                         dst[0..4].copy_from_slice(&c[0].to_le_bytes());
@@ -662,7 +1125,7 @@ impl FxStage {
             }
         }
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("filmcraft-fx-curves"),
+            label: Some(label),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
@@ -678,18 +1141,31 @@ impl FxStage {
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
         let view = texture.create_view(&Default::default());
-        self.curve_cache.insert(key, (ct.texels.clone(), texture, view.clone()));
+        self.curve_cache.insert(key, CachedTex { _keep: texels.clone(), _tex: texture, view: view.clone(), last_used: tick });
         view
+    }
+
+    fn curve_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, ct: &LumetriCurveTable) -> wgpu::TextureView {
+        self.rgba32f_table_texture(device, queue, &ct.texels, LUMETRI_CURVE_LEN as u32, 3, "filmcraft-fx-curves")
+    }
+
+    fn warper_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, cw: &ColorWarperTable) -> wgpu::TextureView {
+        self.rgba32f_table_texture(device, queue, &cw.texels, CW_LUT_W as u32, CW_LUT_H as u32, "filmcraft-fx-warper")
+    }
+
+    fn samples_3d_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, pts: &Arc<Vec<[f32; 4]>>) -> wgpu::TextureView {
+        let width = pts.len().clamp(1, 64) as u32;
+        self.rgba32f_table_texture(device, queue, pts, width, 1, "filmcraft-fx-3d-samples")
     }
 
     fn mask_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, mask: &MaskCoverage) -> wgpu::TextureView {
         let key = Arc::as_ptr(&mask.cov) as usize;
-        if let Some((_, _, view)) = self.mask_cache.get(&key) {
-            return view.clone();
+        let tick = self.next_cache_tick();
+        if let Some(entry) = self.mask_cache.get_mut(&key) {
+            entry.last_used = tick;
+            return entry.view.clone();
         }
-        if self.mask_cache.len() >= 32 {
-            self.mask_cache.clear();
-        }
+        evict_lru_tex(&mut self.mask_cache, 32);
         let (width, height) = (mask.w.max(1), mask.h.max(1));
         let row_bytes = width * 4;
         let aligned_row_bytes = row_bytes.div_ceil(256) * 256;
@@ -723,7 +1199,7 @@ impl FxStage {
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
         let view = texture.create_view(&Default::default());
-        self.mask_cache.insert(key, (mask.cov.clone(), texture, view.clone()));
+        self.mask_cache.insert(key, CachedTex { _keep: mask.cov.clone(), _tex: texture, view: view.clone(), last_used: tick });
         view
     }
 
@@ -821,6 +1297,7 @@ impl FxStage {
     /// uniforms map the frame onto the working image). None when the working image does not fit
     /// in a texture (the layer is then drawn without its effects — never larger than the source
     /// frame, which would not have uploaded either).
+    #[allow(clippy::cognitive_complexity)]
     pub(crate) fn job(
         &mut self,
         device: &wgpu::Device,
@@ -838,19 +1315,30 @@ impl FxStage {
         let mut n = 2usize;
         let mut sim_orig = false;
         let mut sim_mask_depth = 0usize;
+        let mut sim_key = false;
+        let mut max_dag_slot = 0usize;
         for s in &all {
+            for slot in [s.dag_load_cur, s.dag_aux, s.dag_mask, s.dag_save, s.dag_final_cur].into_iter().flatten() {
+                max_dag_slot = max_dag_slot.max(slot as usize + 1);
+            }
             if (s.preserve_orig || s.combine) && !sim_orig {
                 sim_orig = true;
             }
             if s.mask_save {
                 sim_mask_depth = sim_mask_depth.saturating_add(1);
             }
-            n = n.max(2 + usize::from(sim_orig) + sim_mask_depth);
+            if s.save_key {
+                sim_key = true;
+            }
+            n = n.max(2 + usize::from(sim_orig) + sim_mask_depth + usize::from(sim_key) + max_dag_slot);
             if s.combine {
                 sim_orig = false;
             }
             if s.mask_mix {
                 sim_mask_depth = sim_mask_depth.saturating_sub(1);
+            }
+            if s.use_key {
+                sim_key = false;
             }
         }
         let targets = self.targets(device, (w, h), n);
@@ -859,9 +1347,22 @@ impl FxStage {
         let mut cur = 0usize;
         // Preserved original for two-stage effects (Unsharp Mask, HSL Secondary).
         let mut orig: Option<usize> = None;
+        // Saved key matte produced by `OP_NODE_KEY_FINISH` before Lumetri RGB passes.
+        let mut saved_key: Option<usize> = None;
         // Saved originals before masked effects (Power Windows / effect masks).
         let mut mask_stack: Vec<usize> = Vec::new();
+        // Virtual register file for non-linear ColorDag execution.
+        let mut dag_regs: [Option<usize>; filmcraft_render::color_graph::MAX_DAG_SLOTS] = [None; filmcraft_render::color_graph::MAX_DAG_SLOTS];
         for s in &all {
+            if s.dag_save_zero {
+                dag_regs = [None; filmcraft_render::color_graph::MAX_DAG_SLOTS];
+                dag_regs[0] = Some(cur);
+            }
+            if let Some(slot) = s.dag_load_cur
+                && let Some(reg_tex) = dag_regs.get(slot as usize).copied().flatten()
+            {
+                cur = reg_tex;
+            }
             if s.mask_save {
                 mask_stack.push(cur);
             }
@@ -869,22 +1370,39 @@ impl FxStage {
                 orig = Some(cur);
             }
             let keep_orig = if s.preserve_orig || s.combine { orig } else { None };
-            let dst = (0..n).find(|k| *k != cur && Some(*k) != keep_orig && !mask_stack.contains(k))?;
+            let dst =
+                (0..n).find(|k| *k != cur && Some(*k) != keep_orig && Some(*k) != saved_key && !mask_stack.contains(k) && !dag_regs.contains(&Some(*k)))?;
             let kernel = (!s.kernel.is_empty()).then(|| kernel_texture(device, queue, &s.kernel));
             let lut_tex = s.lut.as_ref().map(|l| self.lut_texture(device, queue, l));
-            let curve_tex = s.curves.as_ref().map(|c| self.curve_texture(device, queue, c));
-            let mask_tex_view = s.mask.as_ref().map(|m| self.mask_texture(device, queue, m));
+            let curve_tex = s
+                .curves
+                .as_ref()
+                .map(|c| self.curve_texture(device, queue, c))
+                .or_else(|| s.warper.as_ref().map(|cw| self.warper_texture(device, queue, cw)))
+                .or_else(|| s.samples_3d.as_ref().map(|pts| self.samples_3d_texture(device, queue, pts)));
+            let mask_tex_view = if let Some(ms) = s.dag_mask {
+                dag_regs.get(ms as usize).copied().flatten().and_then(|ti| views.get(ti).cloned())
+            } else if s.use_key {
+                saved_key.take().and_then(|ki| views.get(ki).cloned())
+            } else {
+                s.mask.as_ref().map(|m| self.mask_texture(device, queue, m))
+            };
             let mask_orig = if s.mask_mix { mask_stack.pop() } else { None };
-            let aux = match (s.mask_mix, mask_orig, s.combine, orig, &kernel, &lut_tex, &curve_tex) {
-                (true, Some(mo), _, _, _, _, _) => views.get(mo)?,
-                (_, _, true, Some(o), _, _, _) => views.get(o)?,
-                (_, _, _, _, Some(k), _, _) => k,
-                (_, _, _, _, _, Some(lt), _) => lt,
-                (_, _, _, _, _, _, Some(ct)) => ct,
-                _ => dummy,
+            let dag_aux_tex = s.dag_aux.and_then(|aslot| dag_regs.get(aslot as usize).copied().flatten());
+            let aux = if let Some(at) = dag_aux_tex {
+                views.get(at)?
+            } else {
+                match (s.mask_mix, mask_orig, s.combine, orig, &kernel, &lut_tex, &curve_tex) {
+                    (true, Some(mo), _, _, _, _, _) => views.get(mo)?,
+                    (_, _, true, Some(o), _, _, _) => views.get(o)?,
+                    (_, _, _, _, Some(k), _, _) => k,
+                    (_, _, _, _, _, Some(lt), _) => lt,
+                    (_, _, _, _, _, _, Some(ct)) => ct,
+                    _ => dummy,
+                }
             };
             let mask_view = mask_tex_view.as_ref().unwrap_or(dummy);
-            let mut bytes = Vec::with_capacity(128);
+            let mut bytes = Vec::with_capacity(144);
             for v in [s.code, w, h, 0].iter().chain(&s.i1) {
                 bytes.extend_from_slice(&v.to_le_bytes());
             }
@@ -911,8 +1429,21 @@ impl FxStage {
             };
             dispatches.push(Dispatch { run: s.run, bg, groups });
             cur = dst;
+            if s.save_key {
+                saved_key = Some(cur);
+            }
             if s.combine {
                 orig = None;
+            }
+            if let Some(slot) = s.dag_save
+                && let Some(reg) = dag_regs.get_mut(slot as usize)
+            {
+                *reg = Some(cur);
+            }
+            if let Some(slot) = s.dag_final_cur
+                && let Some(reg_tex) = dag_regs.get(slot as usize).copied().flatten()
+            {
+                cur = reg_tex;
             }
         }
         Some(FxJob {

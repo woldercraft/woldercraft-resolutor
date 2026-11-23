@@ -18,10 +18,7 @@ pub const GITHUB: &str = "https://github.com/woldercraft/woldercraft-resolutor";
 pub const ISSUES: &str = "https://github.com/woldercraft/woldercraft-resolutor/issues";
 
 /// (command id, label, url) for every link, in menu order.
-pub const ALL: [(&str, &str, &str); 2] = [
-    ("help.github", "Resolutor on GitHub", GITHUB),
-    ("help.reportIssue", "Report an Issue…", ISSUES),
-];
+pub const ALL: [(&str, &str, &str); 2] = [("help.github", "Resolutor on GitHub", GITHUB), ("help.reportIssue", "Report an Issue…", ISSUES)];
 
 /// A link the web browser couldn't open (`ui.failedLink`): the address and the reason.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]

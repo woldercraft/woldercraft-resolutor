@@ -348,8 +348,8 @@ pub fn specs() -> Vec<EffectSpec> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::{EffectEnv, EffectHost, LayerPixels, run_fx};
     use crate::effectcraft_raster::Image;
+    use crate::{EffectEnv, EffectHost, LayerPixels, run_fx};
 
     /// A host that knows one other layer (id 7).
     pub(crate) struct FakeHost(pub Image);

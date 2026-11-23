@@ -97,12 +97,21 @@ struct Fixture {
 fn fixture() -> Fixture {
     let mut p = Project::default();
     let comp = Comp::new(64, 64, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
-    let solid =
-        p.add_item("Solid", crate::effectcraft_color::Label::None, None, ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: 64, height: 64, pixel_aspect: 1.0 }));
+    let solid = p.add_item(
+        "Solid",
+        crate::effectcraft_color::Label::None,
+        None,
+        ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: 64, height: 64, pixel_aspect: 1.0 }),
+    );
     let main = p.add_item("Main", crate::effectcraft_color::Label::None, None, ItemKind::Comp(comp.clone().into()));
     let other = p.add_item("Other", crate::effectcraft_color::Label::None, None, ItemKind::Comp(comp.clone().into()));
     let third = p.add_item("Third", crate::effectcraft_color::Label::None, None, ItemKind::Comp(comp.clone().into()));
-    let unused = p.add_item("unused.png", crate::effectcraft_color::Label::None, None, ItemKind::Footage(crate::effectcraft_project::Footage { has_video: true, ..Default::default() }));
+    let unused = p.add_item(
+        "unused.png",
+        crate::effectcraft_color::Label::None,
+        None,
+        ItemKind::Footage(crate::effectcraft_project::Footage { has_video: true, ..Default::default() }),
+    );
     for c in [main, other] {
         let l = build::layer(&mut p, &comp, "S", LayerSource::Solid { item: solid }, (64, 64), None);
         p.comp_mut(c).unwrap().layers.push(l);

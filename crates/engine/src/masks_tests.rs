@@ -345,13 +345,18 @@ fn rounded_rectangle_masks_cut_their_corners() {
     let r = s.execute("masks.roundCorners", json!({"radius": 200})).unwrap();
     assert_eq!(r["corners"], 4);
     assert_eq!(s.render_program(0.25).unwrap().px, img.px, "rounding afterwards = creating rounded");
-    // nothing left to round; bad radii are refused without changing the mask
-    assert!(s.execute("masks.roundCorners", json!({"radius": 50})).is_err());
-    for radius in [json!(0), json!(-5), json!("big"), json!(null)] {
+    // re-editable corner radius: re-rounding to 50 and back to 0 updates without failing;
+    // bad radii are refused without changing the mask
+    assert_eq!(s.execute("masks.roundCorners", json!({"radius": 50})).unwrap()["corners"], 4);
+    assert_eq!(s.execute("masks.roundCorners", json!({"radius": 0})).unwrap()["corners"], 4);
+    assert_eq!(s.render_program(0.25).unwrap().px, sharp.px, "radius 0 restores sharp corners");
+    for radius in [json!(-5), json!("big"), json!(null)] {
         assert!(s.execute("masks.roundCorners", json!({"radius": radius})).is_err(), "{radius}");
     }
     s.undo();
-    assert_eq!(s.render_program(0.25).unwrap().px, sharp.px, "one undo step restores the sharp corners");
+    s.undo();
+    s.undo();
+    assert_eq!(s.render_program(0.25).unwrap().px, sharp.px, "undo restores the sharp corners");
 }
 
 #[test]
@@ -517,4 +522,31 @@ fn every_project_replacing_path_drops_pending_tracking_jobs() {
         assert!(!project.contains("pathKeyframes") && !project.to_lowercase().contains("\"masks\":[{"), "{path}: stale mask data");
     }
     let _ = std::fs::remove_file(&tpl);
+}
+
+#[test]
+fn power_windows_hexagon_gradient_and_feather_balance() {
+    let (mut s, clip) = demo();
+    s.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"})).unwrap();
+
+    // 6-sided polygon Power Window + feather_balance
+    s.execute("masks.add", json!({"clip": clip.0, "effect": "lumetri", "shape": "hexagon"})).unwrap();
+    s.execute("masks.set", json!({"clip": clip.0, "effect": "lumetri", "mask": 0, "feather_balance": -75.0})).unwrap();
+
+    // Linear Gradient Power Window + moving its end vertex
+    s.execute("masks.add", json!({"clip": clip.0, "effect": "lumetri", "shape": "gradient"})).unwrap();
+    s.execute("masks.moveVertex", json!({"clip": clip.0, "effect": "lumetri", "mask": 1, "vertex": 1, "to": [100.0, 200.0]})).unwrap();
+
+    let (_, it) = s.active_sequence().unwrap().find_item(clip).unwrap();
+    let lum = it.effects.iter().find(|e| e.effect == "lumetri").unwrap();
+    assert_eq!(lum.masks.len(), 2);
+    assert_eq!(lum.masks[0].kind, filmcraft_project::MaskKind::Path);
+    assert_eq!(lum.masks[0].path_at(Tick(0)).vertices.len(), 6);
+    assert!((lum.masks[0].feather_balance.f64_at(Tick(0)) - (-75.0)).abs() < 1e-6);
+
+    assert_eq!(lum.masks[1].kind, filmcraft_project::MaskKind::Gradient);
+    let gpath = lum.masks[1].path_at(Tick(0));
+    assert_eq!(gpath.vertices.len(), 2);
+    assert!((gpath.vertices[1].p.x - 100.0).abs() < 1e-6);
+    assert!((gpath.vertices[1].p.y - 200.0).abs() < 1e-6);
 }

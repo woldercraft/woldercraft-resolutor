@@ -10,11 +10,11 @@
 //!
 //! The FFI is in [`ffi`] (declarations) and `va` (calls); the rest of this module is safe code.
 
+#[cfg(target_os = "linux")]
+pub mod export;
 pub mod ffi;
 pub mod h264;
 pub mod hevc;
-#[cfg(target_os = "linux")]
-pub mod export;
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 pub mod va;

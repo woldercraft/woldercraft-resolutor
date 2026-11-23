@@ -54,11 +54,20 @@ pub enum PanelKind {
     ColorQualifier,
     ColorCreative,
     ColorVignette,
+    ColorSlice,
+    ColorWarper,
+    ColorRgbMixer,
+    ColorCst,
+    ColorSizing,
+    ColorGallery,
     VfxNodes,
+    VfxInspector,
+    VfxKeyframes,
+    Custom(u8),
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 42] = [
+    pub const ALL: [PanelKind; 50] = [
         PanelKind::Project,
         PanelKind::MediaBrowser,
         PanelKind::Libraries,
@@ -100,7 +109,15 @@ impl PanelKind {
         PanelKind::ColorQualifier,
         PanelKind::ColorCreative,
         PanelKind::ColorVignette,
+        PanelKind::ColorSlice,
+        PanelKind::ColorWarper,
+        PanelKind::ColorRgbMixer,
+        PanelKind::ColorCst,
+        PanelKind::ColorSizing,
+        PanelKind::ColorGallery,
         PanelKind::VfxNodes,
+        PanelKind::VfxInspector,
+        PanelKind::VfxKeyframes,
     ];
     pub fn title(self) -> &'static str {
         match self {
@@ -145,14 +162,31 @@ impl PanelKind {
             PanelKind::ColorQualifier => "Qualifier",
             PanelKind::ColorCreative => "Creative & LUTs",
             PanelKind::ColorVignette => "Vignette",
+            PanelKind::ColorSlice => "ColorSlice",
+            PanelKind::ColorWarper => "Color Warper",
+            PanelKind::ColorRgbMixer => "RGB Mixer",
+            PanelKind::ColorCst => "CST",
+            PanelKind::ColorSizing => "Sizing",
+            PanelKind::ColorGallery => "Gallery",
             PanelKind::VfxNodes => "VFX Nodes",
+            PanelKind::VfxInspector => "VFX Inspector",
+            PanelKind::VfxKeyframes => "VFX Keyframes",
+            PanelKind::Custom(_) => "Custom Panel",
         }
     }
     pub fn id(self) -> String {
-        format!("{self:?}")
+        match self {
+            Self::Custom(n) => format!("Custom{n}"),
+            _ => format!("{self:?}"),
+        }
     }
     pub fn from_name(s: &str) -> Option<PanelKind> {
         let n = s.to_ascii_lowercase().replace([' ', '_', '-'], "");
+        if let Some(rest) = n.strip_prefix("custom")
+            && let Ok(slot) = rest.parse::<u8>()
+        {
+            return Some(PanelKind::Custom(slot));
+        }
         if n == "colorgrade" || n == "lumetricolor" {
             return Some(PanelKind::LumetriColor);
         }
@@ -193,11 +227,25 @@ fn vsplit(size: SplitSize, a: Node<PanelKind>, b: Node<PanelKind>) -> Node<Panel
     Node::Split { axis: SplitAxis::Vertical, size, first: Box::new(a), second: Box::new(b) }
 }
 
-pub const WORKSPACES: [&str; 10] =
-    ["Editing", "Assembly", "Color", "Effects", "Audio", "Captions and Graphics", "Vertical", "Learning", "Review", "All Panels"];
+pub const WORKSPACES: [&str; 11] = [
+    "Editing",
+    "Assembly",
+    "Color",
+    "Effects",
+    "Effects (Premiere)",
+    "Audio",
+    "Captions and Graphics",
+    "Vertical",
+    "Learning",
+    "Review",
+    "All Panels",
+];
 
 /// The user's workspaces file, beside `preferences.json` in the data directory.
 pub const WORKSPACES_FILE: &str = "workspaces.json";
+
+/// Independent user layout presets (top-bar preset menu), beside `preferences.json`.
+pub const HEADER_PRESETS_FILE: &str = "layout_presets.json";
 
 /// Window ▸ Workspaces: the user's own workspaces and saved changes to the built-in ones, and the
 /// workspace in use (reopened at launch).
@@ -305,6 +353,31 @@ pub fn saved_workspace(prefs: &WorkspacePrefs, name: &str) -> Workspace {
 /// The saved layout of a workspace (see [`saved_workspace`]).
 pub fn saved_docking(prefs: &WorkspacePrefs, name: &str) -> Layout {
     saved_workspace(prefs, name).layout
+}
+
+/// Independent user layout presets in alphabetical order (empty by default, no built-ins).
+pub fn preset_names(prefs: &WorkspacePrefs) -> Vec<String> {
+    let mut v: Vec<String> = prefs.saved.iter().map(|s| s.name.clone()).collect();
+    v.sort_by_key(|n| n.to_lowercase());
+    v.dedup();
+    v
+}
+
+/// Find a user layout preset by name (case- and space-insensitive).
+pub fn find_preset(prefs: &WorkspacePrefs, query: &str) -> Option<String> {
+    preset_names(prefs).into_iter().find(|n| slug(n) == slug(query))
+}
+
+/// Load a saved user layout preset if it exists and validates.
+pub fn saved_preset_docking(prefs: &WorkspacePrefs, name: &str) -> Option<Layout> {
+    let saved = prefs.saved.iter().find(|saved| saved.name == name)?;
+    let workspace = if saved.workspace.is_null() {
+        Workspace::new(legacy::layout(&saved.layout, &saved.floating)?)
+    } else {
+        serde_json::from_value::<Workspace>(saved.workspace.clone()).ok()?
+    };
+    workspace.validate().ok()?;
+    Some(workspace.layout)
 }
 
 /// The frame tree and floating groups FilmCraft wrote before its workspaces were craft-ui
@@ -454,9 +527,7 @@ mod legacy {
         }
         fn upgrade_inspector(node: &mut Node<PanelKind>) {
             match node {
-                Node::Tabs { panels, active }
-                    if panels.as_slice() == [PanelKind::Properties, PanelKind::EssentialGraphics, PanelKind::Text] =>
-                {
+                Node::Tabs { panels, active } if panels.as_slice() == [PanelKind::Properties, PanelKind::EssentialGraphics, PanelKind::Text] => {
                     *panels = vec![PanelKind::InspectorVideo, PanelKind::InspectorAudio, PanelKind::Properties];
                     *active = (*active).min(2);
                 }
@@ -512,53 +583,38 @@ fn workspace_root(name: &str) -> Node<PanelKind> {
         "Color" => {
             let top_row = hsplit(
                 SplitSize::FixedFirst(270.0),
-                tabs(&[Project, MediaBrowser, Effects], 0),
-                hsplit(
-                    Ratio(0.55),
-                    tabs(&[Program], 0),
-                    tabs(&[ColorNodes], 0),
-                ),
+                tabs(&[ColorGallery, Project, MediaBrowser, Effects], 0),
+                hsplit(Ratio(0.55), tabs(&[Program], 0), tabs(&[ColorNodes], 0)),
             );
             let bottom_row = hsplit(
-                Ratio(0.72),
-                tabs(&[LumetriColor], 0),
-                tabs(&[LumetriScopes], 0),
-            );
-            vsplit(
-                Ratio(0.35),
-                top_row,
-                vsplit(
-                    SplitSize::FixedFirst(110.0),
-                    tabs(&[ColorClips, Timeline, ColorGroups], 0),
-                    bottom_row,
-                ),
-            )
-        },
-        "Effects" => {
-            let top_row = hsplit(
-                SplitSize::FixedFirst(290.0),
-                tabs(&[Effects, Project, MediaBrowser], 0),
+                Ratio(0.38),
+                tabs(&[ColorPrimaries, ColorWheels, ColorRgbMixer, ColorCst, ColorSizing, LumetriColor], 0),
                 hsplit(
-                    Ratio(0.55),
-                    tabs(&[Program, Source, ReferenceMonitor], 0),
-                    tabs(&[VfxNodes, EssentialGraphics], 0),
+                    Ratio(0.68),
+                    tabs(&[ColorCurves, ColorQualifier, ColorMasks, ColorSlice, ColorWarper, ColorCreative, ColorVignette], 0),
+                    tabs(&[LumetriScopes], 0),
                 ),
             );
-            let bottom_row = hsplit(
-                Ratio(0.72),
-                tabs(&[EffectControls], 0),
-                tabs(&[LumetriScopes, Info, History], 0),
-            );
-            vsplit(
-                Ratio(0.36),
-                top_row,
-                vsplit(
-                    SplitSize::FixedFirst(76.0),
-                    tabs(&[ColorClips, Timeline, MacroTimeline], 0),
-                    bottom_row,
-                ),
-            )
+            vsplit(Ratio(0.32), top_row, vsplit(SplitSize::FixedFirst(92.0), tabs(&[ColorClips, Timeline, ColorGroups], 0), bottom_row))
         }
+        "Effects" => {
+            let center = vsplit(
+                Ratio(0.56),
+                tabs(&[Program, Source, ReferenceMonitor], 0),
+                vsplit(SplitSize::FixedFirst(76.0), tabs(&[ColorClips, Timeline, MacroTimeline], 0), tabs(&[VfxNodes, EssentialGraphics], 0)),
+            );
+            let right_inspector = vsplit(Ratio(0.46), tabs(&[VfxInspector], 0), tabs(&[EffectControls, VfxKeyframes, LumetriScopes, Info, History], 0));
+            hsplit(SplitSize::FixedFirst(290.0), tabs(&[Effects, Project, MediaBrowser], 0), hsplit(Ratio(0.68), center, right_inspector))
+        }
+        "Effects (Premiere)" => vsplit(
+            Ratio(0.56),
+            hsplit(
+                Ratio(0.5),
+                tabs(&[EffectControls, Source, AudioClipMixer], 0),
+                tabs(&[Program, ReferenceMonitor], 0),
+            ),
+            hsplit(SplitSize::FixedFirst(290.0), tabs(&[Effects, Project, MediaBrowser, Markers, History], 0), bottom_editing()),
+        ),
         "Audio" => hsplit(
             Ratio(0.8),
             vsplit(
@@ -711,7 +767,9 @@ impl LayoutExt for Layout {
                 _ => false,
             }
         }
-        if let Some(root) = self.root.as_mut() && replace_in(root, from, to) {
+        if let Some(root) = self.root.as_mut()
+            && replace_in(root, from, to)
+        {
             return true;
         }
         for window in &mut self.floating {
@@ -775,11 +833,7 @@ impl LayoutExt for Layout {
             match n {
                 Node::Split { first, second, .. } => beside_program(first) || beside_program(second),
                 Node::Tabs { panels, .. } if panels.contains(&PanelKind::Program) => {
-                    *n = hsplit(
-                        SplitSize::Ratio(0.72),
-                        n.clone(),
-                        tabs(&[PanelKind::InspectorVideo, PanelKind::InspectorAudio, PanelKind::Properties], 0),
-                    );
+                    *n = hsplit(SplitSize::Ratio(0.72), n.clone(), tabs(&[PanelKind::InspectorVideo, PanelKind::InspectorAudio, PanelKind::Properties], 0));
                     true
                 }
                 _ => false,
@@ -951,7 +1005,7 @@ pub fn sequence_tabs(ui: &mut egui::Ui, strip: Rect, seqs: &SeqTabs, t: &Tokens,
             actions.push(SeqAction::Close(*id));
         }
         if resp.secondary_clicked() {
-            actions.push(SeqAction::Menu(*id, resp.interact_pointer_pos().unwrap_or(tab_rect.left_bottom())));
+            actions.push(SeqAction::Menu(*id, resp.interact_pointer_pos().map_or(tab_rect.left_bottom(), |p| pos2(p.x, tab_rect.bottom()))));
         }
         x += w + 8.0;
     }
@@ -1205,6 +1259,20 @@ mod tests {
             second: Box::new(effects.root),
         };
         assert_eq!(read(&split), (None, vec![]));
+    }
+
+    #[test]
+    fn header_presets_start_empty_and_remain_independent() {
+        let empty = WorkspacePrefs::default();
+        assert!(preset_names(&empty).is_empty());
+        assert!(find_preset(&empty, "Editing").is_none());
+        assert!(saved_preset_docking(&empty, "Editing").is_none());
+
+        let layout = workspace("Color");
+        let prefs = WorkspacePrefs { saved: vec![SavedWorkspace::new("Multicámara", &layout).unwrap()], current: "Multicámara".into() };
+        assert_eq!(preset_names(&prefs), vec!["Multicámara"]);
+        assert_eq!(find_preset(&prefs, "multicámara").as_deref(), Some("Multicámara"));
+        assert_eq!(saved_preset_docking(&prefs, "Multicámara"), Some(layout));
     }
 }
 

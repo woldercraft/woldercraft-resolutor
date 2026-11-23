@@ -35,7 +35,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: filmcraft-windows-${{ matrix.arch }}
+          name: resolutor-windows-${{ matrix.arch }}
           path: |
-            dist/release/filmcraft-*.msi
-            dist/release/filmcraft-*.zip
+            dist/release/resolutor-*.msi
+            dist/release/resolutor-*.zip

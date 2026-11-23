@@ -165,6 +165,53 @@ impl PlaybackRes {
     }
 }
 
+/// Visual style for audio waveforms on Timeline clips (Resolve-inspired modes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaveformStyle {
+    /// Rectified waveform rising from the bottom of the waveform area (default).
+    #[default]
+    Rectified,
+    /// Classic bipolar waveform centered on the zero line (positive up, negative down).
+    Centered,
+    /// Semitransparent fill with a crisp peak outline stroke.
+    Bordered,
+    /// Separate Left (top) and Right (bottom) lanes for stereo/multichannel clips.
+    StereoSplit,
+}
+
+impl WaveformStyle {
+    pub const ALL: [WaveformStyle; 4] = [WaveformStyle::Rectified, WaveformStyle::Centered, WaveformStyle::Bordered, WaveformStyle::StereoSplit];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            WaveformStyle::Rectified => "rectified",
+            WaveformStyle::Centered => "centered",
+            WaveformStyle::Bordered => "bordered",
+            WaveformStyle::StereoSplit => "stereo_split",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WaveformStyle::Rectified => "Rectified",
+            WaveformStyle::Centered => "Centered",
+            WaveformStyle::Bordered => "Bordered",
+            WaveformStyle::StereoSplit => "Stereo (L/R)",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "rectified" => Some(Self::Rectified),
+            "centered" | "bipolar" => Some(Self::Centered),
+            "bordered" | "outline" => Some(Self::Bordered),
+            "stereo_split" | "stereo" | "split" => Some(Self::StereoSplit),
+            _ => None,
+        }
+    }
+}
+
 /// Header mode (Import / Edit / Export).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
@@ -195,6 +242,12 @@ pub struct TimelineView {
     #[serde(default)]
     pub thumbnail_mode: ThumbnailMode,
     pub show_waveforms: bool,
+    /// Visual style of audio waveforms in the Timeline.
+    #[serde(default)]
+    pub waveform_style: WaveformStyle,
+    /// Draw audio waveforms across the full clip height instead of the lower 42%.
+    #[serde(default)]
+    pub waveform_full_height: bool,
     /// The wrench menu's Show Video Names / Show Audio Names: the name strip of the clips on video
     /// and audio tracks (on by default; off leaves the clip picture or waveform uncovered).
     #[serde(default = "yes")]
@@ -249,6 +302,8 @@ impl Default for TimelineView {
             show_thumbnails: true,
             thumbnail_mode: ThumbnailMode::Head,
             show_waveforms: true,
+            waveform_style: WaveformStyle::default(),
+            waveform_full_height: false,
             show_video_names: true,
             show_audio_names: true,
             follow: true,
@@ -260,6 +315,54 @@ impl Default for TimelineView {
             fast_mode_prompt_never_show: false,
             show_macro_timeline: false,
         }
+    }
+}
+
+/// Monitor wipe mode comparing current frame against a Gallery still or reference frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WipeMode {
+    #[default]
+    Horizontal,
+    Vertical,
+    Diagonal,
+    Box,
+}
+
+impl WipeMode {
+    pub const ALL: [WipeMode; 4] = [WipeMode::Horizontal, WipeMode::Vertical, WipeMode::Diagonal, WipeMode::Box];
+    pub fn label(self) -> &'static str {
+        match self {
+            WipeMode::Horizontal => "Horizontal",
+            WipeMode::Vertical => "Vertical",
+            WipeMode::Diagonal => "Diagonal",
+            WipeMode::Box => "Box",
+        }
+    }
+    pub fn next(self) -> Self {
+        match self {
+            WipeMode::Horizontal => WipeMode::Vertical,
+            WipeMode::Vertical => WipeMode::Diagonal,
+            WipeMode::Diagonal => WipeMode::Box,
+            WipeMode::Box => WipeMode::Horizontal,
+        }
+    }
+}
+
+/// Interactive Image Wipe state on the Program monitor.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProgramWipeState {
+    pub enabled: bool,
+    pub still_id: Option<u64>,
+    pub mode: WipeMode,
+    pub split: f32,
+    pub invert: bool,
+}
+
+impl Default for ProgramWipeState {
+    fn default() -> Self {
+        Self { enabled: false, still_id: None, mode: WipeMode::Horizontal, split: 0.5, invert: false }
     }
 }
 
@@ -317,6 +420,36 @@ impl DisplayMode {
     }
 }
 
+/// DaVinci Resolve-style On-Screen Controls mode for the Program monitor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ViewerOverlayMode {
+    #[default]
+    Transform,
+    Crop,
+    EffectOverlay,
+}
+
+impl ViewerOverlayMode {
+    pub const ALL: [Self; 3] = [Self::Transform, Self::Crop, Self::EffectOverlay];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Transform => "Transform",
+            Self::Crop => "Crop",
+            Self::EffectOverlay => "Effect Overlay",
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Transform => "transform",
+            Self::Crop => "crop",
+            Self::EffectOverlay => "effectOverlay",
+        }
+    }
+}
+
 /// Monitor guide (frame pixels): `vertical` = a line at x = `position`.
 pub type Guide = filmcraft_engine::autosave::Guide;
 
@@ -353,6 +486,10 @@ pub struct MonitorView {
     /// Snap in Program Monitor: graphic drags snap to guides, the frame edges and centre.
     pub snap: bool,
     pub guides: Vec<Guide>,
+    /// Viewer On-Screen Controls toggle (Resolve-style `[box] ⌄` button).
+    pub viewer_overlay_enabled: bool,
+    /// Active Viewer On-Screen Controls mode.
+    pub viewer_overlay_mode: ViewerOverlayMode,
 }
 
 impl Default for MonitorView {
@@ -378,6 +515,8 @@ impl Default for MonitorView {
             lock_guides: false,
             snap: true,
             guides: Vec::new(),
+            viewer_overlay_enabled: false,
+            viewer_overlay_mode: ViewerOverlayMode::Transform,
         }
     }
 }
@@ -386,7 +525,11 @@ impl MonitorView {
     /// The resolution frames are rendered at: Playback Resolution while playing (or the higher
     /// of it and Paused Resolution with High Quality Playback), Paused Resolution when stopped.
     pub fn effective_res(&self, playing: bool) -> PlaybackRes {
-        if !playing || (self.high_quality && self.paused_res.scale() > self.res.scale()) { self.paused_res } else { self.res }
+        if !playing || (self.high_quality && self.paused_res.scale() > self.res.scale()) {
+            self.paused_res
+        } else {
+            self.res
+        }
     }
     /// The display mode in effect (None = Multi-Camera).
     pub fn display_mode(&self) -> Option<DisplayMode> {
@@ -429,6 +572,17 @@ pub enum GuideDialog {
     },
 }
 
+/// What an armed eyedropper does when a pixel is clicked in the Program monitor.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EyedropperKind {
+    ColorParam,
+    LumetriWb,
+    LumetriHsl,
+    /// `true` subtracts (`-` sample), `false` adds (`+` sample) to `hsl_3d_samples`.
+    Lumetri3d(bool),
+    LumetriCurve(String),
+}
+
 /// The colour parameter an armed eyedropper fills (`effects.setParam` arguments).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Eyedropper {
@@ -436,6 +590,7 @@ pub struct Eyedropper {
     pub effect: usize,
     pub param: String,
     pub mask: Option<usize>,
+    pub kind: EyedropperKind,
 }
 
 /// A keyframe selected in the Effect Controls keyframe lane: clip, effect index, parameter (of an
@@ -479,6 +634,27 @@ pub struct UiState {
     pub source: MonitorView,
     pub project_search: String,
     pub effects_search: String,
+    /// Effects panel: filter to GPU-accelerated effects only (`⚡`).
+    #[serde(default)]
+    pub effects_filter_gpu: bool,
+    /// Effects panel: filter to 32-bit float effects only (`32`).
+    #[serde(default)]
+    pub effects_filter_32bit: bool,
+    /// Effects panel: filter to favorite effects only (`★`).
+    #[serde(default)]
+    pub effects_filter_favorites: bool,
+    /// Effects panel: category/kind quick filter pill.
+    #[serde(default)]
+    pub effects_kind_filter: EffectsKindFilter,
+    /// Effects panel: currently selected effect ID (for keyboard navigation & info footer).
+    #[serde(default)]
+    pub selected_effect: Option<String>,
+    /// Effects panel: starred effect IDs.
+    #[serde(default)]
+    pub favorite_effects: Vec<String>,
+    /// Effects panel: most recently applied/dragged effect IDs (capped at 10).
+    #[serde(default)]
+    pub recent_effects: Vec<String>,
     /// Expanded bins in the project list view.
     pub expanded_bins: Vec<u64>,
     /// Expanded folders in the Effects panel.
@@ -486,12 +662,45 @@ pub struct UiState {
     /// Effects panel: the Color Grading Presets folder shown as a thumbnail grid (wide panel).
     #[serde(default)]
     pub lumetri_grid_folder: Option<String>,
+    /// Effects panel: width of the tree pane when the Color Grading Presets grid is open.
+    #[serde(default = "default_effects_tree_width")]
+    pub effects_tree_width: f32,
+    /// Effects panel: thumbnail scale for the Color Grading Presets grid (`0` = S, `1` = M, `2` = L).
+    #[serde(default = "default_effects_preset_thumb_scale")]
+    pub effects_preset_thumb_scale: u8,
+    /// Effects panel: whether the right-hand Effect Inspector pane is open on wide panels.
+    #[serde(default)]
+    pub effects_inspector_open: bool,
     /// Collapsed effect sections in Effect Controls ("clip:index").
     pub collapsed_fx: Vec<String>,
     /// Width of Effect Controls' effect list, left of the keyframe area (points; 0 = the default
     /// share of the panel). Dragging the divider sets it (#643).
     #[serde(default)]
     pub effect_controls_split: f32,
+    /// Effect Controls: scope override (`None` = `VfxOnly` in `"Effects"` workspace, `All` elsewhere).
+    #[serde(default)]
+    pub effect_controls_scope: Option<EffectControlsScope>,
+    /// Effect Controls: keyframe lane visibility override (`None` = hidden in `"Effects"` workspace, shown elsewhere).
+    #[serde(default)]
+    pub effect_controls_show_lane: Option<bool>,
+    /// Effect Controls: parameter search query.
+    #[serde(default)]
+    pub effect_controls_search: String,
+    /// Effect Controls: filter to animated/keyframed parameters only.
+    #[serde(default)]
+    pub effect_controls_animated_only: bool,
+    /// Active node ID in the clip's [`filmcraft_project::VfxGraph`] (`VfxNodes` + `EffectControls`).
+    #[serde(default)]
+    pub vfx_active_node_id: Option<u64>,
+    /// Nodes assigned to Viewer 1 (`[0]`) and Viewer 2 (`[1]`) as `(clip_id, node_id)`.
+    #[serde(default)]
+    pub vfx_viewer_nodes: [Option<(u64, u64)>; 2],
+    /// Active VFX Node Inspector tab (`0` = Controls, `1` = Settings).
+    #[serde(default)]
+    pub vfx_inspector_tab: u8,
+    /// Integrated bottom drawer inside `VfxNodes` (`0` = Closed, `1` = Keyframes, `2` = Spline).
+    #[serde(default)]
+    pub vfx_bottom_drawer: u8,
     pub show_menu_bar: bool,
     /// The header bar (Home, Import, Edit, Export, workspaces). An app that embeds FilmCraft can hide it.
     #[serde(default = "shown")]
@@ -534,6 +743,13 @@ pub struct UiState {
     /// Active Lumetri color node index for node-based grading (0-indexed).
     #[serde(default)]
     pub active_color_node: usize,
+    /// Viewer Highlight overlay (`0` = Off, `1` = B/W Matte, `2` = Color/Gray, `3` = Color/Black),
+    /// toggled without mutating the project or undo history (`Shift+H`).
+    #[serde(default)]
+    pub color_highlight: u8,
+    /// Preferred Highlight display mode (`1` = B/W Matte, `2` = Color/Gray, `3` = Color/Black).
+    #[serde(default = "default_highlight_style")]
+    pub color_highlight_style: u8,
     /// User custom labels for color nodes (`clip:node_index` -> label).
     #[serde(default)]
     pub color_node_labels: std::collections::HashMap<String, String>,
@@ -549,6 +765,9 @@ pub struct UiState {
     /// Active Color Group being graded in Color workspace (`None` = grade individual clip).
     #[serde(default)]
     pub active_color_group: Option<filmcraft_project::ColorGroupId>,
+    /// Active pipeline scope in Color Nodes (`PreClip`, `Clip`, `PostClip`, `Timeline`).
+    #[serde(default)]
+    pub active_color_scope: filmcraft_project::ColorScopeKind,
     /// Multi-selected clip IDs in the Color workspace Clips panel.
     #[serde(default)]
     pub selected_color_clips: Vec<filmcraft_project::ClipId>,
@@ -579,12 +798,33 @@ pub struct UiState {
     /// Dual/split palette view enabled in Lumetri Color panel.
     #[serde(default)]
     pub lumetri_dual_view: bool,
+    /// Active sub-mode inside Primaries Wheels (`0=Wheels`, `1=Bars`, `2=Log`, `3=HDR`).
+    #[serde(default)]
+    pub lumetri_wheels_mode: u8,
+    /// Active Gallery tab (`0 = Stills`, `1 = PowerGrades`).
+    #[serde(default)]
+    pub gallery_tab: u8,
+    /// Selected still/powergrade id in Gallery.
+    #[serde(skip)]
+    pub selected_still_id: Option<u64>,
+    /// User-level persistent PowerGrades loaded from `powergrades.json`.
+    #[serde(skip)]
+    pub powergrades: Vec<filmcraft_project::ColorStill>,
+    /// Interactive Image Wipe state in the Program monitor.
+    #[serde(default)]
+    pub program_wipe: ProgramWipeState,
     /// Custom order of Lumetri palette tool buttons.
     #[serde(default = "default_lumetri_tool_order")]
     pub lumetri_tool_order: Vec<String>,
     /// Location of the Lumetri palette tool bar ("top", "bottom", "left").
     #[serde(default = "default_lumetri_bar_pos")]
     pub lumetri_bar_pos: String,
+    /// Color Match reference timecode persisted across panel switches.
+    #[serde(default = "default_lumetri_match_ref")]
+    pub lumetri_match_ref: String,
+    /// Color Match face-detection (skin tone protection) toggle.
+    #[serde(default = "yes")]
+    pub lumetri_match_face: bool,
     /// Text to Speech panel: the script and voice settings being written or edited.
     #[serde(default)]
     pub tts: crate::panels::tts::TtsDraft,
@@ -692,6 +932,15 @@ pub struct UiState {
     /// Open Window ▸ Workspaces dialog.
     #[serde(default)]
     pub workspace_dialog: Option<WorkspaceDialog>,
+    /// Active top-bar layout preset (empty when none is selected).
+    #[serde(default)]
+    pub active_preset: String,
+    /// Open top-bar layout presets dialog (Save as New Preset / Edit Presets).
+    #[serde(default)]
+    pub preset_dialog: Option<WorkspaceDialog>,
+    /// Open Custom Panels editor dialog.
+    #[serde(default)]
+    pub custom_panel_dialog: Option<crate::panels::custom_panels::CustomPanelDialog>,
     /// Edit / Clip / File menu dialog (Paste Attributes, Make Subclip, Frame Hold Options, …;
     /// open when Some). See `panels::clip_dialogs`.
     #[serde(default)]
@@ -732,6 +981,27 @@ pub struct ClipDialogDraft {
     pub info: serde_json::Value,
     #[serde(default)]
     pub error: String,
+}
+
+/// Effect Controls panel: which effects of the selected clip are shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EffectControlsScope {
+    #[default]
+    All,
+    VfxOnly,
+    ActiveNode,
+}
+
+/// Effects panel: category/kind quick filter pill.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EffectsKindFilter {
+    #[default]
+    All,
+    Video,
+    Audio,
+    Transitions,
+    Presets,
 }
 
 /// A pen mask in progress: vertices placed so far, in clip pixels (`[x, y, tangent x, tangent y]`).
@@ -873,13 +1143,7 @@ pub struct ProxyDraft {
 
 impl Default for ProxyDraft {
     fn default() -> Self {
-        Self {
-            items: Vec::new(),
-            preset: String::new(),
-            destination: String::new(),
-            render_buffer: true,
-            concurrency: 2,
-        }
+        Self { items: Vec::new(), preset: String::new(), destination: String::new(), render_buffer: true, concurrency: 2 }
     }
 }
 
@@ -1108,15 +1372,28 @@ fn default_lumetri_tool_order() -> Vec<String> {
         "Basic Correction".into(),
         "Color Wheels & Match".into(),
         "Curves".into(),
-        "Power Windows / Máscara".into(),
+        "Power Windows".into(),
         "HSL Secondary".into(),
         "Creative".into(),
         "Vignette".into(),
+        "ColorSlice".into(),
+        "Color Warper".into(),
+        "RGB Mixer".into(),
+        "Color Space Transform".into(),
+        "Sizing".into(),
     ]
 }
 
 fn default_lumetri_bar_pos() -> String {
     "top".into()
+}
+
+fn default_lumetri_match_ref() -> String {
+    "00:00:00:00".into()
+}
+
+fn default_highlight_style() -> u8 {
+    1
 }
 
 fn yes() -> bool {
@@ -1125,6 +1402,14 @@ fn yes() -> bool {
 
 fn default_concurrency() -> usize {
     2
+}
+
+fn default_effects_tree_width() -> f32 {
+    300.0
+}
+
+fn default_effects_preset_thumb_scale() -> u8 {
+    1
 }
 
 impl Default for UiState {
@@ -1146,11 +1431,29 @@ impl Default for UiState {
             source: MonitorView::default(),
             project_search: String::new(),
             effects_search: String::new(),
+            effects_filter_gpu: false,
+            effects_filter_32bit: false,
+            effects_filter_favorites: false,
+            effects_kind_filter: EffectsKindFilter::All,
+            selected_effect: None,
+            favorite_effects: vec![],
+            recent_effects: vec![],
             expanded_bins: vec![],
             expanded_fx: vec!["Video Transitions".into(), "Video Transitions/Dissolve".into()],
             lumetri_grid_folder: None,
+            effects_tree_width: default_effects_tree_width(),
+            effects_preset_thumb_scale: default_effects_preset_thumb_scale(),
+            effects_inspector_open: false,
             collapsed_fx: vec![],
             effect_controls_split: 0.0,
+            effect_controls_scope: None,
+            effect_controls_show_lane: None,
+            effect_controls_search: String::new(),
+            effect_controls_animated_only: false,
+            vfx_active_node_id: None,
+            vfx_viewer_nodes: [None, None],
+            vfx_inspector_tab: 0,
+            vfx_bottom_drawer: 0,
             show_menu_bar: true,
             show_header: true,
             show_status_bar: true,
@@ -1163,11 +1466,14 @@ impl Default for UiState {
             keyframe_selection: Vec::new(),
             essential_sound_tab: "Edit".into(),
             active_color_node: 0,
+            color_highlight: 0,
+            color_highlight_style: default_highlight_style(),
             color_node_labels: std::collections::HashMap::new(),
             color_node_positions: std::collections::HashMap::new(),
             color_node_pan: [0.0, 0.0],
             color_node_zoom: 1.0,
             active_color_group: None,
+            active_color_scope: filmcraft_project::ColorScopeKind::Clip,
             selected_color_clips: Vec::new(),
             color_clip_filter: String::new(),
             copied_color_clip: None,
@@ -1178,8 +1484,15 @@ impl Default for UiState {
             lumetri_active_tool: default_lumetri_tool(),
             lumetri_secondary_tool: default_lumetri_secondary_tool(),
             lumetri_dual_view: false,
+            lumetri_wheels_mode: 0,
+            gallery_tab: 0,
+            selected_still_id: None,
+            powergrades: Vec::new(),
+            program_wipe: ProgramWipeState::default(),
             lumetri_tool_order: default_lumetri_tool_order(),
             lumetri_bar_pos: default_lumetri_bar_pos(),
+            lumetri_match_ref: default_lumetri_match_ref(),
+            lumetri_match_face: true,
             tts: Default::default(),
             export: Default::default(),
             project_browser: Default::default(),
@@ -1215,6 +1528,9 @@ impl Default for UiState {
             guide_dialog: None,
             text_props_dialog: None,
             workspace_dialog: None,
+            active_preset: String::new(),
+            preset_dialog: None,
+            custom_panel_dialog: None,
             clip_dialog: None,
             extras: Default::default(),
             gfx_templates: Default::default(),

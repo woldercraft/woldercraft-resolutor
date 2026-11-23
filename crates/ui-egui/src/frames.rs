@@ -736,11 +736,7 @@ impl FrameServer {
             let f = key.frame + (lead + i * stride) * dir * step;
             if f >= 0 {
                 // forward play: frames before the playhead are late (reverse play skips nothing)
-                let late = if seq_plan_serial && dir > 0 {
-                    Some(Tick::ZERO)
-                } else {
-                    (!preroll && dir > 0).then(|| rate.tick_of(f) - rate.tick_of(key.frame))
-                };
+                let late = if seq_plan_serial && dir > 0 { Some(Tick::ZERO) } else { (!preroll && dir > 0).then(|| rate.tick_of(f) - rate.tick_of(key.frame)) };
                 self.request_job(FrameRequest {
                     key: FrameKey { frame: f, ..key },
                     time: rate.tick_of(f),

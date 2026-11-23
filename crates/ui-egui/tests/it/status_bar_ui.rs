@@ -132,9 +132,13 @@ fn a_status_message_can_be_selected_and_copied() {
 fn the_hint_is_a_label_too() {
     let mut d = Driver::new();
     assert!(d.app().ui.status.is_empty());
-    let (text, hint) = d.element("status.text");
-    assert!(hint.starts_with("Click to select"), "{hint}");
-    assert!(text.width() > 0.0 && d.harness.query_by_label(&hint).is_some());
+    let (nav_rect, nav_label) = d.element("bottom_nav.edit");
+    assert!(nav_rect.width() > 0.0 && !nav_label.is_empty());
+    d.app().ui.status = MESSAGE.into();
+    d.frames(2);
+    let (text, msg) = d.element("status.text");
+    assert_eq!(msg, MESSAGE);
+    assert!(text.width() > 0.0 && d.harness.query_by_label(&msg).is_some());
 }
 
 #[test]
@@ -146,8 +150,8 @@ fn a_click_beside_the_text_dismisses_the_message() {
     // on the text, a click places the selection and leaves the message
     d.click(text.center());
     assert_eq!(d.app().ui.status, MESSAGE);
-    // beside it, it dismisses the message as before
-    d.click(pos2(text.max.x + 200.0, text.center().y));
+    // beside it (in empty status bar space right of the nav tabs), it dismisses the message
+    d.click(pos2(1400.0, text.center().y));
     assert!(d.app().ui.status.is_empty(), "{}", d.app().ui.status);
 }
 

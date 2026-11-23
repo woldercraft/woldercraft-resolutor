@@ -6,7 +6,6 @@
 //! layer's rotation is Orientation then X/Y/Z Rotation, each composed as `Rx · Ry · Rz` (Z turns
 //! the vector first; measured in After Effects).
 
-
 use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use serde::{Deserialize, Serialize};

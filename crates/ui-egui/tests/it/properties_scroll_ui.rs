@@ -56,11 +56,14 @@ fn properties_panel_scrolls_to_its_lower_sections() {
     let seq = d.ok("engine.execute", json!({"command": "sequence.inspect", "params": {}}));
     let clip = seq["video"][0]["items"][0]["clip"].as_u64().expect("first video clip");
     d.ok("engine.execute", json!({"command": "timeline.select", "params": {"clips": [clip]}}));
-    d.ok("ui.panel.show", json!({"panel": "Properties"}));
+    for sec in ["props:Transform", "props:Crop", "props:Speed", "props:Effects"] {
+        d.harness.state_mut().ui.expanded_fx.push(sec.into());
+    }
+    d.ok("ui.panel.show", json!({"panel": "InspectorVideo"}));
     d.frames(3);
-    let before = d.top("properties.speed").expect("the speed button is laid out");
-    d.ok("ui.scroll", json!({"id": "panel.Properties", "dy": -2000.0}));
+    let before = d.top("properties.crop.bottom.addKeyframe").expect("the lower section row is laid out");
+    d.ok("ui.scroll", json!({"id": "panel.InspectorVideo", "dy": -2000.0}));
     d.frames(3);
-    let after = d.top("properties.speed").expect("the speed button is still laid out");
+    let after = d.top("properties.crop.bottom.addKeyframe").expect("the lower section row is still laid out");
     assert!(after < before - 20.0, "the wheel scrolls the panel: {before} -> {after}");
 }

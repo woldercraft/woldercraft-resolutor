@@ -49,7 +49,11 @@ impl Nv12Stage {
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
@@ -60,7 +64,8 @@ impl Nv12Stage {
                 },
             ],
         });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("nv12-layout"), bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
+        let layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("nv12-layout"), bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
         let pipe = |entry: &'static str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),

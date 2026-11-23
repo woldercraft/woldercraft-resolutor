@@ -41,10 +41,10 @@ case "$ARCH" in
   aarch64 | arm64) ARCH=aarch64; DEB_ARCH=arm64 ;;
   *) echo "unsupported architecture $ARCH" >&2; exit 2 ;;
 esac
-export FILMCRAFT_MAINTAINER="${FILMCRAFT_MAINTAINER:-FilmCraft maintainers <filmcraft@storyteller.ai>}"
-BASENAME="filmcraft-$VERSION-linux-$ARCH"
+export FILMCRAFT_MAINTAINER="${FILMCRAFT_MAINTAINER:-Resolutor maintainers <filmcraft@storyteller.ai>}"
+BASENAME="resolutor-$VERSION-linux-$ARCH"
 
-echo "==> FilmCraft $VERSION for Linux $ARCH ($FORMATS)"
+echo "==> Resolutor $VERSION for Linux $ARCH ($FORMATS)"
 
 if [[ "$SKIP_BUILD" = 0 ]]; then
   if [[ -n "${CROSS_TARGET:-}" ]]; then
@@ -59,7 +59,11 @@ STAGE="$WORK/root"
 rm -rf "$WORK"
 
 # ---- stage an FHS tree (shared by every format) -------------------------------------------------
-install -Dm755 "$BIN/filmcraft" "$STAGE/usr/bin/filmcraft"
+APP_BIN="$BIN/resolutor"
+if [[ ! -f "$APP_BIN" ]]; then
+  APP_BIN="$BIN/filmcraft"
+fi
+install -Dm755 "$APP_BIN" "$STAGE/usr/bin/filmcraft"
 install -Dm755 "$BIN/filmcraft-cli" "$STAGE/usr/bin/filmcraft-cli"
 "${CROSS_COMPILE:-}strip" "$STAGE/usr/bin/filmcraft" "$STAGE/usr/bin/filmcraft-cli" 2>/dev/null || true
 install -Dm644 "$HERE/$APP_ID.desktop" "$STAGE/usr/share/applications/$APP_ID.desktop"
@@ -118,7 +122,7 @@ if has appimage; then
       ;;
     *) APPIMAGETOOL_SHA256='' RUNTIME_SHA256='' ;;
   esac
-  APPDIR="$WORK/FilmCraft.AppDir"
+  APPDIR="$WORK/Resolutor.AppDir"
   cp -R "$STAGE" "$APPDIR"
   ln -s usr/bin/filmcraft "$APPDIR/AppRun"
   cp "$HERE/$APP_ID.desktop" "$APPDIR/$APP_ID.desktop"
@@ -168,8 +172,8 @@ if has appimage; then
   # fetch only the blocks that changed in a newer release, through the .zsync published next to
   # each AppImage on GitHub Releases. `latest` is the newest published release that is not a
   # pre-release. A fork's builds point at its own releases through GITHUB_REPOSITORY.
-  REPO="${GITHUB_REPOSITORY:-storytold/filmcraft}"
-  UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|filmcraft-*-linux-$ARCH.AppImage.zsync"
+  REPO="${GITHUB_REPOSITORY:-woldercraft/woldercraft-resolutor}"
+  UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|resolutor-*-linux-$ARCH.AppImage.zsync"
   # Extract-and-run: works without FUSE (containers, CI). The output embeds the static runtime,
   # so users don't need libfuse2 either. With zsyncmake on the host (CI installs the zsync
   # package) appimagetool also writes the .zsync, into its working directory, hence the cd.

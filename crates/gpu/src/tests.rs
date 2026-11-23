@@ -433,7 +433,12 @@ fn test_masks(scale: f32) -> Vec<filmcraft_render::mask::FlatMask> {
     c.mode = MaskMode::Difference;
     c.inverted = true;
     c.feather.value = ParamValue::Float(3.5);
-    filmcraft_render::mask::prepare(&[a, b, c], filmcraft_time::Tick(0), scale)
+    c.feather_balance.value = ParamValue::Float(-60.0);
+    let mut g = Mask::gradient("g", Vec2::new(80.0, 40.0), Vec2::new(140.0, 110.0), 28.0);
+    g.mode = MaskMode::Add;
+    g.feather_balance.value = ParamValue::Float(40.0);
+    g.opacity.value = ParamValue::Float(85.0);
+    filmcraft_render::mask::prepare(&[a, b, c, g], filmcraft_time::Tick(0), scale)
 }
 
 #[test]
@@ -759,7 +764,6 @@ fn many_threads_create_use_and_drop_devices_at_once() {
         let left = deadline.saturating_duration_since(Instant::now());
         assert!(rx.recv_timeout(left).is_ok(), "only {i} of {THREADS} threads finished within 120 s: device setup deadlocked");
     }
-
 }
 
 /// Require an adapter for the explicit lifecycle regressions; absence is not a passing skip.

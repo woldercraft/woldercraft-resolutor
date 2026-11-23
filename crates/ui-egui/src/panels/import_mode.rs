@@ -26,7 +26,11 @@ fn recent_automation_bridge(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rec
     }
     if let Some(path) = open {
         let ctx = ui.ctx().clone();
-        if crate::menus::invoke(app, &ctx, "file.open", json!({"path": path})).is_ok() {
+        if crate::panels::clip_dialogs::ask_before_open(app, &path).is_some() {
+            if let Some(info) = app.ui.clip_dialog.as_mut().and_then(|d| d.info.as_object_mut()) {
+                info.insert("editAfterOpen".into(), json!(true));
+            }
+        } else if crate::menus::invoke(app, &ctx, "file.open", json!({"path": path})).is_ok() {
             app.ui.mode = crate::state::Mode::Edit;
         }
     }
@@ -77,7 +81,7 @@ fn show_legacy(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let tx = logo.map_or(rect.min.x + 24.0, |r| r.max.x + 12.0);
     ui.painter().text(pos2(tx, rect.min.y + y), Align2::LEFT_CENTER, tl!("Community"), Tokens::semibold(15.0), t.text);
     let mut x = rect.min.x + 24.0;
-    for (i, (id, label, url)) in crate::links::ALL.iter().take(4).enumerate() {
+    for (i, (id, label, url)) in crate::links::ALL.iter().enumerate() {
         let primary = i == 0;
         let label = if primary { tl!("Join us on Discord") } else { crate::i18n::t(label) };
         let g = ui.painter().layout_no_wrap(label.to_string(), Tokens::ui(13.0), t.text);

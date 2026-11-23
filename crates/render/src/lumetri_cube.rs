@@ -46,6 +46,10 @@ fn tabulable(e: &EffectInstance, t: Tick, left_out: &mut Vec<&'static str>) -> E
         note("Vignette");
     }
     set(&mut e, "vignette_on", ParamValue::Bool(false));
+    if on(&e, "basic_on", true) && param_f(&e, "midtone_detail", t).abs() > 1e-3 {
+        note("Midtone Detail");
+    }
+    set(&mut e, "midtone_detail", ParamValue::Float(0.0));
     if on(&e, "creative_on", true) && param_f(&e, "sharpen", t).abs() > 1e-3 {
         note("Sharpen");
     }
@@ -76,7 +80,10 @@ pub fn sample_lumetri(
     if !(MIN_SIZE..=MAX_SIZE).contains(&size) {
         return Err(format!("`size` must be between {MIN_SIZE} and {MAX_SIZE}"));
     }
-    if effects.iter().any(|e| e.enabled && e.effect == "lumetri" && !e.masks.is_empty()) {
+    if effects.iter().any(|e| {
+        let masks_on = e.param("masks_on").and_then(|p| p.value.as_bool()).unwrap_or(true);
+        e.enabled && e.effect == "lumetri" && masks_on && !e.masks.is_empty()
+    }) {
         return Err("Color Grading with masks cannot be exported to a LUT: a LUT has no spatial input".into());
     }
     let mut left_out = Vec::new();

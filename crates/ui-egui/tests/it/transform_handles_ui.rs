@@ -271,6 +271,7 @@ fn a_drag_keys_the_playhead_and_headers_select_while_arrows_twirl() {
     d.exec("playhead.set", json!({"time": mid + filmcraft_time::TICKS_PER_SECOND}));
     d.frames(2);
     // clicking a property (its name) selects Motion too
+    d.click("effectControls.effect.motion.twirl");
     let (sx, sy) = d.center("effectControls.motion.scale.stopwatch");
     d.ok("ui.click", json!({"x": sx + 30.0, "y": sy}));
     d.frames(2);
@@ -456,10 +457,11 @@ fn handles_stay_in_reach_when_the_picture_is_past_the_edge() {
     let pic = d.rect("program.picture");
     let (cx, cy) = d.center("program.transform.handle.0");
     assert!(near((cx, cy), (pic[0] + pic[2] / 2.0, pic[1] + pic[3] / 2.0)), "the top-left corner is at the frame's centre");
+    let mon = d.rect("panel.Program");
     let (hx, hy) = d.center("program.transform.handle.2");
     assert!(hx < 1600.0 && hy < 980.0, "the bottom-right handle is on screen: ({hx}, {hy})");
-    // (its true place is about 280 points right of the picture, past the monitor)
-    assert!(hx <= pic[0] + pic[2] + 40.0 && hy <= pic[1] + pic[3] + 40.0, "and on the monitor: ({hx}, {hy}), picture {pic:?}");
+    // Handles stay clamped inside the monitor's video area, even past the picture edge.
+    assert!(hx <= mon[0] + mon[2] && hy <= mon[1] + mon[3], "and on the monitor: ({hx}, {hy}), monitor {mon:?}");
     let p0 = d.point(clip, "motion", "position");
     d.drag("program.transform.handle.2", -30.0, -30.0);
     let s = d.num(clip, "motion", "scale");
@@ -705,6 +707,9 @@ fn backspace_in_effect_controls_does_not_touch_a_clip_it_does_not_show() {
 #[test]
 fn clear_in_effect_controls_removes_a_shown_transition() {
     let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Editing"}));
+    d.ok("ui.panel.show", json!({"panel": "EffectControls"}));
+    d.frames(2);
     let trn = {
         let q = d.exec("sequence.inspect", json!({}));
         let x = q["video"]
@@ -793,4 +798,33 @@ fn corner_pin_handles_move_its_corners() {
     d.drag_from((b[0] - 40.0, b[1] + b[3] / 2.0), 20.0, 0.0);
     let after: Vec<(f64, f64)> = ["upper_left", "upper_right", "lower_right", "lower_left"].iter().map(|p| d.point(clip, "corner_pin", p)).collect();
     assert_eq!(after, pins);
+}
+
+#[test]
+fn viewer_overlay_selector_shows_transform_and_crop_for_selected_clip() {
+    let mut d = Driver::demo();
+    let (clip, _) = d.first_clip();
+    assert!(d.find("program.transform.box").is_none(), "overlay starts disabled");
+
+    // Enabling the Resolve-style overlay button shows Transform handles for the selected timeline clip
+    d.click("program.overlay.toggle");
+    d.frames(2);
+    assert!(d.find("program.transform.box").is_some(), "Transform box appears for the selected clip");
+
+    // Switching to Crop via the dropdown shows Crop handles and dragging applies/updates Crop
+    d.click("program.overlay.mode");
+    d.frames(2);
+    d.click("program.overlay.mode.crop");
+    d.frames(2);
+    assert!(d.find("program.crop.box").is_some(), "Crop box appears");
+    d.drag("program.crop.handle.7", 40.0, 0.0);
+    d.frames(2);
+    let item = d.app().session.active_sequence().unwrap().find_item(ClipId(clip)).unwrap().1;
+    let crop = item.effects.iter().find(|e| e.effect == "crop").expect("dragging a crop handle applies Crop");
+    assert!(crop.f64_at("left", filmcraft_time::Tick::ZERO) > 1.0, "left crop percentage increased");
+
+    // Toggling off hides the overlay
+    d.click("program.overlay.toggle");
+    d.frames(2);
+    assert!(d.find("program.crop.box").is_none(), "overlay hides when toggled off");
 }

@@ -127,9 +127,7 @@ impl VideoEncoder for NvencEncoder {
             (false, Some(_)) => return Err(ExportError::Unsupported("NVENC Main (8-bit) does not take HDR pictures".into())),
             // the GPU converts the RGBA picture itself (BT.709 limited range, the same codes as `rgba_to_yuv420_8`)
             (false, None) if self.enc.takes_rgba() => self.enc.encode_rgba(f.rgba, f.index).map_err(|e| ExportError::Encode(format!("NVENC: {e}{hint}")))?,
-            (false, None) if f.rgba.len() == nv12_len => {
-                self.enc.encode_nv12(f.rgba, f.index).map_err(|e| ExportError::Encode(format!("NVENC: {e}{hint}")))?
-            }
+            (false, None) if f.rgba.len() == nv12_len => self.enc.encode_nv12(f.rgba, f.index).map_err(|e| ExportError::Encode(format!("NVENC: {e}{hint}")))?,
             (false, None) => {
                 filmcraft_export::timed(filmcraft_export::Stage::Convert, || {
                     filmcraft_export::rgba_to_yuv420_8(f.rgba, w, h, &mut self.y, &mut self.u, &mut self.v)

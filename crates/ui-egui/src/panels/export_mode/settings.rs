@@ -1,7 +1,7 @@
 use super::{
-    AudioCodec, BitrateMode, ColorConversion, ExportSettings, ExrCompression, FieldOrder, FileDialog, FilmcraftApp, Format, FrameRate, GpuRendering, H264Profile,
-    HardwareEncoding, Multiplexer, MxfVideoCodec, Placement, PresetManager, Rect, Reg, SampleFormat, Sense, TextOverlay, Tokens, apply_preset, is_export_busy,
-    pos2, vec2,
+    AudioCodec, BitrateMode, ColorConversion, ExportSettings, ExrCompression, FieldOrder, FileDialog, FilmcraftApp, Format, FrameRate, GpuRendering,
+    H264Profile, HardwareEncoding, Multiplexer, MxfVideoCodec, Placement, PresetManager, Rect, Reg, SampleFormat, Sense, TextOverlay, Tokens, apply_preset,
+    is_export_busy, pos2, vec2,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -21,13 +21,8 @@ pub enum ExportContainer {
 }
 
 impl ExportContainer {
-    pub const ALL: [ExportContainer; 5] = [
-        ExportContainer::Mp4,
-        ExportContainer::QuickTime,
-        ExportContainer::Mxf,
-        ExportContainer::ImageSequence,
-        ExportContainer::AudioOnly,
-    ];
+    pub const ALL: [ExportContainer; 5] =
+        [ExportContainer::Mp4, ExportContainer::QuickTime, ExportContainer::Mxf, ExportContainer::ImageSequence, ExportContainer::AudioOnly];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -47,11 +42,7 @@ impl ExportContainer {
         } else if s.format.is_mxf() {
             ExportContainer::Mxf
         } else if s.format.is_h26x() {
-            if s.multiplexer == Multiplexer::Mov {
-                ExportContainer::QuickTime
-            } else {
-                ExportContainer::Mp4
-            }
+            if s.multiplexer == Multiplexer::Mov { ExportContainer::QuickTime } else { ExportContainer::Mp4 }
         } else {
             ExportContainer::QuickTime
         }
@@ -59,11 +50,7 @@ impl ExportContainer {
 
     pub fn codecs(self) -> Vec<(Format, &'static str)> {
         match self {
-            ExportContainer::Mp4 => vec![
-                (Format::H264, "H.264"),
-                (Format::Hevc, "H.265 (HEVC)"),
-                (Format::Av1, "AV1"),
-            ],
+            ExportContainer::Mp4 => vec![(Format::H264, "H.264"), (Format::Hevc, "H.265 (HEVC)"), (Format::Av1, "AV1")],
             ExportContainer::QuickTime => vec![
                 (Format::ProRes, "Apple ProRes"),
                 (Format::H264, "H.264"),
@@ -71,10 +58,7 @@ impl ExportContainer {
                 (Format::Apv, "APV"),
                 (Format::Mjpeg, "Motion JPEG"),
             ],
-            ExportContainer::Mxf => vec![
-                (Format::MxfOp1a, "MXF OP1a (Avid DNxHR / ProRes / H.264)"),
-                (Format::MxfOpAtom, "MXF OP-Atom (Avid style)"),
-            ],
+            ExportContainer::Mxf => vec![(Format::MxfOp1a, "MXF OP1a (Avid DNxHR / ProRes / H.264)"), (Format::MxfOpAtom, "MXF OP-Atom (Avid style)")],
             ExportContainer::ImageSequence => vec![
                 (Format::PngSequence, "PNG Sequence"),
                 (Format::TiffSequence, "TIFF Sequence"),
@@ -84,12 +68,9 @@ impl ExportContainer {
                 (Format::BmpSequence, "BMP Sequence"),
                 (Format::TgaSequence, "Targa Sequence"),
             ],
-            ExportContainer::AudioOnly => vec![
-                (Format::Wav, "WAV (PCM)"),
-                (Format::Aac, "AAC (.m4a)"),
-                (Format::Flac, "FLAC (Lossless)"),
-                (Format::Aiff, "AIFF"),
-            ],
+            ExportContainer::AudioOnly => {
+                vec![(Format::Wav, "WAV (PCM)"), (Format::Aac, "AAC (.m4a)"), (Format::Flac, "FLAC (Lossless)"), (Format::Aiff, "AIFF")]
+            }
         }
     }
 }
@@ -432,11 +413,8 @@ pub(super) fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: R
             row(ui, &t, tl!("Codec"), |ui| {
                 let available_codecs = cur_container.codecs();
                 let labels: Vec<(String, Option<&str>)> = available_codecs.iter().map(|(f, l)| (l.to_string(), unavailable_why(*f))).collect();
-                let current_label = available_codecs
-                    .iter()
-                    .find(|(f, _)| *f == ex.settings.format)
-                    .map(|(_, l)| *l)
-                    .unwrap_or_else(|| ex.settings.format.label());
+                let current_label =
+                    available_codecs.iter().find(|(f, _)| *f == ex.settings.format).map(|(_, l)| *l).unwrap_or_else(|| ex.settings.format.label());
                 if let Some(i) = combo_why(ui, &mut reg, "export.format", current_label, &labels, ui.available_width() - 4.0) {
                     let f = available_codecs[i].0;
                     if f != ex.settings.format {
@@ -462,7 +440,7 @@ pub(super) fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: R
             ui.add_space(8.0);
             let s = &mut ex.settings;
             if s.has_video() && section(ui, &mut reg, &mut ex.open_sections, "video", tl!("Video"), &t) {
-                video_section(ui, &mut reg, s, &t, seq_w, seq_h, seq_hdr, gpu_name.as_deref());
+                video_section(ui, &mut reg, s, &t, (seq_w, seq_h, seq_hdr), gpu_name.as_deref());
             }
             if (s.has_audio()
                 || !s.has_video()
@@ -555,7 +533,8 @@ pub(super) fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: R
     reg.flush(app);
 }
 
-fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &Tokens, seq_w: u32, seq_h: u32, seq_hdr: bool, gpu_name: Option<&str>) {
+fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &Tokens, seq: (u32, u32, bool), gpu_name: Option<&str>) {
+    let (seq_w, seq_h, seq_hdr) = seq;
     // frame size
     let mut match_size = s.frame_size.is_none();
     row(ui, t, tl!("Frame Size"), |ui| {
@@ -638,9 +617,8 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
                         (false, _) => tl!("Main (8-bit)"),
                     };
                     row(ui, t, tl!("Profile"), |ui| ui.label(label));
-                    let hw_label = gpu_short
-                        .map(|g| format!("{g} (Hardware GPU)"))
-                        .unwrap_or_else(|| tl!("Hardware (H.265 has no software encoder)").to_string());
+                    let hw_label =
+                        gpu_short.map(|g| format!("{g} (Hardware GPU)")).unwrap_or_else(|| tl!("Hardware (H.265 has no software encoder)").to_string());
                     row(ui, t, tl!("Encoder"), |ui| ui.label(hw_label));
                 }
             } else {
@@ -725,18 +703,9 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
             // H.265 and AV1 have only hardware encoders: choosing the format is the opt-in.
             if !hevc {
                 row(ui, t, tl!("Encoder"), |ui| {
-                    let hw_opt = gpu_short
-                        .map(|g| format!("{g} (Hardware GPU)"))
-                        .unwrap_or_else(|| tl!("Auto (Hardware when available)").to_string());
-                    let encoder_opts = [
-                        (hw_opt, true),
-                        (tl!("Native / CPU (Software x264)").to_string(), true),
-                    ];
-                    let cur = if s.hardware_encoding == HardwareEncoding::Auto {
-                        &encoder_opts[0].0
-                    } else {
-                        &encoder_opts[1].0
-                    };
+                    let hw_opt = gpu_short.map(|g| format!("{g} (Hardware GPU)")).unwrap_or_else(|| tl!("Auto (Hardware when available)").to_string());
+                    let encoder_opts = [(hw_opt, true), (tl!("Native / CPU (Software x264)").to_string(), true)];
+                    let cur = if s.hardware_encoding == HardwareEncoding::Auto { &encoder_opts[0].0 } else { &encoder_opts[1].0 };
                     if let Some(i) = combo(ui, reg, "export.video.encoder", cur, &encoder_opts, 230.0) {
                         s.hardware_encoding = if i == 0 { HardwareEncoding::Auto } else { HardwareEncoding::Off };
                     }
@@ -845,10 +814,7 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
     });
     if matches!(s.video_format(), Format::H264 | Format::Hevc) {
         row(ui, t, tl!("Color Conversion"), |ui| {
-            let options = [
-                ("Auto (Direct GPU NV12 compute)", ColorConversion::Auto),
-                ("CPU (Software conversion)", ColorConversion::Cpu),
-            ];
+            let options = [("Auto (Direct GPU NV12 compute)", ColorConversion::Auto), ("CPU (Software conversion)", ColorConversion::Cpu)];
             let cur = if s.color_conversion == ColorConversion::Auto { options[0].0 } else { options[1].0 };
             let labels: Vec<(String, bool)> = options.iter().map(|(l, _)| (l.to_string(), true)).collect();
             if let Some(i) = combo(ui, reg, "export.video.colorConversion", cur, &labels, 240.0) {

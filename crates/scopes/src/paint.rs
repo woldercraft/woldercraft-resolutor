@@ -5,7 +5,7 @@
 //! detail stays visible next to flat areas, like a phosphor trace. Traces of several grids add
 //! up (R + G + B traces that coincide read white).
 
-use crate::{Grid, Vectorscope};
+use crate::{CieChromaticity, Grid, Vectorscope};
 
 /// Intensity 0..1 of a cell holding `count` samples (`reference` = a full cell, `gain` = the
 /// Brightness setting).
@@ -84,6 +84,65 @@ pub fn vectorscope(v: &Vectorscope, col: [f32; 3], gain: f32, colorize: bool) ->
                 [0.55 + 0.45 * r.clamp(0.0, 1.0), 0.55 + 0.45 * g.clamp(0.0, 1.0), 0.55 + 0.45 * b.clamp(0.0, 1.0)]
             } else {
                 col
+            };
+            for (dy, dx, w) in
+                [(0i64, 0i64, 1.0f32), (-1, 0, 0.6), (1, 0, 0.6), (0, -1, 0.6), (0, 1, 0.6), (-1, -1, 0.35), (-1, 1, 0.35), (1, -1, 0.35), (1, 1, 0.35)]
+            {
+                let (yy, xx) = (y as i64 + dy, x as i64 + dx);
+                if yy < 0 || xx < 0 || yy >= n as i64 || xx >= n as i64 {
+                    continue;
+                }
+                let k = yy as usize * n + xx as usize;
+                if i * w > level[k] {
+                    level[k] = i * w;
+                    tint[k] = t;
+                }
+            }
+        }
+    }
+    let mut out = vec![0u8; n * n * 4];
+    for ((o, l), t) in out.as_chunks_mut::<4>().0.iter_mut().zip(&level).zip(&tint) {
+        if *l > 0.0 {
+            o.copy_from_slice(&[
+                (t[0] * l * 255.0).round() as u8,
+                (t[1] * l * 255.0).round() as u8,
+                (t[2] * l * 255.0).round() as u8,
+                (l * 255.0).round() as u8,
+            ]);
+        }
+    }
+    (n, n, out)
+}
+
+/// Paint a CIE 1931 chromaticity diagram: each occupied cell takes its approximate sRGB hue
+/// derived from `(x, y)` CIE coordinates and spreads softly over a 3×3 neighbourhood.
+pub fn cie1931(v: &CieChromaticity, gain: f32) -> (usize, usize, Vec<u8>) {
+    let n = v.size;
+    let reference = (v.samples as f32 / 64.0).max(1.0);
+    let inv_709 = filmcraft_color::spaces::inverse(&filmcraft_color::Gamut::Bt709.to_xyz());
+    let mut level = vec![0f32; n * n];
+    let mut tint = vec![[0f32; 3]; n * n];
+    for y in 0..n {
+        for x in 0..n {
+            let c = v.at(x, y);
+            if c == 0 {
+                continue;
+            }
+            let i = intensity(c, reference, gain);
+            let [cx, cy] = v.point(x, y);
+            let t = if cy > 1e-4 {
+                let yy = 0.45_f64;
+                let xx = (cx as f64 / cy as f64) * yy;
+                let zz = ((1.0 - cx as f64 - cy as f64) / cy as f64) * yy;
+                let lin = filmcraft_color::spaces::mul_vec(&inv_709, [xx, yy, zz]);
+                let peak = lin[0].max(lin[1]).max(lin[2]).max(1e-4);
+                [
+                    (0.35 + 0.65 * filmcraft_color::linear_to_srgb((lin[0] / peak).max(0.0) as f32)).clamp(0.0, 1.0),
+                    (0.35 + 0.65 * filmcraft_color::linear_to_srgb((lin[1] / peak).max(0.0) as f32)).clamp(0.0, 1.0),
+                    (0.35 + 0.65 * filmcraft_color::linear_to_srgb((lin[2] / peak).max(0.0) as f32)).clamp(0.0, 1.0),
+                ]
+            } else {
+                [0.9, 0.9, 0.9]
             };
             for (dy, dx, w) in
                 [(0i64, 0i64, 1.0f32), (-1, 0, 0.6), (1, 0, 0.6), (0, -1, 0.6), (0, 1, 0.6), (-1, -1, 0.35), (-1, 1, 0.35), (1, -1, 0.35), (1, 1, 0.35)]

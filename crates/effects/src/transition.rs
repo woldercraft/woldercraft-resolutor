@@ -644,8 +644,8 @@ pub fn specs() -> Vec<EffectSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Params, find};
     use crate::effectcraft_raster::Image;
+    use crate::{Params, find};
 
     fn run(id: &str, img: &Image, set: &[(&str, Value)]) -> Image {
         let s = find(id).unwrap();

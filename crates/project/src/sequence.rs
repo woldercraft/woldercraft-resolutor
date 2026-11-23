@@ -177,13 +177,16 @@ pub struct Sequence {
     /// Color grading groups in this sequence (DaVinci Resolve-style clip groups).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub color_groups: Vec<ColorGroup>,
+    /// Sequence-wide Timeline Color Node Graph evaluated after compositing all video tracks. Schema v18.
+    #[serde(default, skip_serializing_if = "crate::ColorGraph::is_empty")]
+    pub timeline_color: crate::ColorGraph,
 }
 
 /// Identifier of a [`ColorGroup`] within a [`Sequence`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ColorGroupId(pub u64);
 
-/// A named Color Grading group sharing post-clip color effects across its member clips.
+/// A named Color Grading group sharing pre-clip and post-clip color graphs across its member clips.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ColorGroup {
     pub id: ColorGroupId,
@@ -193,6 +196,53 @@ pub struct ColorGroup {
     pub clips: Vec<ClipId>,
     #[serde(default)]
     pub effects: Vec<EffectInstance>,
+    /// Pre-Clip Color Node Graph evaluated before each member clip's own grading. Schema v18.
+    #[serde(default, skip_serializing_if = "crate::ColorGraph::is_empty")]
+    pub pre_clip: crate::ColorGraph,
+    /// Post-Clip Color Node Graph evaluated after each member clip's own grading. Schema v18.
+    #[serde(default, skip_serializing_if = "crate::ColorGraph::is_empty")]
+    pub post_clip: crate::ColorGraph,
+}
+
+impl ColorGroup {
+    /// Returns the authoritative Post-Clip [`crate::ColorGraph`], falling back to a serial graph
+    /// synthesized from legacy `effects` when `post_clip` has not been populated yet.
+    pub fn effective_post_clip(&self) -> std::borrow::Cow<'_, crate::ColorGraph> {
+        if !self.post_clip.is_empty() {
+            std::borrow::Cow::Borrowed(&self.post_clip)
+        } else if !self.effects.is_empty() {
+            std::borrow::Cow::Owned(crate::ColorGraph::from_serial_effects(&self.effects))
+        } else {
+            std::borrow::Cow::Borrowed(&self.post_clip)
+        }
+    }
+
+    /// Synchronize legacy `effects` from `post_clip`'s corrector nodes.
+    pub fn sync_effects_from_post_clip(&mut self) {
+        self.effects = self.post_clip.corrector_effects();
+    }
+
+    /// Synchronize `post_clip`'s corrector nodes from legacy `effects` when `post_clip` is active.
+    pub fn sync_post_clip_from_effects(&mut self) {
+        if self.post_clip.is_empty() {
+            return;
+        }
+        let lums: Vec<EffectInstance> = self.effects.iter().filter(|e| e.effect == "lumetri").cloned().collect();
+        let order = self.post_clip.topo_order().unwrap_or_else(|_| self.post_clip.nodes.iter().map(|n| n.id).collect());
+        let mut lum_iter = lums.into_iter();
+        for id in order {
+            if let Some(n) = self.post_clip.node_mut(id)
+                && n.kind.effect().is_some()
+                && let Some(fx) = lum_iter.next()
+            {
+                n.enabled = fx.enabled;
+                n.label = fx.label.clone();
+                if let Some(dst_fx) = n.kind.effect_mut() {
+                    *dst_fx = fx;
+                }
+            }
+        }
+    }
 }
 
 /// Split edit points: separate video and audio In/Out points (Markers ▸ Mark Split). `None` means
@@ -309,6 +359,11 @@ impl Sequence {
         }
         for t in &self.caption_tracks {
             t.check_bounds()?;
+        }
+        self.timeline_color.validate()?;
+        for g in &self.color_groups {
+            g.pre_clip.validate()?;
+            g.post_clip.validate()?;
         }
         Ok(())
     }

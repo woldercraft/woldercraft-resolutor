@@ -7,8 +7,10 @@ pub mod clip_dialogs;
 pub mod clip_mismatch;
 pub mod color_clips;
 pub mod color_dialogs;
+pub mod color_gallery;
 pub mod color_groups;
 pub mod color_nodes;
+pub mod custom_panels;
 pub mod dialogs;
 pub mod effect_controls;
 pub mod effects;
@@ -61,6 +63,8 @@ pub mod transform_handles;
 pub mod transition_controls;
 pub mod trim_monitor;
 pub mod tts;
+pub mod vfx_inspector;
+pub mod vfx_keyframes;
 pub mod vfx_nodes;
 pub mod voiceover;
 pub mod workspaces;
@@ -159,7 +163,13 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect)
         | PanelKind::ColorMasks
         | PanelKind::ColorQualifier
         | PanelKind::ColorCreative
-        | PanelKind::ColorVignette => lumetri::show(app, ui, rect, p),
+        | PanelKind::ColorVignette
+        | PanelKind::ColorSlice
+        | PanelKind::ColorWarper
+        | PanelKind::ColorRgbMixer
+        | PanelKind::ColorCst
+        | PanelKind::ColorSizing => lumetri::show(app, ui, rect, p),
+        PanelKind::ColorGallery => color_gallery::show(app, ui, rect),
         PanelKind::InspectorVideo if graphics::graphic_selected(app) => graphics::properties(app, ui, rect),
         PanelKind::InspectorVideo if text::caption_selected(app) => text::caption_properties(app, ui, rect),
         PanelKind::InspectorVideo => effect_controls::inspector_video_panel(app, ui, rect),
@@ -187,8 +197,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect)
         PanelKind::MacroTimeline => macro_timeline::show(app, ui, rect),
         PanelKind::ColorNodes => color_nodes::show(app, ui, rect),
         PanelKind::VfxNodes => vfx_nodes::show(app, ui, rect),
+        PanelKind::VfxInspector => vfx_inspector::show(app, ui, rect),
+        PanelKind::VfxKeyframes => vfx_keyframes::show(app, ui, rect),
         PanelKind::ColorClips => color_clips::show(app, ui, rect),
         PanelKind::ColorGroups => color_groups::show(app, ui, rect),
+        PanelKind::Custom(id) => custom_panels::show_custom_panel(app, ui, rect, id),
         other => crate::dock::placeholder(ui, rect, &app.tokens, &tlf!("{panel} — coming in a later milestone", panel = crate::i18n::t(other.title()))),
     }
 }
@@ -397,12 +410,15 @@ pub fn panel_menu_area(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     let mut close = false;
     let area = egui::Area::new(id.with("area")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
-            let scroll =
-                egui::ScrollArea::vertical().id_salt("panel-menu-scroll").max_height((ui.ctx().content_rect().height() - 16.0).max(0.0)).show(ui, |ui| {
+            let scroll = egui::ScrollArea::vertical()
+                .id_salt("panel-menu-scroll")
+                .auto_shrink([true, true])
+                .max_height((ui.ctx().content_rect().height() - 16.0).max(0.0))
+                .show(ui, |ui| {
                     // a small window (a floated panel can be narrower than the menu) takes the menu at its width
                     let width = ui.ctx().content_rect().width() - 16.0;
                     ui.set_min_width(190.0_f32.min(width.max(0.0)));
-                    ui.set_max_width(width.max(0.0));
+                    ui.set_max_width(320.0_f32.min(width.max(0.0)));
                     // the Timeline's tabs are its open sequences: Close Panel closes the active one and
                     // keeps the panel (Premiere's wording and behaviour)
                     if p == PanelKind::Timeline && app.session.state.active_sequence.is_some() {
@@ -496,7 +512,22 @@ pub(crate) fn panel_items(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKin
         ui.separator();
         close |= monitor::source_panel_menu(app, ui);
     }
-    if p == PanelKind::LumetriColor {
+    if matches!(
+        p,
+        PanelKind::LumetriColor
+            | PanelKind::ColorPrimaries
+            | PanelKind::ColorWheels
+            | PanelKind::ColorCurves
+            | PanelKind::ColorMasks
+            | PanelKind::ColorQualifier
+            | PanelKind::ColorCreative
+            | PanelKind::ColorVignette
+            | PanelKind::ColorSlice
+            | PanelKind::ColorWarper
+            | PanelKind::ColorRgbMixer
+            | PanelKind::ColorCst
+            | PanelKind::ColorSizing
+    ) {
         ui.separator();
         close |= lumetri::panel_menu(app, ui);
     }

@@ -5,6 +5,22 @@ impl FilmcraftApp {
         self.session.prefs_path.as_ref().and_then(|p| p.parent()).map(|d| d.join(dock::WORKSPACES_FILE))
     }
 
+    fn header_presets_path(&self) -> Option<std::path::PathBuf> {
+        self.session.prefs_path.as_ref().and_then(|p| p.parent()).map(|d| d.join(dock::HEADER_PRESETS_FILE))
+    }
+
+    fn custom_panels_path(&self) -> Option<std::path::PathBuf> {
+        self.session.prefs_path.as_ref().and_then(|p| p.parent()).map(|d| d.join(panels::custom_panels::CUSTOM_PANELS_FILE))
+    }
+
+    /// Persist user-defined custom panels to `custom_panels.json`.
+    pub fn save_custom_panels(&self) -> Result<(), String> {
+        match self.custom_panels_path() {
+            Some(path) => self.custom_panels.save(&path).map_err(|e| format!("saving custom panels: {e}")),
+            None => Ok(()),
+        }
+    }
+
     /// Replace the saved workspaces and write them to the data directory.
     pub fn set_workspaces(&mut self, w: dock::WorkspacePrefs) -> Result<(), String> {
         self.workspaces = w;
@@ -14,7 +30,63 @@ impl FilmcraftApp {
         }
     }
 
+    /// Replace the saved top-bar layout presets and write them to the data directory.
+    pub fn set_header_presets(&mut self, p: dock::WorkspacePrefs) -> Result<(), String> {
+        self.header_presets = p;
+        match self.header_presets_path() {
+            Some(path) => self.header_presets.save(&path).map_err(|e| format!("saving layout presets: {e}")),
+            None => Ok(()),
+        }
+    }
+
+    /// Apply a saved top-bar layout preset without modifying `Window ▸ Workspaces`.
+    pub fn apply_header_preset(&mut self, name: &str) {
+        if self.workspace_restored && self.ui.active_preset != name {
+            self.save_current_workspace();
+        }
+        let Some(layout) = dock::saved_preset_docking(&self.header_presets, name) else {
+            return;
+        };
+        self.ui.mode = state::Mode::Edit;
+        self.ui.dock = layout;
+        self.ui.active_preset = name.to_string();
+        self.pending_panel_raise = None;
+        self.ui.keys.maximized = None;
+        if self.header_presets.current != name {
+            let mut next = self.header_presets.clone();
+            next.current = name.to_string();
+            if let Err(e) = self.set_header_presets(next) {
+                self.ui.status = e;
+            }
+        }
+        self.last_saved_dock = Some((format!("preset:{name}"), self.ui.dock.clone()));
+        self.dock_dirty_since = None;
+    }
+
+    pub(crate) fn rename_saved_dock_key(&mut self, from: &str, to: &str) {
+        if let Some((key, _)) = self.last_saved_dock.as_mut()
+            && key == from
+        {
+            *key = to.to_string();
+        }
+    }
+
+    pub(crate) fn switch_workspace_discarding(&mut self, name: &str) {
+        self.last_saved_dock = Some((self.current_dock_save_key(), self.ui.dock.clone()));
+        self.dock_dirty_since = None;
+        self.set_workspace(name);
+    }
+
     pub fn set_workspace(&mut self, name: &str) {
+        if self.workspace_restored && (self.ui.workspace != name || !self.ui.active_preset.is_empty()) {
+            self.save_current_workspace();
+        }
+        self.ui.active_preset.clear();
+        if !self.header_presets.current.is_empty() {
+            let mut next_presets = self.header_presets.clone();
+            next_presets.current.clear();
+            let _ = self.set_header_presets(next_presets);
+        }
         self.ui.workspace = name.to_string();
         self.ui.dock = dock::saved_docking(&self.workspaces, name);
         self.pending_panel_raise = None;
@@ -33,13 +105,37 @@ impl FilmcraftApp {
         self.dock_dirty_since = None;
     }
 
-    /// Persist the current dock layout for the active workspace when it differs from disk.
+    fn current_dock_save_key(&self) -> String {
+        if self.ui.active_preset.is_empty() { self.ui.workspace.clone() } else { format!("preset:{}", self.ui.active_preset) }
+    }
+
+    /// Persist the current dock layout for the active workspace or preset when it differs from disk.
     pub(crate) fn save_current_workspace(&mut self) {
         if !self.workspace_restored {
             return;
         }
-        if self.last_saved_dock.as_ref().is_some_and(|(name, layout)| name == &self.ui.workspace && layout == &self.ui.dock) {
+        let save_key = self.current_dock_save_key();
+        if self.last_saved_dock.as_ref().is_some_and(|(key, layout)| key == &save_key && layout == &self.ui.dock) {
             self.dock_dirty_since = None;
+            return;
+        }
+        if !self.ui.active_preset.is_empty() {
+            let preset_name = self.ui.active_preset.clone();
+            let Ok(entry) = dock::SavedWorkspace::new(&preset_name, &self.ui.dock) else {
+                return;
+            };
+            let mut next = self.header_presets.clone();
+            match next.saved.iter_mut().find(|s| s.name == preset_name) {
+                Some(s) => *s = entry,
+                None => next.saved.push(entry),
+            }
+            next.current = preset_name;
+            if let Err(e) = self.set_header_presets(next) {
+                self.ui.status = e;
+            } else {
+                self.last_saved_dock = Some((save_key, self.ui.dock.clone()));
+                self.dock_dirty_since = None;
+            }
             return;
         }
         let Ok(entry) = dock::SavedWorkspace::new(&self.ui.workspace, &self.ui.dock) else {
@@ -54,7 +150,7 @@ impl FilmcraftApp {
         if let Err(e) = self.set_workspaces(next) {
             self.ui.status = e;
         } else {
-            self.last_saved_dock = Some((self.ui.workspace.clone(), self.ui.dock.clone()));
+            self.last_saved_dock = Some((save_key, self.ui.dock.clone()));
             self.dock_dirty_since = None;
         }
     }
@@ -64,7 +160,8 @@ impl FilmcraftApp {
         if !self.workspace_restored {
             return;
         }
-        let same = self.last_saved_dock.as_ref().is_some_and(|(name, layout)| name == &self.ui.workspace && layout == &self.ui.dock);
+        let save_key = self.current_dock_save_key();
+        let same = self.last_saved_dock.as_ref().is_some_and(|(key, layout)| key == &save_key && layout == &self.ui.dock);
         if same {
             self.dock_dirty_since = None;
             return;

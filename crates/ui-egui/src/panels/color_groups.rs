@@ -47,14 +47,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         .map(|g| {
             let has_grade = !g.effects.is_empty();
             let all_bypassed = has_grade && g.effects.iter().all(|e| !e.enabled);
-            GroupCardInfo {
-                id: g.id,
-                name: g.name.clone(),
-                color: g.color,
-                clip_count: g.clips.len(),
-                has_grade,
-                all_bypassed,
-            }
+            GroupCardInfo { id: g.id, name: g.name.clone(), color: g.color, clip_count: g.clips.len(), has_grade, all_bypassed }
         })
         .collect();
 
@@ -69,13 +62,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     } else {
         format!("GROUPS ({})", groups.len())
     };
-    p.text(
-        pos2(header_rect.min.x + 10.0, header_rect.center().y),
-        Align2::LEFT_CENTER,
-        &header_text,
-        Tokens::semibold(10.0),
-        Color32::from_rgb(165, 180, 200),
-    );
+    p.text(pos2(header_rect.min.x + 10.0, header_rect.center().y), Align2::LEFT_CENTER, &header_text, Tokens::semibold(10.0), Color32::from_rgb(165, 180, 200));
 
     let sel_clips: Vec<u64> = if !app.ui.selected_color_clips.is_empty() {
         app.ui.selected_color_clips.iter().map(|c| c.0).collect()
@@ -93,11 +80,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let new_r = Rect::from_min_size(pos2(rx, header_rect.min.y + 3.0), vec2(90.0, 18.0));
     let new_resp = ui.interact(new_r, egui::Id::unique("cg_new_group"), Sense::click());
     app.auto.add("color_groups.new", new_r, "New Group");
-    p.rect_filled(
-        new_r,
-        3.0,
-        if new_resp.hovered() { Color32::from_rgb(80, 130, 200) } else { Color32::from_rgb(60, 100, 165) },
-    );
+    p.rect_filled(new_r, 3.0, if new_resp.hovered() { Color32::from_rgb(80, 130, 200) } else { Color32::from_rgb(60, 100, 165) });
     p.text(new_r.center(), Align2::CENTER_CENTER, tl!("+ New Group"), Tokens::ui(9.5), Color32::WHITE);
     if new_resp.clicked() {
         pending_cmd = Some(("color.groupCreate", json!({ "clips": sel_clips })));
@@ -109,11 +92,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let clip_mode_r = Rect::from_min_size(pos2(rx, header_rect.min.y + 3.0), vec2(98.0, 18.0));
         let cm_resp = ui.interact(clip_mode_r, egui::Id::unique("cg_edit_clip_mode"), Sense::click());
         app.auto.add("color_groups.exitGroup", clip_mode_r, "Edit Individual Clip");
-        p.rect_filled(
-            clip_mode_r,
-            3.0,
-            if cm_resp.hovered() { Color32::from_rgb(55, 62, 75) } else { Color32::from_rgb(38, 43, 52) },
-        );
+        p.rect_filled(clip_mode_r, 3.0, if cm_resp.hovered() { Color32::from_rgb(55, 62, 75) } else { Color32::from_rgb(38, 43, 52) });
         p.text(clip_mode_r.center(), Align2::CENTER_CENTER, tl!("Edit Clip"), Tokens::ui(9.5), Color32::from_rgb(220, 228, 240));
         if cm_resp.clicked() {
             app.ui.active_color_group = None;
@@ -136,140 +115,122 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let mut rename_buf: String = ui.ctx().data(|d| d.get_temp(rename_buf_key)).unwrap_or_default();
         let mut commit_rename: Option<(ColorGroupId, String)> = None;
 
-        let mut scroll_ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(strip_rect)
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        );
+        let mut scroll_ui = ui.new_child(egui::UiBuilder::new().max_rect(strip_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
 
         let mut activate_group: Option<ColorGroupId> = None;
 
-        egui::ScrollArea::horizontal()
-            .auto_shrink([false, false])
-            .show(&mut scroll_ui, |ui| {
-                ui.add_space(8.0);
-                for (i, grp) in groups.iter().enumerate() {
-                    let (card_r, resp) = ui.allocate_exact_size(vec2(card_w, card_h), Sense::click());
-                    let cp = ui.painter().clone();
+        egui::ScrollArea::horizontal().auto_shrink([false, false]).show(&mut scroll_ui, |ui| {
+            ui.add_space(8.0);
+            for (i, grp) in groups.iter().enumerate() {
+                let (card_r, resp) = ui.allocate_exact_size(vec2(card_w, card_h), Sense::click());
+                let cp = ui.painter().clone();
 
-                    let is_active = app.ui.active_color_group == Some(grp.id);
-                    let is_hovered = resp.hovered();
+                let is_active = app.ui.active_color_group == Some(grp.id);
+                let is_hovered = resp.hovered();
 
-                    let bg = if is_active {
-                        Color32::from_rgb(34, 40, 52)
-                    } else if is_hovered {
-                        Color32::from_rgb(28, 33, 42)
-                    } else {
-                        Color32::from_rgb(23, 26, 33)
-                    };
-                    let gcol = Color32::from_rgb(grp.color[0], grp.color[1], grp.color[2]);
-                    let border = if is_active {
-                        Stroke::new(2.0, Color32::from_rgb(255, 175, 40))
-                    } else if is_hovered {
-                        Stroke::new(1.0, gcol)
-                    } else {
-                        Stroke::new(1.0, Color32::from_rgb(44, 50, 62))
-                    };
+                let bg = if is_active {
+                    Color32::from_rgb(34, 40, 52)
+                } else if is_hovered {
+                    Color32::from_rgb(28, 33, 42)
+                } else {
+                    Color32::from_rgb(23, 26, 33)
+                };
+                let gcol = Color32::from_rgb(grp.color[0], grp.color[1], grp.color[2]);
+                let border = if is_active {
+                    Stroke::new(2.0, Color32::from_rgb(255, 175, 40))
+                } else if is_hovered {
+                    Stroke::new(1.0, gcol)
+                } else {
+                    Stroke::new(1.0, Color32::from_rgb(44, 50, 62))
+                };
 
-                    cp.rect_filled(card_r, 4.0, bg);
+                cp.rect_filled(card_r, 4.0, bg);
 
-                    // Top color bar
-                    let bar_r = Rect::from_min_size(card_r.min, vec2(card_r.width(), 5.0));
-                    cp.rect_filled(bar_r, CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, gcol);
+                // Top color bar
+                let bar_r = Rect::from_min_size(card_r.min, vec2(card_r.width(), 5.0));
+                cp.rect_filled(bar_r, CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, gcol);
 
-                    if renaming_gid == Some(grp.id) {
-                        let edit_r = Rect::from_min_size(pos2(card_r.min.x + 6.0, card_r.min.y + 10.0), vec2(card_w - 12.0, 20.0));
-                        let te_resp = ui.put(edit_r, egui::TextEdit::singleline(&mut rename_buf).desired_width(card_w - 16.0));
-                        te_resp.request_focus();
-                        if te_resp.lost_focus() || ui.input(|inp| inp.key_pressed(egui::Key::Enter)) {
-                            commit_rename = Some((grp.id, rename_buf.clone()));
-                            renaming_gid = None;
-                        }
-                    } else {
-                        cp.text(
-                            pos2(card_r.min.x + 8.0, card_r.min.y + 19.0),
-                            Align2::LEFT_CENTER,
-                            &grp.name,
-                            Tokens::semibold(11.0),
-                            if is_active { Color32::from_rgb(255, 195, 80) } else { Color32::WHITE },
-                        );
+                if renaming_gid == Some(grp.id) {
+                    let edit_r = Rect::from_min_size(pos2(card_r.min.x + 6.0, card_r.min.y + 10.0), vec2(card_w - 12.0, 20.0));
+                    let te_resp = ui.put(edit_r, egui::TextEdit::singleline(&mut rename_buf).desired_width(card_w - 16.0));
+                    te_resp.request_focus();
+                    if te_resp.lost_focus() || ui.input(|inp| inp.key_pressed(egui::Key::Enter)) {
+                        commit_rename = Some((grp.id, rename_buf.clone()));
+                        renaming_gid = None;
                     }
-
-                    let clip_label = format!("{} clips", grp.clip_count);
+                } else {
                     cp.text(
-                        pos2(card_r.min.x + 8.0, card_r.max.y - 12.0),
+                        pos2(card_r.min.x + 8.0, card_r.min.y + 19.0),
                         Align2::LEFT_CENTER,
-                        &clip_label,
-                        Tokens::ui(9.5),
-                        Color32::from_rgb(155, 168, 188),
+                        &grp.name,
+                        Tokens::semibold(11.0),
+                        if is_active { Color32::from_rgb(255, 195, 80) } else { Color32::WHITE },
                     );
+                }
 
-                    let status_text = if !grp.has_grade {
-                        tl!("Empty")
-                    } else if grp.all_bypassed {
-                        tl!("Bypassed")
-                    } else {
-                        tl!("Graded")
-                    };
-                    let status_col = if !grp.has_grade {
-                        Color32::from_rgb(115, 125, 145)
-                    } else if grp.all_bypassed {
-                        Color32::from_rgb(220, 160, 55)
-                    } else {
-                        Color32::from_rgb(80, 185, 110)
-                    };
-                    cp.text(
-                        pos2(card_r.max.x - 8.0, card_r.max.y - 12.0),
-                        Align2::RIGHT_CENTER,
-                        status_text,
-                        Tokens::semibold(9.0),
-                        status_col,
-                    );
+                let clip_label = format!("{} clips", grp.clip_count);
+                cp.text(pos2(card_r.min.x + 8.0, card_r.max.y - 12.0), Align2::LEFT_CENTER, &clip_label, Tokens::ui(9.5), Color32::from_rgb(155, 168, 188));
 
-                    cp.rect_stroke(card_r, 4.0, border, StrokeKind::Inside);
+                let status_text = if !grp.has_grade {
+                    tl!("Empty")
+                } else if grp.all_bypassed {
+                    tl!("Bypassed")
+                } else {
+                    tl!("Graded")
+                };
+                let status_col = if !grp.has_grade {
+                    Color32::from_rgb(115, 125, 145)
+                } else if grp.all_bypassed {
+                    Color32::from_rgb(220, 160, 55)
+                } else {
+                    Color32::from_rgb(80, 185, 110)
+                };
+                cp.text(pos2(card_r.max.x - 8.0, card_r.max.y - 12.0), Align2::RIGHT_CENTER, status_text, Tokens::semibold(9.0), status_col);
 
-                    app.auto.add(&format!("color_groups.group.{}", grp.id.0), card_r, &grp.name);
-                    app.auto.add(&format!("color_groups.index.{i}"), card_r, &grp.name);
+                cp.rect_stroke(card_r, 4.0, border, StrokeKind::Inside);
 
-                    if resp.double_clicked() {
+                app.auto.add(&format!("color_groups.group.{}", grp.id.0), card_r, &grp.name);
+                app.auto.add(&format!("color_groups.index.{i}"), card_r, &grp.name);
+
+                if resp.double_clicked() {
+                    renaming_gid = Some(grp.id);
+                    rename_buf = grp.name.clone();
+                } else if resp.clicked() {
+                    activate_group = Some(grp.id);
+                }
+
+                resp.context_menu(|ui| {
+                    if !sel_clips.is_empty() && ui.button(tl!("Assign Selected Clips")).clicked() {
+                        pending_cmd = Some(("color.groupAssign", json!({ "clips": sel_clips, "group": grp.id.0 })));
+                        ui.close();
+                    }
+                    if ui.button(tl!("Rename")).clicked() {
                         renaming_gid = Some(grp.id);
                         rename_buf = grp.name.clone();
-                    } else if resp.clicked() {
-                        activate_group = Some(grp.id);
+                        ui.close();
                     }
+                    if ui.button(tl!("Toggle Bypass")).clicked() {
+                        pending_cmd = Some(("color.groupToggleBypass", json!({ "group": grp.id.0 })));
+                        ui.close();
+                    }
+                    if ui.button(tl!("Reset Grade")).clicked() {
+                        pending_cmd = Some(("color.groupReset", json!({ "group": grp.id.0 })));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button(tl!("Delete Group")).clicked() {
+                        pending_cmd = Some(("color.groupDelete", json!({ "group": grp.id.0 })));
+                        if app.ui.active_color_group == Some(grp.id) {
+                            app.ui.active_color_group = None;
+                        }
+                        ui.close();
+                    }
+                });
 
-                    resp.context_menu(|ui| {
-                        if !sel_clips.is_empty() && ui.button(tl!("Assign Selected Clips")).clicked() {
-                            pending_cmd = Some(("color.groupAssign", json!({ "clips": sel_clips, "group": grp.id.0 })));
-                            ui.close();
-                        }
-                        if ui.button(tl!("Rename")).clicked() {
-                            renaming_gid = Some(grp.id);
-                            rename_buf = grp.name.clone();
-                            ui.close();
-                        }
-                        if ui.button(tl!("Toggle Bypass")).clicked() {
-                            pending_cmd = Some(("color.groupToggleBypass", json!({ "group": grp.id.0 })));
-                            ui.close();
-                        }
-                        if ui.button(tl!("Reset Grade")).clicked() {
-                            pending_cmd = Some(("color.groupReset", json!({ "group": grp.id.0 })));
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui.button(tl!("Delete Group")).clicked() {
-                            pending_cmd = Some(("color.groupDelete", json!({ "group": grp.id.0 })));
-                            if app.ui.active_color_group == Some(grp.id) {
-                                app.ui.active_color_group = None;
-                            }
-                            ui.close();
-                        }
-                    });
-
-                    ui.add_space(6.0);
-                }
-                ui.add_space(8.0);
-            });
+                ui.add_space(6.0);
+            }
+            ui.add_space(8.0);
+        });
 
         ui.ctx().data_mut(|d| {
             if let Some(gid) = renaming_gid {
@@ -296,9 +257,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if let Some((cmd, args)) = pending_cmd {
         match app.session.execute(cmd, args) {
             Ok(val) => {
-                if select_new_group
-                    && let Some(gid) = val.get("group").and_then(|v| v.as_u64())
-                {
+                if select_new_group && let Some(gid) = val.get("group").and_then(|v| v.as_u64()) {
                     app.ui.active_color_group = Some(ColorGroupId(gid));
                     app.ui.active_color_node = 0;
                 }

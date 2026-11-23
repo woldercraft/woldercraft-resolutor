@@ -179,6 +179,27 @@ pub fn route(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: &Val
             app.ui.extras.dynamic_waveforms = params.get("on").and_then(Value::as_bool).unwrap_or(!app.ui.extras.dynamic_waveforms);
             return Some(Ok(json!({"dynamicAudioWaveforms": app.ui.extras.dynamic_waveforms})));
         }
+        "timeline.waveformStyle" => {
+            if let Some(style_str) = params.get("style").and_then(Value::as_str) {
+                let Some(style) = crate::state::WaveformStyle::parse(style_str) else {
+                    return Some(Err(format!("unknown waveform style: {style_str}")));
+                };
+                app.ui.timeline.waveform_style = style;
+            }
+            if let Some(full) = params.get("fullHeight").and_then(Value::as_bool) {
+                app.ui.timeline.waveform_full_height = full;
+            }
+            ctx.request_repaint();
+            return Some(Ok(json!({
+                "style": app.ui.timeline.waveform_style.name(),
+                "fullHeight": app.ui.timeline.waveform_full_height,
+            })));
+        }
+        "timeline.refreshWaveforms" => {
+            app.tl.refresh_all_waveforms();
+            ctx.request_repaint();
+            return Some(Ok(json!({"refreshed": true})));
+        }
         "help.revealLogFiles" => {
             let r = write_session_log(app).and_then(|p| {
                 let s = p.to_string_lossy().to_string();
@@ -204,11 +225,10 @@ pub fn route(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: &Val
         "clip.generateAudioWaveform" => {
             let r = app.session.execute(id, params.clone()).map_err(|e| e.to_string());
             if let Ok(v) = &r {
-                let mut peaks = app.tl.peaks.lock().unwrap_or_else(|e| e.into_inner());
-                for i in v["items"].as_array().cloned().unwrap_or_default() {
-                    let item = filmcraft_engine::project::ItemId(i.as_u64().unwrap_or_default());
-                    peaks.retain(|(it, _), _| *it != item);
-                }
+                let items: Vec<filmcraft_engine::project::ItemId> =
+                    v["items"].as_array().into_iter().flatten().filter_map(|i| i.as_u64().map(filmcraft_engine::project::ItemId)).collect();
+                app.tl.refresh_item_waveforms(&items);
+                ctx.request_repaint();
             }
             return Some(r);
         }

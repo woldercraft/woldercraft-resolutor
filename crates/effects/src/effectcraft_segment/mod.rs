@@ -15,7 +15,6 @@
 //! - [`mobilesam`]: MobileSAM (Apache-2.0) and [`mediapipe`]: MediaPipe Face Landmarker
 //!   (Apache-2.0), in plain Rust ([`nn`] kernels on rayon).
 
-
 pub mod face;
 pub mod mediapipe;
 pub mod mobilesam;

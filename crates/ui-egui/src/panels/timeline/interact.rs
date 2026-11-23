@@ -270,11 +270,7 @@ pub fn clip_range_between(seq: &Sequence, layout: &Layout, a: ClipId, b: ClipId)
                 let min_p = pa.min(pb);
                 let max_p = pa.max(pb);
                 let mut t_set = HashSet::new();
-                layout.rows[min_p..=max_p]
-                    .iter()
-                    .map(|r| r.track)
-                    .filter(|t| t_set.insert(*t))
-                    .collect()
+                layout.rows[min_p..=max_p].iter().map(|r| r.track).filter(|t| t_set.insert(*t)).collect()
             }
             _ => vec![track_a, track_b],
         }
@@ -285,10 +281,8 @@ pub fn clip_range_between(seq: &Sequence, layout: &Layout, a: ClipId, b: ClipId)
     for tid in tracks {
         if let Some(tr) = seq.track(tid) {
             for it in &tr.items {
-                if it.start < t_max && it.end() > t_min {
-                    if seen.insert(it.id) {
-                        result.push(it.id);
-                    }
+                if it.start < t_max && it.end() > t_min && seen.insert(it.id) {
+                    result.push(it.id);
                 }
             }
         }
@@ -299,9 +293,7 @@ pub fn clip_range_between(seq: &Sequence, layout: &Layout, a: ClipId, b: ClipId)
     if seen.insert(b) {
         result.push(b);
     }
-    result.sort_by_key(|&cid| {
-        seq.find_item(cid).map(|(_, it)| it.start).unwrap_or(Tick::ZERO)
-    });
+    result.sort_by_key(|&cid| seq.find_item(cid).map(|(_, it)| it.start).unwrap_or(Tick::ZERO));
     result
 }
 
@@ -465,6 +457,40 @@ fn press_action(app: &mut FilmcraftApp, ctx: &egui::Context, resp: &egui::Respon
     false
 }
 
+fn start_clip_press(
+    app: &mut FilmcraftApp,
+    resp: &egui::Response,
+    seq: &Sequence,
+    layout: &Layout,
+    hit: (ClipId, TrackId, Tick),
+    mods: egui::Modifiers,
+) -> Option<Drag> {
+    let (clip, track, t) = hit;
+    let sel = &app.session.state.selection;
+    if mods.shift {
+        let anchor = if sel.is_empty() {
+            clip
+        } else {
+            app.tl.selection_anchor.filter(|&a| seq.find_item(a).is_some() && sel.contains(&a)).or_else(|| sel.last().copied()).unwrap_or(clip)
+        };
+        let range_ids: Vec<u64> = clip_range_between(seq, layout, anchor, clip).iter().map(|c| c.0).collect();
+        let _ = app.session.execute("timeline.select", json!({"clips": range_ids, "add": mods.command, "linked": !mods.alt}));
+        if app.tl.selection_anchor.is_none() {
+            app.tl.selection_anchor = Some(anchor);
+        }
+    } else if mods.command {
+        let _ = app.session.execute("timeline.select", json!({"clips": [clip.0], "toggle": true, "linked": !mods.alt}));
+        app.tl.selection_anchor = Some(clip);
+    } else if !sel.contains(&clip) || resp.clicked() {
+        let _ = app.session.execute("timeline.select", json!({"clips": [clip.0], "linked": !mods.alt}));
+        app.tl.selection_anchor = Some(clip);
+    }
+    resp.drag_started().then(|| {
+        let clips = app.session.state.selection.clone();
+        Drag::Move { clips, grab_tick: t, start_track: track, offset: Tick::ZERO, track_delta: 0, new_track: None, copy: mods.alt }
+    })
+}
+
 /// What a press does: the drag it starts (or the tool's click action), the playhead jump a
 /// ruler press makes, and the selection a tool change makes first.
 #[allow(clippy::too_many_arguments)]
@@ -582,60 +608,7 @@ fn start_drag(
         }
         (Tool::Slip, Grab::Other(Hit::Clip { clip, .. })) => Some(Drag::Slip { clip, delta: Tick::ZERO }),
         (Tool::Slide, Grab::Other(Hit::Clip { clip, .. })) => Some(Drag::Slide { clip, delta: Tick::ZERO }),
-        (_, Grab::Other(Hit::Clip { clip, track, .. })) => {
-            // select (Shift / Ctrl+Shift: range/chain selection; Ctrl: toggle; click: select)
-            let sel = &app.session.state.selection;
-            if mods.shift {
-                let anchor = if sel.is_empty() {
-                    clip
-                } else {
-                    app.tl
-                        .selection_anchor
-                        .filter(|&a| seq.find_item(a).is_some() && sel.contains(&a))
-                        .or_else(|| sel.last().copied())
-                        .unwrap_or(clip)
-                };
-                let range_clips = clip_range_between(seq, layout, anchor, clip);
-                let range_ids: Vec<u64> = range_clips.iter().map(|c| c.0).collect();
-                let _ = app.session.execute(
-                    "timeline.select",
-                    json!({
-                        "clips": range_ids,
-                        "add": mods.command,
-                        "linked": !mods.alt,
-                    }),
-                );
-                if app.tl.selection_anchor.is_none() {
-                    app.tl.selection_anchor = Some(anchor);
-                }
-            } else if mods.command {
-                let _ = app.session.execute(
-                    "timeline.select",
-                    json!({
-                        "clips": [clip.0],
-                        "toggle": true,
-                        "linked": !mods.alt,
-                    }),
-                );
-                app.tl.selection_anchor = Some(clip);
-            } else if !sel.contains(&clip) || resp.clicked() {
-                // Alt-click isolates one side; Alt-drag keeps the selected group to copy.
-                let _ = app.session.execute(
-                    "timeline.select",
-                    json!({
-                        "clips": [clip.0],
-                        "linked": !mods.alt,
-                    }),
-                );
-                app.tl.selection_anchor = Some(clip);
-            }
-            if resp.drag_started() {
-                let clips = app.session.state.selection.clone();
-                Some(Drag::Move { clips, grab_tick: t, start_track: track, offset: Tick::ZERO, track_delta: 0, new_track: None, copy: mods.alt })
-            } else {
-                None
-            }
-        }
+        (_, Grab::Other(Hit::Clip { clip, track, .. })) => start_clip_press(app, resp, seq, layout, (clip, track, t), mods),
         // click a transition to select it (Shift adds / removes); drag an end to change its
         // duration or its middle to slide it over the cut (#430, #224)
         (Tool::Selection, Grab::Other(Hit::Transition { id, edge, .. })) => {
@@ -1543,8 +1516,8 @@ pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
 #[cfg(test)]
 mod tests {
     use super::*;
-    use filmcraft_engine::Session;
     use crate::panels::timeline::layout::Row;
+    use filmcraft_engine::Session;
 
     #[test]
     fn clip_range_between_returns_chain_of_clips() {
@@ -1560,13 +1533,7 @@ mod tests {
         let layout = Layout {
             content: Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 500.0)),
             ruler: Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 30.0)),
-            rows: vec![Row {
-                track: track.id,
-                kind: TrackKind::Video,
-                index: 0,
-                rect: Rect::from_min_max(pos2(0.0, 30.0), pos2(1000.0, 80.0)),
-                lane: false,
-            }],
+            rows: vec![Row { track: track.id, kind: TrackKind::Video, index: 0, rect: Rect::from_min_max(pos2(0.0, 30.0), pos2(1000.0, 80.0)), lane: false }],
             pps: 100.0,
             scroll: 0.0,
             split_y: 200.0,

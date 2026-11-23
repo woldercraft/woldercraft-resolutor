@@ -68,10 +68,12 @@ impl FilmcraftApp {
             return None;
         }
         let want_scope = g.scope_last_requested.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(500));
-        let scope_tag = want_scope.then(|| match key.target {
-            frames::Target::SequencePlan(seq_id, _) => Some(crate::panels::scopes::gpu_scope_key(seq_id, key.frame, key.revision, key.bypass)),
-            _ => None,
-        }).flatten();
+        let scope_tag = want_scope
+            .then(|| match key.target {
+                frames::Target::SequencePlan(seq_id, _) => Some(crate::panels::scopes::gpu_scope_key(seq_id, key.frame, key.revision, key.bypass)),
+                _ => None,
+            })
+            .flatten();
         let t0 = web_time::Instant::now();
         let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let (view, size) = g.compositor.composite_prepared_with_scope(&plan.plan, Some(&plan.prepared), scope_tag);

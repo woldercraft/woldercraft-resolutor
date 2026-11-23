@@ -1,6 +1,6 @@
 use super::*;
-use crate::{EffectEnv, run_fx};
 use crate::effectcraft_raster::Image;
+use crate::{EffectEnv, run_fx};
 
 fn px(id: &str, vals: &[(&str, Value)], c: [f32; 4]) -> [f32; 4] {
     run_fx(id, vals, Image::filled(2, 2, c), 0.0, EffectEnv::default()).img.get(0, 0)

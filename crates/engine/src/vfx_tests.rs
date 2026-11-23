@@ -286,3 +286,10 @@ fn transition_duration_is_clamped_to_what_the_cut_supports() {
         preview_transition(&s, &json!({"effect": "cross_dissolve", "clip": clips[1].0, "edge": "in", "frames": 5}), TrackKind::Video).unwrap_err().to_string();
     assert!(err.contains("no room for a transition"), "{err}");
 }
+
+#[test]
+fn effectcraft_checkbox_and_popup_are_animatable() {
+    let gauss = filmcraft_project::find_effect("ec.blur.gaussian").expect("ec.blur.gaussian");
+    assert!(gauss.param("dimensions").expect("dimensions popup").animatable);
+    assert!(gauss.param("repeatEdge").expect("repeatEdge checkbox").animatable);
+}

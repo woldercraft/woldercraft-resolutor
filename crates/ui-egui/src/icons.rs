@@ -2,7 +2,7 @@
 //! third-party or Adobe artwork). Shapes follow NLE conventions (ripple brackets, razor blade…).
 
 use egui::epaint::{PathShape, PathStroke};
-use egui::{Color32, Painter, Pos2, Rect, Stroke, pos2, vec2};
+use egui::{pos2, vec2, Color32, Painter, Pos2, Rect, Stroke};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -127,6 +127,10 @@ pub enum Icon {
     Moon,
     /// Colour parameters: pick a colour from the Program monitor (a pipette).
     Eyedropper,
+    /// GPU acceleration: a lightning bolt.
+    Bolt,
+    /// Collapse all folders: two stacked upward chevrons / folder lines.
+    CollapseAll,
 }
 
 pub struct Pen16<'a> {
@@ -792,6 +796,14 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(9.5, 7.5), (3.5, 12.5)]);
             pen.line(&[(3.5, 12.5), (2.5, 13.5)]);
         }
+        Bolt => {
+            pen.fill(&[(9.5, 2.0), (4.0, 9.0), (8.5, 9.0)]);
+            pen.fill(&[(7.5, 7.0), (12.0, 7.0), (6.5, 14.0)]);
+        }
+        CollapseAll => {
+            pen.line(&[(4.0, 7.0), (8.0, 3.5), (12.0, 7.0)]);
+            pen.line(&[(4.0, 12.0), (8.0, 8.5), (12.0, 12.0)]);
+        }
     }
 }
 
@@ -816,14 +828,18 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, active: bool, t: &crate:
         t.icon
     };
     paint(ui.painter(), rect.shrink(size * 0.2), icon, col);
-    if tooltip.is_empty() { resp } else { resp.on_hover_text(tooltip) }
+    if tooltip.is_empty() {
+        resp
+    } else {
+        resp.on_hover_text(tooltip)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use Icon::*;
     use egui::epaint::{ColorMode, Shape};
+    use Icon::*;
 
     const ALL: &[Icon] = &[
         Monitor,
@@ -928,6 +944,8 @@ mod tests {
         Network,
         Clock,
         Eyedropper,
+        Bolt,
+        CollapseAll,
     ];
 
     /// Paint `icon` at `ppp` device pixels per point into a rect of `size` points whose corner is

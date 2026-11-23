@@ -249,9 +249,9 @@ pub(super) fn draw_clip(
             }
         }
     }
-    // waveform (audio): rectified, lower 40 %
+    // waveform (audio): rectified, centered, bordered or stereo split
     if kind == TrackKind::Audio && app.ui.timeline.show_waveforms && w > 3.0 {
-        draw_waveform(app, p, body, it, Color32::from_rgb(fill.r() / 2, fill.g() / 2, fill.b() / 2));
+        draw_waveform(app, ctx, p, body, it, Color32::from_rgb(fill.r() / 2, fill.g() / 2, fill.b() / 2));
     }
     let clip_p = p.with_clip_rect(body.shrink2(vec2(1.0, 0.0)).intersect(p.clip_rect()));
     // name band (View ▸ the wrench menu's Show Video Names / Show Audio Names)

@@ -47,6 +47,14 @@ pub trait FxEnv: Sync {
     fn source_frame(&self, dt: f64, scale: f32) -> Option<Image>;
     /// Video track `index` (0 = V1) rendered alone at this time, output-sized.
     fn track(&self, index: usize) -> Option<Image>;
+    /// Video track `index` (0 = V1) rendered alone at `dt` seconds from the current time.
+    fn track_at(&self, index: usize, dt: f64) -> Option<Image> {
+        if dt.abs() < 1e-6 { self.track(index) } else { None }
+    }
+    /// `frames` interleaved stereo audio samples starting at `comp_start` seconds, at `rate` Hz.
+    fn audio_at(&self, _comp_start: f64, _frames: usize, _rate: u32) -> Option<Vec<f32>> {
+        None
+    }
     /// Maps working-layer pixels to output pixels (Motion included).
     fn layer_to_output(&self) -> Affine;
     /// Clip duration on the timeline, in seconds.
@@ -138,6 +146,43 @@ impl FxEnv for ItemEnv<'_> {
         }
         let o = RenderOptions { captions: false, working_output: true, depth: self.opts.depth + 1, ..self.opts };
         Some(crate::render_seq_tracks(self.project, self.seq, self.t, o, self.sources, Some(index)))
+    }
+    fn track_at(&self, index: usize, dt: f64) -> Option<Image> {
+        if index >= self.seq.video_tracks.len() || !dt.is_finite() {
+            return None;
+        }
+        let at = (self.t + Tick::from_seconds_f64(dt)).max(Tick::ZERO);
+        let o = RenderOptions { captions: false, working_output: true, depth: self.opts.depth + 1, ..self.opts };
+        Some(crate::render_seq_tracks(self.project, self.seq, at, o, self.sources, Some(index)))
+    }
+    fn audio_at(&self, comp_start: f64, frames: usize, rate: u32) -> Option<Vec<f32>> {
+        if frames == 0 || rate == 0 || !comp_start.is_finite() || self.seq.audio_tracks.is_empty() {
+            return None;
+        }
+        let out_frames = frames.min(192_000);
+        let sr = self.seq.settings.sample_rate.max(1) as f64;
+        let start_sample = (comp_start * sr).round() as i64;
+        let src_frames = ((out_frames as f64 * sr / f64::from(rate)).ceil() as usize).clamp(1, 384_000);
+        let buf = crate::mixer::mix_graph(self.project, self.seq, start_sample, src_frames, self.sources, None);
+        let mut out = vec![0.0f32; out_frames * 2];
+        let Some(ch0) = buf.channels.first() else {
+            return Some(out);
+        };
+        let ch1 = buf.channels.get(1).unwrap_or(ch0);
+        let avail = ch0.len();
+        if avail == 0 {
+            return Some(out);
+        }
+        let ratio = sr / f64::from(rate);
+        for i in 0..out_frames {
+            let pos = i as f64 * ratio;
+            let i0 = (pos.floor() as usize).min(avail - 1);
+            let i1 = (i0 + 1).min(avail - 1);
+            let frac = (pos - i0 as f64) as f32;
+            out[i * 2] = ch0[i0] + (ch0[i1] - ch0[i0]) * frac;
+            out[i * 2 + 1] = ch1[i0] + (ch1[i1] - ch1[i0]) * frac;
+        }
+        Some(out)
     }
     fn layer_to_output(&self) -> Affine {
         self.layer_to_output

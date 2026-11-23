@@ -12,7 +12,7 @@
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
 use filmcraft_geom::{Affine, Vec2};
-use filmcraft_project::{ClipId, EffectInstance, MaskMode, MaskPath, MaskVertex, TrackItem};
+use filmcraft_project::{ClipId, EffectInstance, MaskKind, MaskMode, MaskPath, MaskVertex, TrackItem};
 use filmcraft_time::Tick;
 use serde_json::{Value, json};
 
@@ -254,11 +254,17 @@ pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, fra
     let Some(to_clip) = to_screen.inverse() else { return };
     let lin_inv = Affine { e: 0.0, f: 0.0, ..to_clip };
     let path = m.path_at(mt);
+    let effective_path = m.effective_path_at(mt);
+    let corner_radius = m.corner_radius.f64_at(mt).max(0.0);
     let feather = m.feather.f64_at(mt).max(0.0);
     let expansion = m.expansion.f64_at(mt);
     let col = Color32::from_rgb(0x5a, 0xb4, 0xff);
     let painter = ui.painter().with_clip_rect(pic.expand(16.0));
-    let flat = path.flatten(0.5);
+    if m.kind == MaskKind::Gradient {
+        gradient_overlay(app, ui, &painter, &path, &to_screen, &lin_inv, sel.clip.0, sel.effect, sel.mask, col);
+        return;
+    }
+    let flat = effective_path.flatten(0.5);
     let screen: Vec<Pos2> = flat.iter().map(|v| sp(&to_screen, *v)).collect();
     painter.add(egui::Shape::closed_line(screen.clone(), Stroke::new(1.5, col)));
     // expansion + feather contours (dashed)
@@ -346,7 +352,7 @@ pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, fra
     // ---- feather (top) and expansion (bottom) handles
     feather_expansion_handles(app, ui, &painter, &flat, &to_screen, &lin_inv, expansion, feather, &target, gesture, &mut actions);
     // ---- corner roundness (masks with sharp corners: rectangles, polygons)
-    actions.extend(roundness_handle(app, ui, &painter, &path, &to_screen, &target));
+    actions.extend(roundness_handle(app, ui, &painter, &path, corner_radius, &to_screen, &target));
     // ---- tangent handles and vertices
     let sel_v_id = egui::Id::unique(("mask-sel-vertex", sel.clip.0, sel.effect, sel.mask));
     let n_v = path.vertices.len();
@@ -407,6 +413,60 @@ pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, fra
             actions.push(("masks.addVertex".into(), with(json!({"after": i, "at": [c.x, c.y]}))));
         }
     }
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) && ui.ctx().memory(|m| m.focused().is_none()) {
+        actions.push(("masks.select".into(), json!({"none": true})));
+    }
+    for (c, p) in actions {
+        if let Err(e) = app.session.execute(&c, p) {
+            app.ui.status = e.to_string();
+        }
+    }
+}
+
+/// On-monitor gizmo for `MaskKind::Gradient`: solid start line at `p0`, dashed falloff line
+/// at `p1`, connecting direction vector, and draggable `p0`/`p1` vertex handles.
+#[allow(clippy::too_many_arguments)]
+fn gradient_overlay(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    path: &MaskPath,
+    to_screen: &Affine,
+    lin_inv: &Affine,
+    clip: u64,
+    effect: usize,
+    mask: usize,
+    col: Color32,
+) {
+    let p0 = path.vertices.first().map(|v| v.p).unwrap_or(Vec2::new(-120.0, 0.0));
+    let p1 = path.vertices.get(1).map(|v| v.p).unwrap_or(Vec2::new(120.0, 0.0));
+    let dir = p1 - p0;
+    let len = dir.length();
+    let perp = if len > 1e-4 { Vec2::new(-dir.y / len, dir.x / len) } else { Vec2::new(0.0, 1.0) };
+    let extent = 4000.0;
+    let s0 = sp(to_screen, p0);
+    let s1 = sp(to_screen, p1);
+    painter.line_segment([sp(to_screen, p0 - perp * extent), sp(to_screen, p0 + perp * extent)], Stroke::new(1.5, col));
+    painter.extend(egui::Shape::dashed_line(
+        &[sp(to_screen, p1 - perp * extent), sp(to_screen, p1 + perp * extent)],
+        Stroke::new(1.0, col.gamma_multiply(0.7)),
+        5.0,
+        4.0,
+    ));
+    painter.line_segment([s0, s1], Stroke::new(1.2, col.gamma_multiply(0.9)));
+
+    let target = json!({"clip": clip, "effect": effect, "mask": mask});
+    let gesture_id = egui::Id::unique("mask-gesture");
+    let mut gesture: u64 = ui.data(|d| d.get_temp(gesture_id)).unwrap_or(0);
+    if ui.input(|i| i.pointer.any_pressed()) {
+        gesture += 1;
+        ui.data_mut(|d| d.insert_temp(gesture_id, gesture));
+    }
+    let sel_v_id = egui::Id::unique(("mask-sel-vertex", clip, effect, mask));
+    let n_v = path.vertices.len();
+    let mut sel_vs: Vec<usize> = ui.data(|d| d.get_temp::<(usize, Vec<usize>)>(sel_v_id)).filter(|(n, _)| *n == n_v).map(|(_, v)| v).unwrap_or_default();
+    let mut actions: Vec<(String, Value)> = Vec::new();
+    vertex_handles(app, ui, painter, path, to_screen, lin_inv, &target, &mut sel_vs, sel_v_id, n_v, gesture, &mut actions);
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) && ui.ctx().memory(|m| m.focused().is_none()) {
         actions.push(("masks.select".into(), json!({"none": true})));
     }
@@ -690,6 +750,7 @@ fn roundness_handle(
     ui: &mut egui::Ui,
     painter: &egui::Painter,
     path: &MaskPath,
+    current_radius: f64,
     to_screen: &Affine,
     target: &Value,
 ) -> Option<(String, Value)> {
@@ -704,7 +765,8 @@ fn roundness_handle(
     let id = egui::Id::unique("mask-roundness");
     let dist_id = id.with("dist");
     let dragging = ui.ctx().is_being_dragged(id);
-    let dist: f64 = if dragging { ui.data(|d| d.get_temp(dist_id)).unwrap_or(0.0) } else { 0.0 };
+    let initial_dist = if current_radius.is_finite() && current_radius > 0.0 { current_radius.min(max_radius) / c.sin_half.max(1e-9) } else { 0.0 };
+    let dist: f64 = if dragging { ui.data(|d| d.get_temp(dist_id)).unwrap_or(initial_dist) } else { initial_dist };
     let radius = drag_radius(dist, c, max_radius);
     let anchor = sp(to_screen, c.p);
     let dir = sp(to_screen, c.p + c.bisector) - anchor;
@@ -714,8 +776,8 @@ fn roundness_handle(
     let r = ui.interact(hr.expand(3.0), id, Sense::drag()).on_hover_text(tl!("Drag inward to round the corners"));
     app.auto.add("program.mask.roundness", hr, "Mask corner roundness");
     let col = Color32::from_rgb(0x5a, 0xb4, 0xff);
-    if dragging && radius > 0.0 {
-        let preview = path.with_rounded_corners(radius, &path.roundable_corners()).flatten(0.5);
+    if dragging {
+        let preview = if radius > 0.0 { path.with_rounded_corners(radius, &path.roundable_corners()).flatten(0.5) } else { path.flatten(0.5) };
         painter.add(egui::Shape::closed_line(preview.iter().map(|v| sp(to_screen, *v)).collect(), Stroke::new(1.5, Color32::WHITE)));
         painter.text(hp + vec2(10.0, -10.0), Align2::LEFT_BOTTOM, format!("{radius:.1}"), Tokens::ui(10.5), app.tokens.hot_text);
     }
@@ -724,19 +786,19 @@ fn roundness_handle(
     painter.circle_stroke(hp, 4.0, Stroke::new(1.5, col));
     let primary = egui::PointerButton::Primary;
     if r.drag_started_by(primary) {
-        ui.data_mut(|d| d.insert_temp(dist_id, 0.0_f64));
+        ui.data_mut(|d| d.insert_temp(dist_id, initial_dist));
     }
     if r.dragged_by(primary) && r.drag_delta() != egui::Vec2::ZERO {
         let d = lin_inv.apply(Vec2::new(r.drag_delta().x as f64, r.drag_delta().y as f64));
         let along = d.x * c.bisector.x + d.y * c.bisector.y;
         // accumulate the raw distance: past the limit the handle waits for the pointer to come back
-        let total = ui.data(|m| m.get_temp::<f64>(dist_id)).unwrap_or(0.0) + along;
-        ui.data_mut(|m| m.insert_temp(dist_id, if total.is_finite() { total } else { 0.0 }));
+        let total = ui.data(|m| m.get_temp::<f64>(dist_id)).unwrap_or(initial_dist) + along;
+        ui.data_mut(|m| m.insert_temp(dist_id, if total.is_finite() { total.max(0.0) } else { 0.0 }));
     }
     if r.drag_stopped_by(primary) {
-        let dist: f64 = ui.data_mut(|d| d.remove_temp(dist_id)).unwrap_or(0.0);
+        let dist: f64 = ui.data_mut(|d| d.remove_temp(dist_id)).unwrap_or(initial_dist);
         let radius = (drag_radius(dist, c, max_radius) * 10.0).round() / 10.0;
-        if radius > 0.0 {
+        if (radius - current_radius).abs() > 1e-4 {
             let mut p = target.clone();
             if let Some(o) = p.as_object_mut() {
                 o.insert("radius".into(), json!(radius));

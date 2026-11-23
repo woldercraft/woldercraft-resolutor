@@ -247,10 +247,10 @@ fn effects_panel_lists_the_premiere_transition_folders() {
     d.frames(3);
     let noise = d.ok("ui.elements", json!({"prefix": "effects.folder.Audio Effects/Noise Reduction/Restoration"}));
     assert_eq!(noise[0]["label"], json!("Noise Reduction/Restoration"), "{noise}");
-    // obsolete transitions stay out of the panel
+    // obsolete Premiere transitions stay out of the panel (EffectCraft's active Venetian Blinds stays)
     d.ok("ui.set", json!({"effectsSearch": "venetian"}));
     d.frames(3);
-    assert!(d.element_ids("effects.item.").is_empty());
+    assert!(!d.element_ids("effects.item.").iter().any(|i| i == "effects.item.venetian_blinds"));
     // clicking a sub-folder toggles it
     d.ok("ui.set", json!({"effectsSearch": ""}));
     d.frames(2);
@@ -559,6 +559,45 @@ fn waveform_peaks_do_not_survive_opening_another_project() {
     assert!(now.is_none_or(|p| !std::sync::Arc::ptr_eq(&p, &old)), "peaks from the previous project were reused");
 }
 
+#[test]
+fn timeline_waveform_styles_and_forced_refresh() {
+    use filmcraft_ui_egui::state::WaveformStyle;
+
+    let mut d = Driver::demo();
+    let mut first = None;
+    d.wait_until("initial waveform peaks", |d| {
+        first = d.harness.state().tl.peaks.lock().unwrap().iter().map(|(k, v)| (*k, v.clone())).next();
+        first.is_some()
+    });
+    let (item, old_arc) = first.expect("demo timeline computes peaks");
+
+    // Switching styles and full-height mode via the UI command updates TimelineView cleanly.
+    for (name, expected) in [
+        ("centered", WaveformStyle::Centered),
+        ("bordered", WaveformStyle::Bordered),
+        ("stereo_split", WaveformStyle::StereoSplit),
+        ("rectified", WaveformStyle::Rectified),
+    ] {
+        d.exec("timeline.waveformStyle", json!({"style": name, "fullHeight": true}));
+        d.frames(1);
+        assert_eq!(d.harness.state().ui.timeline.waveform_style, expected);
+        assert!(d.harness.state().ui.timeline.waveform_full_height);
+    }
+    d.exec("timeline.waveformStyle", json!({"fullHeight": false}));
+    assert!(!d.harness.state().ui.timeline.waveform_full_height);
+
+    // Forced refresh clears cached peaks and rebuilds a fresh Arc instance.
+    d.exec("timeline.refreshWaveforms", json!({}));
+    assert!(d.harness.state().tl.peaks.lock().unwrap().is_empty());
+    let mut rebuilt = None;
+    d.wait_until("rebuilt waveform peaks", |d| {
+        rebuilt = d.harness.state().tl.peaks.lock().unwrap().get(&item).cloned();
+        rebuilt.is_some()
+    });
+    let new_arc = rebuilt.expect("peaks should rebuild after forced refresh");
+    assert!(!std::sync::Arc::ptr_eq(&old_arc, &new_arc), "forced refresh must replace the old peak Arc");
+}
+
 /// #164: on a real keyboard, pressing Alt+Shift+J sends each modifier key on its own first (egui
 /// reports modifier keys as key events). The shortcut recorder took the Alt press and refused it
 /// ("AltLeft can't be used as a shortcut"), so no chord with Shift, Ctrl or Alt could be recorded.
@@ -598,6 +637,8 @@ fn eyedropper_picks_a_key_color_on_a_selected_clip() {
     d.exec("effects.apply", json!({"effect": "Color Key"}));
     d.ok("ui.panel.show", json!({"panel": "EffectControls"}));
     d.frames(4);
+    d.ok("ui.click", json!({"id": "effectControls.effect.color_key.twirl"}));
+    d.frames(2);
     let color = |d: &mut Driver| {
         let seq = d.sequence();
         seq["video"][0]["items"][0]["effects"].as_array().unwrap().iter().find(|e| e["effect"] == "color_key").unwrap()["params"]["color"]["value"].clone()

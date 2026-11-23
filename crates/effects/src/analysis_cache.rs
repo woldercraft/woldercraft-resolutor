@@ -31,21 +31,27 @@ impl<T> AnalysisCache<T> {
     pub(crate) fn get(&self, json: &str, parse: impl FnOnce(&str) -> Option<T>) -> Option<(u64, Arc<T>)> {
         let entries = self.entries.get_or_init(Default::default);
         {
-            let m = entries.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(e) = m.iter().rev().find(|e| e.json.as_ref() == json) {
-                return Some((e.key, e.value.clone()));
+            let mut m = entries.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(pos) = m.iter().rposition(|e| e.json.as_ref() == json) {
+                let entry = m.remove(pos);
+                let res = (entry.key, entry.value.clone());
+                m.push(entry);
+                return Some(res);
             }
         }
         let value = Arc::new(parse(json)?);
         let key = fnv(json.as_bytes());
         let mut m = entries.lock().unwrap_or_else(|e| e.into_inner());
         // Another render may have filled the entry while this one parsed it.
-        if let Some(e) = m.iter().rev().find(|e| e.json.as_ref() == json) {
-            return Some((e.key, e.value.clone()));
+        if let Some(pos) = m.iter().rposition(|e| e.json.as_ref() == json) {
+            let entry = m.remove(pos);
+            let res = (entry.key, entry.value.clone());
+            m.push(entry);
+            return Some(res);
         }
-        // Preserve the existing nine-entry bound and clear-on-overflow policy.
-        if m.len() > 8 {
-            m.clear();
+        // Keep the nine most recently used entries instead of clearing the entire cache.
+        if m.len() >= 9 {
+            m.remove(0);
         }
         m.push(Entry { json: json.into(), key, value: value.clone() });
         Some((key, value))

@@ -10,6 +10,7 @@
 //! drawn as GPU meshes by egui's wgpu backend and culled to the visible range.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use egui::{Align2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
@@ -20,7 +21,7 @@ use serde_json::{Value, json};
 
 use crate::FilmcraftApp;
 use crate::icons::{self, Icon};
-use crate::state::{ThumbnailMode, TimelineView, Tool};
+use crate::state::{ThumbnailMode, TimelineView, Tool, WaveformStyle};
 use crate::theme::Tokens;
 
 use super::timeline_hit::{EDGE_PX, EdgeKind, Grab, edge_geometry, grab_at, marker_at, marker_range_rect, marker_rect, marker_under_pointer, work_area_rect};
@@ -35,6 +36,7 @@ mod ruler;
 mod scrollbars;
 mod snap;
 mod waveforms;
+pub use waveforms::WaveformPeaks;
 
 #[cfg(test)]
 use clips::MAX_THUMBNAIL_TILES;
@@ -121,8 +123,11 @@ pub struct TlState {
     pub layout: Option<Layout>,
     /// Snap indicator x (screen) this frame.
     snap_x: Option<f32>,
-    pub peaks: Arc<Mutex<HashMap<PeakKey, Arc<Vec<(f32, f32)>>>>>,
+    pub peaks: Arc<Mutex<HashMap<PeakKey, Arc<WaveformPeaks>>>>,
     peaks_pending: Arc<Mutex<Vec<PeakKey>>>,
+    /// Generation counter incremented on forced waveform refreshes so stale in-flight workers drop
+    /// their results instead of overwriting freshly invalidated entries.
+    peaks_gen: Arc<AtomicU64>,
     /// Nested sequences have waveforms too, of their mix. Unlike media a sequence changes: this is
     /// the content key (see [`sequence_audio_key`]) the cached peaks of each sequence were made
     /// from, and the key worked out for the session revision last seen.
@@ -164,6 +169,7 @@ impl TlState {
     /// (opening another project would otherwise show the old project's waveforms). Peak jobs
     /// still running finish into the old maps and are dropped.
     pub fn reset_media_caches(&mut self) {
+        self.peaks_gen.fetch_add(1, Ordering::AcqRel);
         self.peaks = Default::default();
         self.peaks_pending = Default::default();
         self.seq_peak_keys = Default::default();
@@ -172,6 +178,29 @@ impl TlState {
         self.duplicates = None;
         self.duplicates_pending = None;
         self.duplicates_done = Default::default();
+    }
+
+    /// Force a full rebuild of every cached timeline waveform (media items and nested sequences).
+    pub fn refresh_all_waveforms(&mut self) {
+        self.peaks_gen.fetch_add(1, Ordering::AcqRel);
+        self.peaks.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.peaks_pending.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.seq_peak_keys.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.seq_keys_seen.clear();
+        self.peak_max.clear();
+    }
+
+    /// Force a rebuild of cached waveform peaks for `items` (and clear sequence caches for them).
+    pub fn refresh_item_waveforms(&mut self, items: &[ItemId]) {
+        if items.is_empty() {
+            return;
+        }
+        self.peaks_gen.fetch_add(1, Ordering::AcqRel);
+        self.peaks.lock().unwrap_or_else(|e| e.into_inner()).retain(|(it, _), _| !items.contains(it));
+        self.peaks_pending.lock().unwrap_or_else(|e| e.into_inner()).retain(|(it, _)| !items.contains(it));
+        self.seq_peak_keys.lock().unwrap_or_else(|e| e.into_inner()).retain(|it, _| !items.contains(it));
+        self.seq_keys_seen.retain(|it, _| !items.contains(it));
+        self.peak_max.retain(|(it, _), _| !items.contains(it));
     }
 }
 
@@ -976,12 +1005,12 @@ mod trim_preview_tests {
             file_size: None,
         };
         let src = TwoStreams(info);
-        let first = source_peaks(&src, 0, Tick(TICKS_PER_SECOND));
-        let second = source_peaks(&src, 1, Tick(TICKS_PER_SECOND));
+        let first = source_peaks(&src, 0, Tick(TICKS_PER_SECOND)).unwrap();
+        let second = source_peaks(&src, 1, Tick(TICKS_PER_SECOND)).unwrap();
         assert!(!first.is_empty() && first.len() == second.len());
         assert!(first.iter().all(|&(_, hi)| (hi - 0.1).abs() < 1e-6), "stream 0 is the quiet one");
         assert!(second.iter().all(|&(_, hi)| (hi - 0.5).abs() < 1e-6), "stream 1 is its own audio, not stream 0 again");
-        assert!(source_peaks(&src, 2, Tick(TICKS_PER_SECOND)).is_empty(), "a missing stream has no peaks");
+        assert!(source_peaks(&src, 2, Tick(TICKS_PER_SECOND)).is_none(), "a missing stream has no peaks");
     }
 
     #[test]
@@ -1484,12 +1513,14 @@ mod waveform_zone_tests {
     #[test]
     fn a_compact_clip_has_its_whole_height_for_the_waveform_and_a_tall_one_the_lower_part() {
         // tall clips are as before
-        assert_eq!(waveform_zone_height(100.0), 42.0);
-        assert!((waveform_zone_height(60.0) - 25.2).abs() < 1e-4);
+        assert_eq!(waveform_zone_height(100.0, false), 42.0);
+        assert!((waveform_zone_height(60.0, false) - 25.2).abs() < 1e-4);
+        // full height mode fills the clip
+        assert_eq!(waveform_zone_height(100.0, true), 98.0);
         // compact ones fill the clip (a point of margin each side), where 42 % was 12 points of 28
-        assert_eq!(waveform_zone_height(28.0), 26.0);
-        assert_eq!(waveform_zone_height(49.0), 47.0);
+        assert_eq!(waveform_zone_height(28.0, false), 26.0);
+        assert_eq!(waveform_zone_height(49.0, false), 47.0);
         // never smaller than the minimum
-        assert_eq!(waveform_zone_height(4.0), 8.0);
+        assert_eq!(waveform_zone_height(4.0, false), 8.0);
     }
 }

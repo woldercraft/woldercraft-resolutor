@@ -57,10 +57,11 @@ pub const PANELS: &[&str] = &[
 ];
 
 pub const DEFAULT_PRESET: &str = "Resolutor Default";
+pub const DAVINCI_RESOLVE_PRESET: &str = "DaVinci Resolve";
 pub const PREMIERE_PRESET: &str = "Premiere Pro Compatible";
 pub const FCP_PRESET: &str = "Final Cut Pro Compatible";
 pub const AVID_PRESET: &str = "Avid Media Composer Compatible";
-pub const BUILTIN_PRESETS: [&str; 4] = [DEFAULT_PRESET, PREMIERE_PRESET, FCP_PRESET, AVID_PRESET];
+pub const BUILTIN_PRESETS: [&str; 5] = [DEFAULT_PRESET, DAVINCI_RESOLVE_PRESET, PREMIERE_PRESET, FCP_PRESET, AVID_PRESET];
 
 const FILE_FORMAT: &str = "filmcraft-keyboard-shortcuts";
 const DIR_NAME: &str = "Keyboard Shortcuts";
@@ -619,6 +620,7 @@ impl Shortcuts {
         b.extend(self.audit_for(p));
         let table: Vec<Entry> = match name {
             DEFAULT_PRESET => Vec::new(),
+            DAVINCI_RESOLVE_PRESET => presets::DAVINCI_RESOLVE.to_vec(),
             PREMIERE_PRESET => presets::premiere(),
             FCP_PRESET => presets::FINAL_CUT.to_vec(),
             AVID_PRESET => presets::AVID.to_vec(),

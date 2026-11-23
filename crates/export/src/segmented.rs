@@ -89,33 +89,19 @@ pub(crate) fn concat_mp4s(parts: &[PathBuf], settings: &ExportSettings) -> Resul
             buf.resize(s.size as usize, 0);
             reader.read_at(s.offset, &mut buf).map_err(|e| ExportError::Io(e.to_string()))?;
             let composition_offset = (s.pts - s.dts) as i32;
-            mux.write_sample(ti, WriteSample {
-                data: &buf,
-                duration: s.duration,
-                composition_offset,
-                is_sync: s.is_sync,
-            }).map_err(|e| ExportError::Io(e.to_string()))?;
+            mux.write_sample(ti, WriteSample { data: &buf, duration: s.duration, composition_offset, is_sync: s.is_sync })
+                .map_err(|e| ExportError::Io(e.to_string()))?;
         }
     }
 
-    let out = if brand == Brand::Mp4 {
-        mux.finish_faststart()
-    } else {
-        mux.finish()
-    }.map_err(|e| ExportError::Io(e.to_string()))?;
+    let out = if brand == Brand::Mp4 { mux.finish_faststart() } else { mux.finish() }.map_err(|e| ExportError::Io(e.to_string()))?;
 
     let bytes = out.finish(settings)?;
     Ok(bytes)
 }
 
 /// Run an export by splitting the range into parallel chunks and merging upon completion.
-pub fn segmented_export(
-    project: &Arc<Project>,
-    seq: ItemId,
-    settings: &ExportSettings,
-    sources: &dyn SourceProvider,
-    progress: &Progress,
-) -> Result<Report> {
+pub fn segmented_export(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, sources: &dyn SourceProvider, progress: &Progress) -> Result<Report> {
     let t0 = web_time::Instant::now();
     let q = project.sequence(seq).ok_or(ExportError::NoSequence)?;
     let full_range = export_range(project, seq, settings)?;
@@ -247,13 +233,7 @@ mod tests {
     fn segmented_export_splits_runs_parallel_and_stitches() {
         let (p, seq, m) = project();
         let path = tmp("seg_test.mov");
-        let settings = ExportSettings {
-            format: Format::ProRes,
-            path: path.clone(),
-            segments: 2,
-            include_audio: false,
-            ..Default::default()
-        };
+        let settings = ExportSettings { format: Format::ProRes, path: path.clone(), segments: 2, include_audio: false, ..Default::default() };
         let rep = export(&p, seq, &settings, &m, &Progress::default()).expect("export");
         assert!(rep.frames > 0);
         let bytes = std::fs::read(&path).expect("read");
@@ -267,13 +247,7 @@ mod tests {
     fn segmented_export_with_audio_and_h264() {
         let (p, seq, m) = project();
         let path = tmp("seg_audio.mp4");
-        let settings = ExportSettings {
-            format: Format::H264,
-            path: path.clone(),
-            segments: 2,
-            include_audio: true,
-            ..Default::default()
-        };
+        let settings = ExportSettings { format: Format::H264, path: path.clone(), segments: 2, include_audio: true, ..Default::default() };
         let rep = export(&p, seq, &settings, &m, &Progress::default()).expect("export");
         assert!(rep.frames > 0);
         let bytes = std::fs::read(&path).expect("read");
@@ -298,23 +272,14 @@ mod tests {
             }
             fn isolate(&self) -> Option<Box<dyn filmcraft_render::SourceProvider>> {
                 self.isolates.fetch_add(1, Ordering::SeqCst);
-                Some(Box::new(TestProvider {
-                    inner: self.inner.clone(),
-                    isolates: self.isolates.clone(),
-                }))
+                Some(Box::new(TestProvider { inner: self.inner.clone(), isolates: self.isolates.clone() }))
             }
         }
         let (p, seq, m) = project();
         let isolates = Arc::new(AtomicUsize::new(0));
         let provider = TestProvider { inner: m, isolates: isolates.clone() };
         let path = tmp("seg_isolate.mov");
-        let settings = ExportSettings {
-            format: Format::ProRes,
-            path: path.clone(),
-            segments: 3,
-            include_audio: false,
-            ..Default::default()
-        };
+        let settings = ExportSettings { format: Format::ProRes, path: path.clone(), segments: 3, include_audio: false, ..Default::default() };
         let rep = export(&p, seq, &settings, &provider, &Progress::default()).expect("export");
         assert!(rep.frames > 0);
         // 3 parallel segments should each have called isolate() once
@@ -322,4 +287,3 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 }
-

@@ -237,9 +237,8 @@ impl<A: Accel> Front<A> {
                 prev,
             )
         };
-        let (sh, pps, sps) = parse_hdr(&rbsp)
-            .or_else(|e| if payload.len() > 4096 { parse_hdr(&unescape_rbsp(payload)) } else { Err(e) })
-            .map_err(decode_err)?;
+        let (sh, pps, sps) =
+            parse_hdr(&rbsp).or_else(|e| if payload.len() > 4096 { parse_hdr(&unescape_rbsp(payload)) } else { Err(e) }).map_err(decode_err)?;
         sps.check_supported().map_err(decode_err)?;
         pps.check_supported().map_err(decode_err)?;
         if first {

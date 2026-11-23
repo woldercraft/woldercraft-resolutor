@@ -108,7 +108,10 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("view.guideTemplates.delete", "Delete Guide Template", [], None),
     uic!("view.compare.setReference", "Set Comparison Reference", [], None),
     uic!("view.dynamicAudioWaveforms", "Dynamic Audio Waveforms", ["View"], None),
+    uic!("timeline.waveformStyle", "Waveform Style", [], None),
+    uic!("timeline.refreshWaveforms", "Refresh All Waveforms", ["Sequence"], None),
     uic!("view.toggleGlobalBypass", "Bypass Color Grades & Effects", ["View"], None),
+    uic!("color.toggleHighlight", "Highlight Key Matte", ["View"], Some("Shift+H")),
     uic!("multicam.toggleView", "Multi-Camera View", ["View"], Some("Shift+0")),
     uic!("multicam.recordToggle", "Multi-Camera Record On/Off Toggle", [], Some("0")),
     uic!("multicam.editCamerasDialog", "Edit Cameras…", [], None),
@@ -131,6 +134,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("window.workspace.saveChanges", "Save Changes to this Workspace", ["Window", "Workspaces"], None),
     uic!("window.workspace.saveAs", "Save as New Workspace…", ["Window", "Workspaces"], None),
     uic!("window.workspace.edit", "Edit Workspaces…", ["Window", "Workspaces"], None),
+    uic!("window.customPanels", "Custom Panels…", ["Window"], None),
     uic!("tool.selection", "Selection Tool", [], Some("V")),
     uic!("tool.trackSelectForward", "Track Select Forward Tool", [], Some("A")),
     uic!("tool.trackSelectBackward", "Track Select Backward Tool", [], Some("Shift+A")),
@@ -517,6 +521,10 @@ pub fn invoke_command(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut
             app.dialog = Some(crate::Dialog::About);
             return Ok(Value::Null);
         }
+        "window.customPanels" => {
+            app.ui.custom_panel_dialog = Some(Default::default());
+            return Ok(json!({"dialog": "customPanels"}));
+        }
         id if crate::links::url_for(id).is_some() => {
             let url = crate::links::url_for(id).unwrap_or_default();
             crate::links::open(app, ctx, url);
@@ -645,6 +653,21 @@ pub fn invoke_command(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut
         app.ui.global_bypass = !app.ui.global_bypass;
         ctx.request_repaint();
         return Ok(json!({"globalBypass": app.ui.global_bypass}));
+    }
+    if id == "color.toggleHighlight" {
+        if let Some(m) = params.get("mode").and_then(|v| v.as_u64()) {
+            let m = (m as u8).clamp(0, 3);
+            if m > 0 {
+                app.ui.color_highlight_style = m;
+            }
+            app.ui.color_highlight = m;
+        } else if let Some(on) = params.get("enabled").and_then(|v| v.as_bool()) {
+            app.ui.color_highlight = if on { app.ui.color_highlight_style.clamp(1, 3) } else { 0 };
+        } else {
+            app.ui.color_highlight = if app.ui.color_highlight > 0 { 0 } else { app.ui.color_highlight_style.clamp(1, 3) };
+        }
+        ctx.request_repaint();
+        return Ok(json!({"highlight": app.ui.color_highlight, "style": app.ui.color_highlight_style}));
     }
     if id == "view.appearanceMode.next" {
         crate::panels::settings::cycle_appearance(app, ctx);
@@ -967,6 +990,9 @@ pub fn menu_items(app: &FilmcraftApp) -> Vec<MenuItem> {
         if let Some(on) = engine_toggle(&app.session, &it.id) {
             it.checked = Some(on);
         }
+        if it.id == "color.toggleHighlight" {
+            it.checked = Some(app.ui.color_highlight > 0);
+        }
         if it.id.starts_with("view.") {
             it.checked = if it.id == "view.toggleGlobalBypass" {
                 Some(app.ui.global_bypass)
@@ -977,6 +1003,18 @@ pub fn menu_items(app: &FilmcraftApp) -> Vec<MenuItem> {
         }
     }
     crate::panels::workspaces::menu(app, &mut v);
+    for cp in &app.custom_panels.panels {
+        let p = PanelKind::Custom(cp.id);
+        let label = if cp.name.trim().is_empty() { format!("{} {}", app.ui.language.tr("Custom Panel"), cp.id + 1) } else { cp.name.clone() };
+        v.push(MenuItem {
+            id: panel_command_id(p),
+            label,
+            path: vec!["Window".into()],
+            shortcut: None,
+            enabled: true,
+            checked: Some(app.ui.dock.contains(&p)),
+        });
+    }
     open_recent(&mut v, &app.session, |n| app.ui.language.tr(n).to_string());
     v
 }
@@ -1253,7 +1291,8 @@ pub fn menu_bar(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     egui::MenuBar::new().style(crate::theme::menu_style).config(egui::containers::menu::MenuConfig::new().style(crate::theme::menu_style)).ui(ui, |ui| {
         let mut titles = Vec::with_capacity(MENUS.len());
         for top in MENUS {
-            let mine: Vec<&MenuItem> = items.iter().filter(|i| i.path.first().map(String::as_str) == Some(top)).collect();
+            let mine: Vec<&MenuItem> =
+                items.iter().filter(|i| i.path.first().map(String::as_str) == Some(top) && i.path.get(1).map(String::as_str) != Some("Workspaces")).collect();
             let r = ui.menu_button(app.ui.language.tr(top), |ui| {
                 ui.set_min_width(260.0);
                 if mine.is_empty() {
@@ -1296,23 +1335,33 @@ fn menu_level(
     auto: &mut crate::automation::Registry,
     labels: &filmcraft_engine::settings::LabelPrefs,
 ) {
-    let mut subs: Vec<&str> = Vec::new();
-    for it in items {
-        if let Some(sub) = it.path.get(depth).map(String::as_str) {
-            if subs.contains(&sub) {
-                continue;
+    let draw_items = |ui: &mut egui::Ui, clicked: &mut Option<String>, auto: &mut crate::automation::Registry| {
+        let mut subs: Vec<&str> = Vec::new();
+        for it in items {
+            if let Some(sub) = it.path.get(depth).map(String::as_str) {
+                if subs.contains(&sub) {
+                    continue;
+                }
+                subs.push(sub);
+                let inner: Vec<&MenuItem> = items.iter().copied().filter(|x| x.path.get(depth).map(String::as_str) == Some(sub)).collect();
+                let language = ui.ctx().data(|d| d.get_temp::<crate::i18n::Language>(egui::Id::unique("interface-language"))).unwrap_or_default();
+                ui.menu_button(language.tr(sub), |ui| {
+                    ui.set_min_width(220.0);
+                    menu_level(ui, &inner, depth + 1, clicked, auto, labels);
+                });
+            } else if menu_entry(ui, it, auto, labels) {
+                *clicked = Some(it.id.clone());
+                ui.close();
             }
-            subs.push(sub);
-            let inner: Vec<&MenuItem> = items.iter().copied().filter(|x| x.path.get(depth).map(String::as_str) == Some(sub)).collect();
-            let language = ui.ctx().data(|d| d.get_temp::<crate::i18n::Language>(egui::Id::unique("interface-language"))).unwrap_or_default();
-            ui.menu_button(language.tr(sub), |ui| {
-                ui.set_min_width(220.0);
-                menu_level(ui, &inner, depth + 1, clicked, auto, labels);
-            });
-        } else if menu_entry(ui, it, auto, labels) {
-            *clicked = Some(it.id.clone());
-            ui.close();
         }
+    };
+    if items.len() > 20 {
+        let max_h = (ui.ctx().content_rect().height() - 64.0).max(200.0);
+        egui::ScrollArea::vertical().min_scrolled_height(max_h).max_height(max_h).show(ui, |ui| {
+            draw_items(ui, clicked, auto);
+        });
+    } else {
+        draw_items(ui, clicked, auto);
     }
 }
 

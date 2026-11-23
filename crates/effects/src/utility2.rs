@@ -49,8 +49,8 @@ pub fn specs() -> Vec<EffectSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EffectEnv, run_fx};
     use crate::effectcraft_raster::Image;
+    use crate::{EffectEnv, run_fx};
 
     fn hdr() -> Image {
         crate::util::gen_image(8, 4, |x, y| {

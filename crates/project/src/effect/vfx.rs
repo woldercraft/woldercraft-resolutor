@@ -1123,7 +1123,7 @@ pub(super) fn extend_core(v: &mut [EffectDef]) {
 
 /// Effects-panel badges (Accelerated, 32-bit, YUV) per the Premiere 26 list.
 pub(super) fn apply_badges(v: &mut [EffectDef]) {
-    for e in v.iter_mut().filter(|e| e.kind == EffectKind::Video && !e.intrinsic) {
+    for e in v.iter_mut().filter(|e| e.kind == EffectKind::Video && !e.intrinsic && !e.id.starts_with("ec.")) {
         let id = e.id;
         let folder = e.category.get(1).copied().unwrap_or("");
         let a32 = matches!(

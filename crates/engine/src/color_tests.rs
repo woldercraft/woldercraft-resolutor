@@ -524,3 +524,168 @@ fn color_batch_paste_toggle_and_reset_grade() {
         assert!(it2.effects.iter().all(|e| e.effect != "lumetri"));
     }
 }
+
+#[test]
+fn multi_node_and_group_section_and_lut_commands() {
+    let mut s = demo();
+    let clip = pick_clip(&mut s);
+    let r0 = s.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"})).unwrap();
+    let r1 = s.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"})).unwrap();
+    let idx0 = r0["applied"][0]["index"].as_u64().unwrap() as usize;
+    let idx1 = r1["applied"][0]["index"].as_u64().unwrap() as usize;
+    assert_ne!(idx0, idx1);
+
+    // Toggle section on the second node only
+    s.execute("lumetri.setSection", json!({"clip": clip.0, "effect": idx1, "section": "creative", "on": false})).unwrap();
+    // Set Input LUT on the second node only
+    s.execute("lumetri.setInputLut", json!({"clip": clip.0, "effect": idx1, "lut": "builtin:slog3-sgamut3cine-to-rec709"})).unwrap();
+    fn as_text<'a>(e: &'a filmcraft_project::EffectInstance, k: &str) -> Option<&'a str> {
+        e.param(k).and_then(|p| match &p.value {
+            filmcraft_project::ParamValue::Text(t) => Some(t.as_str()),
+            _ => None,
+        })
+    }
+    {
+        let q = s.active_sequence().unwrap();
+        let (_, it) = q.find_item(clip).unwrap();
+        assert_eq!(it.effects[idx0].param("creative_on").and_then(|p| p.value.as_bool()), Some(true));
+        assert_eq!(it.effects[idx1].param("creative_on").and_then(|p| p.value.as_bool()), Some(false));
+        assert_eq!(as_text(&it.effects[idx0], "input_lut"), Some(""));
+        assert_eq!(as_text(&it.effects[idx1], "input_lut"), Some("builtin:slog3-sgamut3cine-to-rec709"));
+    }
+
+    // Group mode: setSection and setInputLut target the group
+    let g = s.execute("color.groupCreate", json!({"clips": [clip.0], "name": "TestGroup"})).unwrap();
+    let gid = g["group"].as_u64().unwrap();
+    s.execute("lumetri.setSection", json!({"group": gid, "section": "vignette", "on": false})).unwrap();
+    s.execute("lumetri.setInputLut", json!({"group": gid, "lut": "builtin:slog3-sgamut3cine-to-rec709"})).unwrap();
+    {
+        let q = s.active_sequence().unwrap();
+        let grp = q.color_group(filmcraft_project::ColorGroupId(gid)).unwrap();
+        let fx = grp.effects.iter().find(|e| e.effect == "lumetri").unwrap();
+        assert_eq!(fx.param("vignette_on").and_then(|p| p.value.as_bool()), Some(false));
+        assert_eq!(as_text(fx, "input_lut"), Some("builtin:slog3-sgamut3cine-to-rec709"));
+    }
+}
+
+#[test]
+fn apply_match_export_cube_and_merge_keys_work_on_color_group() {
+    let mut s = demo();
+    let clip = pick_clip(&mut s);
+    let q = s.active_sequence().unwrap();
+    let other = q.video_tracks[0].items.iter().rfind(|i| i.id != clip).unwrap();
+    let reference = other.start + filmcraft_time::Tick(other.duration.0 / 2);
+
+    let g = s.execute("color.groupCreate", json!({"clips": [clip.0], "name": "MatchGroup"})).unwrap();
+    let gid = g["group"].as_u64().unwrap();
+
+    // Group applyMatch writes wheels onto the group in one undo step
+    let r = s.execute("lumetri.applyMatch", json!({"group": gid, "referenceTime": reference.0, "faceDetection": true})).unwrap();
+    assert_eq!(r["group"], gid);
+    let grp = s.active_sequence().unwrap().color_group(filmcraft_project::ColorGroupId(gid)).unwrap();
+    let fx = grp.effects.iter().find(|e| e.effect == "lumetri").unwrap();
+    let moved = ["wheel_shadows", "wheel_midtones", "wheel_highlights"]
+        .iter()
+        .any(|w| fx.param(w).and_then(|p| p.value.as_vec2()).is_some_and(|v| v.x.abs() + v.y.abs() > 1e-3));
+    assert!(moved, "{r}");
+
+    // Export .cube directly from the Color Group
+    let cube_path = std::env::temp_dir().join(format!("filmcraft-group-{}.cube", std::process::id()));
+    let exp = s.execute("lumetri.exportCube", json!({"group": gid, "path": cube_path.to_string_lossy()})).unwrap();
+    assert_eq!(exp["group"], gid);
+    let text = std::fs::read_to_string(&cube_path).unwrap();
+    assert!(text.contains("LUT_3D_SIZE 33"));
+    let _ = std::fs::remove_file(&cube_path);
+
+    // groupSetParam merges consecutive writes with the same string key and splits on `begin: true`
+    let undo_len = |s: &mut Session| s.execute("history.list", json!({})).unwrap()["undo"].as_array().unwrap().len();
+    let undo_before = undo_len(&mut s);
+    s.execute("color.groupSetParam", json!({"group": gid, "param": "temperature", "value": 12.0, "merge": "wheel-offset", "begin": true})).unwrap();
+    s.execute("color.groupSetParam", json!({"group": gid, "param": "tint", "value": -8.0, "merge": "wheel-offset"})).unwrap();
+    assert_eq!(undo_len(&mut s), undo_before + 1, "shared string merge key produces one undo step");
+
+    s.execute("color.groupSetParam", json!({"group": gid, "param": "temperature", "value": 25.0, "merge": "wheel-offset", "begin": true})).unwrap();
+    assert_eq!(undo_len(&mut s), undo_before + 2, "`begin: true` starts a new undo step");
+}
+
+#[test]
+fn color_graph_dag_scopes_outside_parallel_layer_shared_and_cycle_rejection() {
+    let mut s = demo();
+    let clip = pick_clip(&mut s);
+    let grp_res = s.execute("color.groupCreate", json!({"clips": [clip.0], "name": "Scene A"})).unwrap();
+    let gid = grp_res["group"].as_u64().unwrap();
+
+    // 1. Add Pre-Clip node, Clip Outside + Parallel + Layer nodes, Post-Clip node, and Timeline node
+    let pre = s.execute("color.graph.addNode", json!({"scope": "pre_clip", "group": gid, "kind": "serial"})).unwrap();
+    let pre_n = pre["node"].as_u64().unwrap();
+    s.execute("color.graph.setNodeParam", json!({"scope": "pre_clip", "group": gid, "node": pre_n, "param": "exposure", "value": 0.4})).unwrap();
+
+    let c1 = s.execute("color.graph.addNode", json!({"scope": "clip", "clip": clip.0, "kind": "serial"})).unwrap()["node"].as_u64().unwrap();
+    let c_out = s.execute("color.graph.addNode", json!({"scope": "clip", "clip": clip.0, "kind": "outside", "after": c1})).unwrap()["node"].as_u64().unwrap();
+    s.execute("color.graph.setNodeParam", json!({"scope": "clip", "clip": clip.0, "node": c_out, "param": "saturation", "value": 40.0})).unwrap();
+    s.execute("color.graph.setKeyParams", json!({"scope": "clip", "clip": clip.0, "node": c_out, "inputGain": 1.2, "outputGain": 0.8})).unwrap();
+
+    let par = s.execute("color.graph.addNode", json!({"scope": "clip", "clip": clip.0, "kind": "parallel", "after": c_out})).unwrap();
+    let par_mixer = par["mixer"].as_u64().unwrap();
+    let lay = s.execute("color.graph.addNode", json!({"scope": "clip", "clip": clip.0, "kind": "layer", "after": par_mixer})).unwrap();
+    let lay_mixer = lay["mixer"].as_u64().unwrap();
+    s.execute("color.graph.setLayerMixer", json!({"scope": "clip", "clip": clip.0, "node": lay_mixer, "port": 1, "blend": "Screen", "gain": 0.75})).unwrap();
+
+    // 2. Reject cyclic connection without mutating undo history
+    let undo_before = s.execute("history.list", json!({})).unwrap()["undo"].as_array().unwrap().len();
+    let cyclic = s.execute("color.graph.connect", json!({"scope": "clip", "clip": clip.0, "kind": "rgb", "from": lay_mixer, "to": c1}));
+    assert!(cyclic.is_err(), "cycle must be rejected");
+    assert_eq!(s.execute("history.list", json!({})).unwrap()["undo"].as_array().unwrap().len(), undo_before);
+
+    // 3. Shared node creation & unlinking, plus Timeline-level color node
+    let shared = s.execute("color.graph.shareNode", json!({"scope": "clip", "clip": clip.0, "node": c1, "name": "HeroGrade"})).unwrap();
+    assert!(shared["shared"].as_u64().is_some());
+    s.execute("color.graph.unlinkShared", json!({"scope": "clip", "clip": clip.0, "node": c1})).unwrap();
+
+    let tl_n = s.execute("color.graph.addNode", json!({"scope": "timeline", "kind": "serial"})).unwrap()["node"].as_u64().unwrap();
+    s.execute("color.graph.setNodeParam", json!({"scope": "timeline", "node": tl_n, "param": "contrast", "value": 18.0})).unwrap();
+
+    // 4. Render program frame through Pre-Clip -> Clip DAG -> Post-Clip -> Timeline
+    let rendered = s.render_program(0.25).expect("program render with full 4-scope DAG");
+    assert!(rendered.w > 0 && rendered.h > 0);
+}
+
+#[test]
+fn still_grab_apply_rename_delete_and_undo() {
+    let mut s = demo();
+    let clips: Vec<_> = s.active_sequence().unwrap().video_tracks[0].items.iter().map(|it| it.id).collect();
+    assert!(clips.len() >= 2);
+    let (c0, c1) = (clips[0], clips[1]);
+
+    s.execute("effects.apply", json!({"clips": [c0.0], "effect": "lumetri"})).unwrap();
+    s.execute("effects.setParam", json!({"clip": c0.0, "effect": "lumetri", "param": "exposure", "value": 0.65})).unwrap();
+
+    let grabbed = s.execute("color.stillGrab", json!({"clip": c0.0})).unwrap();
+    let sid = grabbed["id"].as_u64().unwrap();
+    assert_eq!(s.project.color_stills.len(), 1);
+    assert!(s.project.color_stills[0].has_valid_thumb());
+
+    s.execute("color.stillRename", json!({"id": sid, "name": "Warm Sunset"})).unwrap();
+    assert_eq!(s.project.color_stills[0].label, "Warm Sunset");
+
+    s.execute("color.stillApply", json!({"id": sid, "clips": [c1.0], "mode": "replace"})).unwrap();
+    let c1_exp = s
+        .active_sequence()
+        .unwrap()
+        .find_item(c1)
+        .unwrap()
+        .1
+        .effects
+        .iter()
+        .find(|e| e.effect == "lumetri")
+        .unwrap()
+        .param("exposure")
+        .unwrap()
+        .f64_at(filmcraft_time::Tick::ZERO);
+    assert!((c1_exp - 0.65).abs() < 1e-4);
+
+    s.execute("color.stillDelete", json!({"id": sid})).unwrap();
+    assert!(s.project.color_stills.is_empty());
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.project.color_stills.len(), 1);
+}

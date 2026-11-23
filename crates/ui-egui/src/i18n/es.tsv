@@ -3804,6 +3804,9 @@
 # EffectCraft VFX & VFX Nodes panel.
 	EffectCraft VFX	Efectos VFX (EffectCraft)
 	VFX Nodes	Nodos VFX
+	VFX Inspector	Inspector VFX
+	VFX Keyframes	Keyframes VFX
+	Effects (Premiere)	Efectos (Premiere)
 	+ VFX ▾	+ VFX ▾
 	Add EffectCraft VFX Node (Alt+S)	Añadir nodo de efecto VFX (Alt+S)
 	+ Add EffectCraft Glow	+ Añadir resplandor VFX
@@ -3816,6 +3819,8 @@
 	Keylight (1.2)	Keylight (1.2)
 	Optics Compensation	Compensación óptica
 	A clean-room, pure-Rust non-linear video editor. Based on FilmCraft (ArtCraft family) and powered by EffectCraft VFX.	Un editor de video no lineal en Rust puro. Basado en FilmCraft (familia ArtCraft) e impulsado por EffectCraft VFX.
+	A clean-room, pure-Rust non-linear video editor. Based on FilmCraft and powered by EffectCraft VFX.	Un editor de vídeo no lineal en Rust puro. Basado en FilmCraft e impulsado por EffectCraft VFX.
+	FilmCraft Engine {fc} · EffectCraft VFX {ec}	Motor FilmCraft {fc} · EffectCraft VFX {ec}
 	Resolutor Updates	Actualizaciones de Resolutor
 
 # DaVinci Resolve-style Inspector (Properties panel).
@@ -3885,3 +3890,91 @@
 	Global	Global
 	Reset this wheel (or double-click)	Restablecer esta rueda (o doble clic)
 	Drag horizontally to adjust luminance (Shift = fine, Double-click = reset)	Arrastra horizontalmente para ajustar luminancia (Shift = preciso, Doble clic = restablecer)
+
+# Independent header layout presets.
+	Layout Presets	Presets
+	No saved presets	Sin presets guardados
+	Reset Preset	Restablecer preset
+	Save Changes to this Preset	Guardar cambios en este preset
+	Save as New Preset…	Guardar como nuevo preset…
+	Edit Presets…	Editar presets…
+	New Preset	Nuevo preset
+	Edit Presets	Editar presets
+	Untitled Preset	Preset sin título
+
+# User-defined composite custom panels.
+	Custom Panel	Panel personalizado
+	Custom Panels	Paneles personalizados
+	Custom Panels…	Paneles personalizados…
+	Edit Custom Panels…	Editar paneles personalizados…
+	Empty custom panel	Panel personalizado vacío
+	Configure Panel…	Configurar panel…
+	Saved Custom Panels	Paneles personalizados guardados
+	No custom panels yet	Aún no hay paneles personalizados
+	+ New Panel	+ Nuevo panel
+	Create a custom panel on the left to configure its panels.	Crea un panel personalizado a la izquierda para configurar sus paneles.
+	Tabs	Pestañas
+	Vertical Split	División vertical
+	Horizontal Split	División horizontal
+	Included Panels	Paneles incluidos
+	Add panels from the list below	Añade paneles desde la lista de abajo
+	Add Built-in Panel	Añadir panel
+	Open in Workspace	Abrir en el espacio
+	Keyboard Customization	Personalización del teclado
+	All Commands	Todos los comandos
+	Assigned	Asignados
+	Unassigned	Sin asignar
+	Conflicts	Conflictos
+	Reset to “{active}”	Restablecido a “{active}”
+	Modifiers:	Modificadores:
+	Categories	Categorías
+	Removed {key} from {command}	Se quitó {key} de {command}
+	Key: {key}	Tecla: {key}
+	Filter commands by selected key	Filtrar comandos por la tecla seleccionada
+	Remove shortcut	Quitar atajo
+	Effect Overlay	Superposición de efectos
+	On-Screen Controls ({mode})	Controles en pantalla ({mode})
+	On-Screen Controls Mode	Modo de controles en pantalla
+
+# VFX Inspector & Keyframes UI.
+	Select a video clip to inspect its VFX node	Selecciona un clip de vídeo para inspeccionar su nodo VFX
+	No VFX nodes on this clip. Add an effect or press Shift+Space in VFX Nodes.	Sin nodos VFX en este clip. Añade un efecto o usa Shift+Space en Nodos VFX.
+	Enable / bypass node (Ctrl+P)	Activar / desactivar nodo (Ctrl+P)
+	Universal Blend, mask and RGBA channels	Blend universal, máscara y canales RGBA
+	Node parameters	Parámetros propios del nodo
+	Filter parameters…	Filtrar parámetros…
+	Show animated or modified parameters only	Mostrar solo parámetros animados o modificados
+	Previous keyframe	Keyframe anterior
+	Add or remove keyframe at current frame	Agregar / quitar keyframe en este frame
+	Next keyframe	Siguiente keyframe
+	Reset to default	Restablecer valor por defecto
+	Apply Mask Inverted	Invertir máscara
+	Multiply by Mask	Multiplicar por máscara
+	Channels:	Canales:
+	Label:	Etiqueta:
+	Cable router with no image parameters.	Enrutador de cables sin parámetros de imagen.
+	Swap BG / FG (Ctrl+T)	Intercambiar BG / FG (Ctrl+T)
+	Operator:	Operador:
+	Blend Mode:	Modo de fusión:
+	Instance linked to Node #{id}	Instancia vinculada al Nodo #{id}
+	Select a video clip to view its VFX keyframes	Selecciona un clip de vídeo para ver sus keyframes VFX
+	No VFX nodes on this clip	Sin nodos VFX en este clip
+	({n} parameters)	({n} parámetros)
+	Add or remove keyframe	Agregar / quitar keyframe
+	Click ◆ in VFX Inspector to animate a parameter and view its curve here	Haz clic en ◆ en Inspector VFX para animar un parámetro y ver su curva aquí
+	Select a video clip to edit its VFX nodes	Selecciona un clip de vídeo para editar sus nodos VFX
+	({n} nodes)	({n} nodos)
+	+ Effect	+ Efecto
+	Shift+Space: Search and insert VFX tool	Shift+Space: Buscar e insertar herramienta VFX
+	Add Merge node (yellow BG + green FG)	Añadir nodo Merge (BG amarillo + FG verde)
+	Add reusable Mask node (blue EffectMask port)	Añadir nodo Mask reutilizable (puerto azul EffectMask)
+	Add PipeRouter to organize wires	Añadir PipeRouter para organizar cables
+	Create Instance node linked to selection	Crear nodo Instance vinculado al nodo seleccionado
+	Add visual Underlay to group nodes	Añadir Underlay visual para agrupar nodos
+	VFX Group	Grupo VFX
+	Auto Layout	Organizar
+	Topologically arrange left to right	Auto-organizar topológicamente de izquierda a derecha
+	Fit View	Encuadrar
+	Show keyframes for selected node only	Mostrar solo las pistas de keyframes del nodo seleccionado
+	Show spline curves for selected node only	Mostrar solo las curvas Spline del nodo seleccionado
+	Search effect, Merge, Mask, Router…	Buscar efecto, Merge, Mask, Router…

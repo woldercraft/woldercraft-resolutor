@@ -539,6 +539,8 @@ impl Builder {
             source_channels: Vec::new(),
             audio_stream: 0,
             graphic: None,
+            color_graph: None,
+            vfx_graph: None,
         }
     }
 
@@ -603,6 +605,7 @@ pub(crate) fn empty_sequence(settings: SequenceSettings) -> Sequence {
         merged: None,
         split: Default::default(),
         color_groups: Vec::new(),
+        timeline_color: Default::default(),
     }
 }
 
@@ -736,6 +739,7 @@ pub(crate) fn transition_effect(name: &str, audio: bool, report: &mut Report) ->
         post_fader: false,
         essential: false,
         layer: None,
+        label: None,
     })
 }
 

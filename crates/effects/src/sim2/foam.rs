@@ -133,6 +133,49 @@ impl FoamPlan {
 }
 
 /// Foam's [`FoamPlan`] for layer geometry `b` (its size; its pixels are not read).
+/// Resolve pairwise repulsion/adhesion between overlapping foam bubbles for one substep.
+fn step_foam_interactions(bubbles: &mut [FoamBubble], unit: f32, growth: f32, repulsion: f32, sticky: f32, k: f32) {
+    if repulsion <= 0.0 || bubbles.len() <= 1 {
+        return;
+    }
+    let rad = |q: &FoamBubble| q.size * unit * 3.0 * (q.age * growth).min(1.0);
+    let maxr = bubbles.iter().map(rad).fold(0.0f32, f32::max).max(1.0);
+    let cs = maxr * 2.0;
+    let mut grid: std::collections::HashMap<(i32, i32), Vec<usize>> = std::collections::HashMap::new();
+    for (i, q) in bubbles.iter().enumerate() {
+        grid.entry(((q.p[0] / cs).floor() as i32, (q.p[1] / cs).floor() as i32)).or_default().push(i);
+    }
+    let mut push = vec![[0.0f32; 2]; bubbles.len()];
+    for (i, q) in bubbles.iter().enumerate() {
+        let (gx, gy) = ((q.p[0] / cs).floor() as i32, (q.p[1] / cs).floor() as i32);
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let Some(list) = grid.get(&(gx + dx, gy + dy)) else { continue };
+                for &j in list {
+                    if j <= i {
+                        continue;
+                    }
+                    let o = &bubbles[j];
+                    let (ddx, ddy) = (o.p[0] - q.p[0], o.p[1] - q.p[1]);
+                    let d = (ddx * ddx + ddy * ddy).sqrt().max(1e-4);
+                    let overlap = rad(q) + rad(o) - d;
+                    if overlap > 0.0 {
+                        let f = overlap * 0.5 * repulsion.min(4.0) * (1.0 - sticky * 0.5) / d * k;
+                        push[i][0] -= ddx * f;
+                        push[i][1] -= ddy * f;
+                        push[j][0] += ddx * f;
+                        push[j][1] += ddy * f;
+                    }
+                }
+            }
+        }
+    }
+    for (q, d) in bubbles.iter_mut().zip(&push) {
+        q.p[0] += d[0].clamp(-maxr, maxr);
+        q.p[1] += d[1].clamp(-maxr, maxr);
+    }
+}
+
 pub fn foam_full_plan(ctx: &EffectCtx, b: &Buf) -> FoamPlan {
     let pr = ctx.params;
     let (lw, lh) = (ctx.layer_size[0] as f32, ctx.layer_size[1] as f32);
@@ -240,43 +283,7 @@ pub fn foam_full_plan(ctx: &EffectCtx, b: &Buf) -> FoamPlan {
                 q.spin += q.v[0] / (rad(q).max(0.5)) * k;
             }
             // Repulsion between overlapping bubbles (grid hashed, deterministic order).
-            if repulsion > 0.0 && st.b.len() > 1 {
-                let maxr = st.b.iter().map(rad).fold(0.0f32, f32::max).max(1.0);
-                let cs = maxr * 2.0;
-                let mut grid: std::collections::HashMap<(i32, i32), Vec<usize>> = std::collections::HashMap::new();
-                for (i, q) in st.b.iter().enumerate() {
-                    grid.entry(((q.p[0] / cs).floor() as i32, (q.p[1] / cs).floor() as i32)).or_default().push(i);
-                }
-                let mut push = vec![[0.0f32; 2]; st.b.len()];
-                for (i, q) in st.b.iter().enumerate() {
-                    let (gx, gy) = ((q.p[0] / cs).floor() as i32, (q.p[1] / cs).floor() as i32);
-                    for dy in -1..=1 {
-                        for dx in -1..=1 {
-                            let Some(list) = grid.get(&(gx + dx, gy + dy)) else { continue };
-                            for &j in list {
-                                if j <= i {
-                                    continue;
-                                }
-                                let o = &st.b[j];
-                                let (ddx, ddy) = (o.p[0] - q.p[0], o.p[1] - q.p[1]);
-                                let d = (ddx * ddx + ddy * ddy).sqrt().max(1e-4);
-                                let overlap = rad(q) + rad(o) - d;
-                                if overlap > 0.0 {
-                                    let f = overlap * 0.5 * repulsion.min(4.0) * (1.0 - sticky * 0.5) / d * k;
-                                    push[i][0] -= ddx * f;
-                                    push[i][1] -= ddy * f;
-                                    push[j][0] += ddx * f;
-                                    push[j][1] += ddy * f;
-                                }
-                            }
-                        }
-                    }
-                }
-                for (q, d) in st.b.iter_mut().zip(&push) {
-                    q.p[0] += d[0].clamp(-maxr, maxr);
-                    q.p[1] += d[1].clamp(-maxr, maxr);
-                }
-            }
+            step_foam_interactions(&mut st.b, unit, growth, repulsion, sticky, k);
             for q in st.b.iter_mut() {
                 q.p[0] += q.v[0] * k;
                 q.p[1] += q.v[1] * k;

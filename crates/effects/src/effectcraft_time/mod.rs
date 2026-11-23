@@ -7,7 +7,6 @@
 //!
 //! Timecode (SMPTE drop/non-drop, frames, feet+frames, samples) is only a *display* of ticks.
 
-
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, AddAssign, Neg, Sub, SubAssign};

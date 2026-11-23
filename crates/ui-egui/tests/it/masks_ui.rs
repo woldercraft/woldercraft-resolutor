@@ -122,12 +122,9 @@ fn create_and_edit_masks_on_the_monitor() {
     d.exec("effects.apply", json!({"effect": "gaussian_blur"}));
     d.exec("effects.setParam", json!({"clip": id, "effect": "gaussian_blur", "param": "blurriness", "value": 30.0}));
     d.frames(4);
-    // ellipse mask from the Effect Controls icon
-    // fold Motion and Time Remapping so the Gaussian Blur rows are on screen
-    for fx in ["motion", "time_remap"] {
-        d.ok("ui.click", json!({"id": format!("effectControls.effect.{fx}.twirl")}));
-        d.frames(2);
-    }
+    // ellipse mask from the Effect Controls icon (expand Gaussian Blur)
+    d.ok("ui.click", json!({"id": "effectControls.effect.gaussian_blur.twirl"}));
+    d.frames(2);
     d.ok("ui.click", json!({"id": "effectControls.gaussian_blur.mask.ellipse"}));
     d.frames(3);
     let m = d.masks();
@@ -177,13 +174,13 @@ fn create_and_edit_masks_on_the_monitor() {
     assert!(c1.0 > c0.0 + 20.0, "{c0:?} → {c1:?}");
     d.shot("mask-edited");
 
-    // Inverted checkbox (fold Opacity so the row is on screen)
-    d.ok("ui.click", json!({"id": "effectControls.effect.opacity.twirl"}));
-    d.frames(2);
+    // Inverted checkbox
     d.ok("ui.click", json!({"id": "effectControls.gaussian_blur.mask0.inverted"}));
     d.frames(2);
     assert_eq!(d.masks()[0]["inverted"], true);
     d.shot("mask-inverted");
+    d.ok("ui.click", json!({"id": "effectControls.effect.gaussian_blur.twirl"}));
+    d.frames(2);
     d.ok("ui.click", json!({"id": "effectControls.effect.opacity.twirl"}));
     d.frames(2);
 
@@ -414,6 +411,8 @@ fn shift_constrains_pen_mask_segments_to_45_degrees() {
     d.exec("playhead.set", json!({"time": start + dur / 2}));
     d.exec("timeline.select", json!({"clips": [id]}));
     d.frames(3);
+    d.ok("ui.click", json!({"id": "effectControls.effect.opacity.twirl"}));
+    d.frames(2);
     d.ok("ui.click", json!({"id": "effectControls.opacity.mask.pen"}));
     d.frames(2);
     let pic = d.rect("program.picture");
@@ -465,6 +464,8 @@ fn delete_and_undo_take_back_the_last_pen_point() {
         seq["video"][0]["items"].as_array().unwrap().iter().any(|c| c["clip"].as_u64() == Some(id))
     };
     let undo0 = undo_len(&mut d);
+    d.ok("ui.click", json!({"id": "effectControls.effect.opacity.twirl"}));
+    d.frames(2);
     d.ok("ui.click", json!({"id": "effectControls.opacity.mask.pen"}));
     d.frames(2);
     let pic = d.rect("program.picture");
@@ -517,7 +518,10 @@ fn delete_and_undo_take_back_the_last_pen_point() {
 #[test]
 fn presets_bin_drag_and_save_dialog() {
     let mut d = Driver::demo();
-    d.ok("ui.set", json!({"workspace": "Effects"}));
+    d.ok("ui.set", json!({"workspace": "Editing"}));
+    d.ok("ui.panel.show", json!({"panel": "Effects"}));
+    d.ok("ui.panel.show", json!({"panel": "EffectControls"}));
+    d.frames(2);
     let seq = d.exec("sequence.inspect", json!({}));
     let clip = &seq["video"][0]["items"][0];
     let (id, start, dur) = (clip["clip"].as_u64().unwrap(), clip["start"].as_i64().unwrap(), clip["duration"].as_i64().unwrap());
@@ -537,11 +541,9 @@ fn presets_bin_drag_and_save_dialog() {
     let bc = fx.iter().find(|e| e["effect"] == "brightness_contrast").unwrap_or_else(|| panic!("{fx:?}"));
     assert_eq!(bc["masks"], 1);
     d.shot("presets-bin");
-    // Save Preset dialog from the effect's context menu (opened through the command-equivalent UI state)
-    for fx in ["motion", "opacity", "time_remap"] {
-        d.ok("ui.click", json!({"id": format!("effectControls.effect.{fx}.twirl")}));
-        d.frames(2);
-    }
+    // Save Preset dialog from the effect's context menu (expand the applied effect)
+    d.ok("ui.click", json!({"id": "effectControls.effect.brightness_contrast.twirl"}));
+    d.frames(2);
     // Effect Controls: property fields must be reachable by name as well.
     d.harness.check_accessibility();
     d.ok("ui.click", json!({"id": "effectControls.effect.brightness_contrast", "button": "right"}));

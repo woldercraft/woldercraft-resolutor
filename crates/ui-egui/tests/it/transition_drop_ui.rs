@@ -43,7 +43,7 @@ fn harness(effect: &str) -> Harness<'static, FilmcraftApp> {
         s.execute("timeline.place", json!({"item":5,"time":rate.tick_of(at).0,"duration":rate.tick_of(frames).0})).unwrap();
     }
     let mut app = FilmcraftApp::new(s);
-    app.set_workspace("Effects");
+    app.set_workspace("Editing");
     app.ui.effects_search = effect.to_string();
     let mut builder = Harness::builder().with_size(vec2(1600.0, 980.0)).with_max_steps(10_000);
     if std::env::var_os("FILMCRAFT_UI_SNAPSHOT_DIR").is_some() {
@@ -53,6 +53,7 @@ fn harness(effect: &str) -> Harness<'static, FilmcraftApp> {
     for _ in 0..4 {
         step(&mut h);
     }
+    h.state_mut().show_panel(filmcraft_ui_egui::dock::PanelKind::Effects);
     // Opening the new sequence restores its own view; set the test zoom after that initial fit.
     h.state_mut().ui.timeline.pps = 60.0;
     h.state_mut().ui.timeline.target_pps = 60.0;

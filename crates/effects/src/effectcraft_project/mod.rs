@@ -4,7 +4,6 @@
 //! ([`props`]). Compositions, and each layer within them ([`Layers`]), sit behind `Arc` so undo
 //! snapshots share everything that did not change.
 
-
 pub mod build;
 pub mod essential;
 mod file_check;

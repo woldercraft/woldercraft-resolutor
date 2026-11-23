@@ -366,18 +366,30 @@ impl Project {
     }
     /// [`Project::to_file_json`] that also records the open compositions ([`SavedView`]), on one
     /// line when `compact` (Settings ▸ Project ▸ Save Compact Project Files).
-    pub fn to_file_json_with_view(&self, _view: &SavedView, compact: bool) -> Result<String, ProjectError> {
-        if self.schema == 0 || self.schema > super::SCHEMA_VERSION {
+    pub fn to_file_json_with_view(&self, view: &SavedView, compact: bool) -> Result<String, ProjectError> {
+        if self.schema == 0 {
             return Err(ProjectError::Invalid(format!("unsupported schema {}", self.schema)));
         }
-        file_check::check(self)
-            .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
-        let text = if compact {
-            serde_json::to_string(self)
-        } else {
-            serde_json::to_string_pretty(self)
+        if self.schema > super::SCHEMA_VERSION {
+            return Err(ProjectError::Invalid(format!(
+                "the project can't be saved: it holds a value a project file can't store (project schema {} is newer than this version supports ({}))",
+                self.schema,
+                super::SCHEMA_VERSION
+            )));
         }
-        .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: {e}")))?;
+        file_check::check(self).map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
+        #[derive(serde::Serialize)]
+        struct ProjectFile<'a> {
+            #[serde(rename = "savedBy")]
+            saved_by: &'static str,
+            #[serde(flatten)]
+            view: &'a SavedView,
+            #[serde(flatten)]
+            project: &'a Project,
+        }
+        let file = ProjectFile { saved_by: super::APP_VERSION, view, project: self };
+        let text = if compact { serde_json::to_string(&file) } else { serde_json::to_string_pretty(&file) }
+            .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: {e}")))?;
         #[cfg(debug_assertions)]
         Project::from_json(&text)
             .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
@@ -471,7 +483,10 @@ mod availability_tests {
             proxy: None,
         };
         assert!(!item.has_missing_footage());
-        item.proxy = Some(Box::new(Proxy { footage: crate::effectcraft_project::Footage { path: "/proxy.png".into(), missing: true, ..footage.clone() }, enabled: false }));
+        item.proxy = Some(Box::new(Proxy {
+            footage: crate::effectcraft_project::Footage { path: "/proxy.png".into(), missing: true, ..footage.clone() },
+            enabled: false,
+        }));
         assert!(item.has_missing_footage(), "unused missing proxies still need repair");
         item.proxy.as_mut().unwrap().footage.missing = false;
         assert!(!item.has_missing_footage());

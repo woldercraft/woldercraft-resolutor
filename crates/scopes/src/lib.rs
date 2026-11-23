@@ -49,6 +49,7 @@ pub const SKIN_TONE_DEG: f32 = 123.0;
 pub enum ScopeKind {
     VectorscopeYuv,
     VectorscopeHls,
+    Cie1931,
     Histogram,
     Parade,
     #[default]
@@ -56,12 +57,14 @@ pub enum ScopeKind {
 }
 
 impl ScopeKind {
-    pub const ALL: [ScopeKind; 5] = [ScopeKind::VectorscopeYuv, ScopeKind::VectorscopeHls, ScopeKind::Histogram, ScopeKind::Parade, ScopeKind::Waveform];
+    pub const ALL: [ScopeKind; 6] =
+        [ScopeKind::VectorscopeYuv, ScopeKind::VectorscopeHls, ScopeKind::Cie1931, ScopeKind::Histogram, ScopeKind::Parade, ScopeKind::Waveform];
     /// Stable id (`"vectorscopeYuv"`…), as in JSON.
     pub fn name(self) -> &'static str {
         match self {
             ScopeKind::VectorscopeYuv => "vectorscopeYuv",
             ScopeKind::VectorscopeHls => "vectorscopeHls",
+            ScopeKind::Cie1931 => "cie1931",
             ScopeKind::Histogram => "histogram",
             ScopeKind::Parade => "parade",
             ScopeKind::Waveform => "waveform",
@@ -71,6 +74,7 @@ impl ScopeKind {
         match self {
             ScopeKind::VectorscopeYuv => "Vectorscope YUV",
             ScopeKind::VectorscopeHls => "Vectorscope HLS",
+            ScopeKind::Cie1931 => "CIE 1931",
             ScopeKind::Histogram => "Histogram",
             ScopeKind::Parade => "Parade",
             ScopeKind::Waveform => "Waveform",
@@ -84,6 +88,9 @@ impl ScopeKind {
         }
         if n == "hls" {
             return Some(ScopeKind::VectorscopeHls);
+        }
+        if n == "cie" || n == "cie1931" {
+            return Some(ScopeKind::Cie1931);
         }
         Self::ALL.into_iter().find(|k| norm(k.name()) == n || norm(k.label()) == n)
     }
@@ -702,6 +709,136 @@ pub fn hls_targets(m: Matrix) -> [(&'static str, f32, f32); 6] {
     [at("R", 0.0), at("Yl", 60.0), at("G", 120.0), at("Cy", 180.0), at("B", 240.0), at("Mg", 300.0)]
 }
 
+// ------------------------------------------------------------------------------------ CIE 1931
+
+/// CIE 1931 2-degree spectral locus `(x, y)` coordinates from 380 nm to 700 nm (public standard colorimetric table).
+pub const CIE_SPECTRAL_LOCUS: &[(f32, f32)] = &[
+    (0.1741, 0.0050),
+    (0.1733, 0.0048),
+    (0.1714, 0.0051),
+    (0.1669, 0.0086),
+    (0.1566, 0.0177),
+    (0.1440, 0.0297),
+    (0.1241, 0.0578),
+    (0.0913, 0.1327),
+    (0.0454, 0.2950),
+    (0.0082, 0.5384),
+    (0.0139, 0.7502),
+    (0.0743, 0.8338),
+    (0.1547, 0.8059),
+    (0.2296, 0.7543),
+    (0.3016, 0.6923),
+    (0.3731, 0.6245),
+    (0.4441, 0.5547),
+    (0.5125, 0.4866),
+    (0.5752, 0.4242),
+    (0.6270, 0.3725),
+    (0.6658, 0.3340),
+    (0.6915, 0.3083),
+    (0.7079, 0.2920),
+    (0.7190, 0.2809),
+    (0.7260, 0.2740),
+    (0.7300, 0.2700),
+    (0.7320, 0.2680),
+    (0.7334, 0.2666),
+    (0.7347, 0.2653),
+];
+
+/// CIE 1931 chromaticity scope: `data[y * size + x]`, `x ∈ [0, x_max]` (right = +), `y ∈ [0, y_max]` (row 0 = top = `y_max`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CieChromaticity {
+    pub size: usize,
+    pub x_max: f32,
+    pub y_max: f32,
+    pub data: Vec<u32>,
+    pub samples: u32,
+    pub mean: [f32; 2],
+}
+
+impl CieChromaticity {
+    pub const X_MAX: f32 = 0.8;
+    pub const Y_MAX: f32 = 0.9;
+
+    pub fn at(&self, x: usize, y: usize) -> u32 {
+        self.data[y * self.size + x]
+    }
+
+    pub fn cell(&self, cx: f32, cy: f32) -> Option<(usize, usize)> {
+        let n = (self.size - 1) as f32;
+        let fx = (cx / self.x_max) * n;
+        let fy = (1.0 - cy / self.y_max) * n;
+        if !(0.0..=n).contains(&fx) || !(0.0..=n).contains(&fy) {
+            return None;
+        }
+        Some((fx.round() as usize, fy.round() as usize))
+    }
+
+    /// `(x, y)` chromaticity at the centre of a grid cell.
+    pub fn point(&self, col: usize, row: usize) -> [f32; 2] {
+        let n = (self.size - 1) as f32;
+        [(col as f32 / n) * self.x_max, (1.0 - row as f32 / n) * self.y_max]
+    }
+}
+
+/// Convert display-encoded RGB (`0..1`) in `matrix`'s gamut to CIE 1931 `(x, y)`.
+#[inline]
+pub fn rgb_to_cie_xy(rgb: [f32; 3], m: Matrix) -> Option<[f32; 2]> {
+    let gamut = match m {
+        Matrix::Bt2020Ncl => filmcraft_color::Gamut::Bt2020,
+        _ => filmcraft_color::Gamut::Bt709,
+    };
+    let npm = gamut.to_xyz();
+    let lin = [
+        filmcraft_color::srgb_to_linear(rgb[0].max(0.0)) as f64,
+        filmcraft_color::srgb_to_linear(rgb[1].max(0.0)) as f64,
+        filmcraft_color::srgb_to_linear(rgb[2].max(0.0)) as f64,
+    ];
+    let xyz = filmcraft_color::spaces::mul_vec(&npm, lin);
+    let sum = xyz[0] + xyz[1] + xyz[2];
+    if !sum.is_finite() || sum <= 1e-6 {
+        return None;
+    }
+    Some([(xyz[0] / sum) as f32, (xyz[1] / sum) as f32])
+}
+
+/// Compute the CIE 1931 chromaticity diagram histogram for `s`.
+pub fn cie1931(s: &Signal, p: &Params) -> CieChromaticity {
+    let size = p.vector_size.max(2);
+    let mut out =
+        CieChromaticity { size, x_max: CieChromaticity::X_MAX, y_max: CieChromaticity::Y_MAX, data: vec![0; size * size], samples: 0, mean: [0.0; 2] };
+    let gamut = match p.matrix {
+        Matrix::Bt2020Ncl => filmcraft_color::Gamut::Bt2020,
+        _ => filmcraft_color::Gamut::Bt709,
+    };
+    let npm = gamut.to_xyz();
+    let mut sum_xy = [0.0f64; 2];
+    for &c in &s.rgb {
+        let [r, g, b] = if p.clamp { c.map(|x| x.clamp(0.0, 1.0)) } else { c };
+        let lin = [
+            filmcraft_color::srgb_to_linear(r.max(0.0)) as f64,
+            filmcraft_color::srgb_to_linear(g.max(0.0)) as f64,
+            filmcraft_color::srgb_to_linear(b.max(0.0)) as f64,
+        ];
+        let xyz = filmcraft_color::spaces::mul_vec(&npm, lin);
+        let total = xyz[0] + xyz[1] + xyz[2];
+        if !total.is_finite() || total <= 1e-6 {
+            continue;
+        }
+        let cx = (xyz[0] / total) as f32;
+        let cy = (xyz[1] / total) as f32;
+        if let Some((gx, gy)) = out.cell(cx, cy) {
+            out.data[gy * size + gx] += 1;
+            out.samples += 1;
+            sum_xy[0] += cx as f64;
+            sum_xy[1] += cy as f64;
+        }
+    }
+    if out.samples > 0 {
+        out.mean = [(sum_xy[0] / out.samples as f64) as f32, (sum_xy[1] / out.samples as f64) as f32];
+    }
+    out
+}
+
 // ------------------------------------------------------------------------------------ all scopes
 
 /// Every scope the panel can show, computed for a set of settings.
@@ -711,6 +848,7 @@ pub enum Computed {
     Parade(Waveform),
     Histogram(Histogram),
     Vectorscope(Vectorscope),
+    Cie1931(CieChromaticity),
 }
 
 /// Compute one scope.
@@ -721,5 +859,6 @@ pub fn compute(kind: ScopeKind, s: &Signal, p: &Params, waveform_type: WaveformT
         ScopeKind::Histogram => Computed::Histogram(histogram(s, p)),
         ScopeKind::VectorscopeYuv => Computed::Vectorscope(vectorscope_yuv(s, p)),
         ScopeKind::VectorscopeHls => Computed::Vectorscope(vectorscope_hls(s, p)),
+        ScopeKind::Cie1931 => Computed::Cie1931(cie1931(s, p)),
     }
 }

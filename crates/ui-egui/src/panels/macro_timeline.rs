@@ -2,13 +2,13 @@
 //! Consolidates clips into visual MacroBlocks rendered directly via GPU meshes (`egui::Mesh`),
 //! enabling instantaneous selection, bulk movement, and global sequence navigation with zero lag.
 
-use std::sync::Arc;
-use egui::{pos2, vec2, Align2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind};
-use filmcraft_time::Tick;
-use filmcraft_project::{ClipId, Sequence, TrackId};
-use serde_json::json;
 use crate::FilmcraftApp;
 use crate::theme::Tokens;
+use egui::{Align2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
+use filmcraft_project::{ClipId, Sequence, TrackId};
+use filmcraft_time::Tick;
+use serde_json::json;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct MacroBlock {
@@ -23,22 +23,10 @@ pub struct MacroBlock {
 
 #[derive(Clone, Debug)]
 enum MacroDrag {
-    PanViewport {
-        last_x: f32,
-    },
-    MoveBlocks {
-        grab_tick: Tick,
-        offset: Tick,
-        clips: Arc<Vec<ClipId>>,
-        block_indices: Vec<usize>,
-    },
-    Marquee {
-        start: Pos2,
-        current: Pos2,
-    },
-    Scrub {
-        tick: Tick,
-    },
+    PanViewport { last_x: f32 },
+    MoveBlocks { grab_tick: Tick, offset: Tick, clips: Arc<Vec<ClipId>>, block_indices: Vec<usize> },
+    Marquee { start: Pos2, current: Pos2 },
+    Scrub { tick: Tick },
 }
 
 fn macro_drag_id() -> egui::Id {
@@ -47,12 +35,7 @@ fn macro_drag_id() -> egui::Id {
 
 fn lighten(c: Color32, factor: f32) -> Color32 {
     let f = (factor.clamp(0.0, 1.0) * 255.0) as u8;
-    Color32::from_rgba_premultiplied(
-        c.r().saturating_add(f),
-        c.g().saturating_add(f),
-        c.b().saturating_add(f),
-        c.a(),
-    )
+    Color32::from_rgba_premultiplied(c.r().saturating_add(f), c.g().saturating_add(f), c.b().saturating_add(f), c.a())
 }
 
 /// Aggregates sequence clips into contiguous macro blocks per track.
@@ -76,15 +59,8 @@ pub fn build_macro_blocks(app: &FilmcraftApp, seq: &Sequence) -> Vec<MacroBlock>
                     blocks.push(finished);
                 }
             }
-            cur_block = Some(MacroBlock {
-                start: it.start,
-                end: it.end(),
-                track_id: tr.id,
-                track_index: i,
-                is_video: true,
-                color,
-                clips: Arc::new(vec![it.id]),
-            });
+            cur_block =
+                Some(MacroBlock { start: it.start, end: it.end(), track_id: tr.id, track_index: i, is_video: true, color, clips: Arc::new(vec![it.id]) });
         }
         if let Some(b) = cur_block {
             blocks.push(b);
@@ -107,15 +83,8 @@ pub fn build_macro_blocks(app: &FilmcraftApp, seq: &Sequence) -> Vec<MacroBlock>
                     blocks.push(finished);
                 }
             }
-            cur_block = Some(MacroBlock {
-                start: it.start,
-                end: it.end(),
-                track_id: tr.id,
-                track_index: i,
-                is_video: false,
-                color,
-                clips: Arc::new(vec![it.id]),
-            });
+            cur_block =
+                Some(MacroBlock { start: it.start, end: it.end(), track_id: tr.id, track_index: i, is_video: false, color, clips: Arc::new(vec![it.id]) });
         }
         if let Some(b) = cur_block {
             blocks.push(b);
@@ -145,57 +114,32 @@ fn format_timecode_simple(t: Tick, fps: f64) -> String {
     format!("{hrs:02}:{mins:02}:{secs:02}:{frames:02}")
 }
 
-fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, in_timeline: bool) {
+fn render_macro_header(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    rect: Rect,
+    in_timeline: bool,
+    seq: &filmcraft_project::Sequence,
+    total_clips: usize,
+    selection: &std::collections::HashSet<ClipId>,
+) -> Rect {
     let p = ui.painter().clone();
-    let t = app.tokens.clone();
-
-    // Background
-    p.rect_filled(rect, 0.0, if in_timeline { t.panel_bg } else { t.app_bg });
-
-    let Some(seq_id) = app.session.state.active_sequence else {
-        p.text(rect.center(), Align2::CENTER_CENTER, "No active sequence", Tokens::ui(12.0), t.text_faint);
-        return;
-    };
-    let project = app.session.project.clone();
-    let Some(seq) = project.sequence(seq_id) else {
-        p.text(rect.center(), Align2::CENTER_CENTER, "No active sequence", Tokens::ui(12.0), t.text_faint);
-        return;
-    };
-
-    let total_clips: usize = seq.all_tracks().map(|tr| tr.items.len()).sum();
-    let dur_ticks = seq.duration().max(Tick::from_seconds_f64(10.0));
-    let dur_secs = dur_ticks.seconds().max(1.0);
-    let fps = seq.settings.frame_rate.as_f64().max(1.0);
-    let selection: std::collections::HashSet<ClipId> = app.session.state.selection.iter().copied().collect();
+    let t = app.tokens;
     let sel_count = selection.len();
-
-    // Header bar (24 pt inside timeline strip, 28 pt in standalone panel)
     let header_h = if in_timeline { 24.0 } else { 28.0 };
     let header_rect = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + header_h));
     p.rect_filled(header_rect, 0.0, t.header_bg);
     p.line_segment([pos2(rect.min.x, header_rect.max.y), pos2(rect.max.x, header_rect.max.y)], Stroke::new(1.0, t.separator));
 
-    let title_text = if sel_count > 0 {
-        format!("⚡ Macro · {total_clips} clips ({sel_count} sel.)")
-    } else {
-        format!("⚡ Macro · {total_clips} clips")
-    };
-    p.text(
-        pos2(header_rect.min.x + 8.0, header_rect.center().y),
-        Align2::LEFT_CENTER,
-        &title_text,
-        Tokens::semibold(11.0),
-        Color32::from_rgb(245, 195, 55),
-    );
+    let title_text = if sel_count > 0 { format!("⚡ Macro · {total_clips} clips ({sel_count} sel.)") } else { format!("⚡ Macro · {total_clips} clips") };
+    p.text(pos2(header_rect.min.x + 8.0, header_rect.center().y), Align2::LEFT_CENTER, &title_text, Tokens::semibold(11.0), Color32::from_rgb(245, 195, 55));
 
-    // Right cluster: Close Button (if strip) and Fast Mode Toggle
     let mut rx = header_rect.max.x - 6.0;
     if in_timeline {
         let close_w = 22.0;
         rx -= close_w;
         let close_rect = Rect::from_min_size(pos2(rx, header_rect.min.y + 3.0), vec2(close_w, header_h - 6.0));
-        let close_resp = ui.interact(close_rect, egui::Id::unique("macro-tl-close-btn"), Sense::click())
-            .on_hover_text("Hide Macro Timeline");
+        let close_resp = ui.interact(close_rect, egui::Id::unique("macro-tl-close-btn"), Sense::click()).on_hover_text("Hide Macro Timeline");
         if close_resp.hovered() {
             p.rect_filled(close_rect, 3.0, t.hover);
         }
@@ -206,30 +150,17 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
         rx -= 6.0;
     }
 
-    // Fast Mode Toggle Button
     let fast_mode = app.ui.timeline.fast_selection_mode;
     let fast_btn_label = if fast_mode { "⚡ Fast Mode: ON" } else { "Fast Mode: OFF" };
     let fast_btn_w = 105.0;
     rx -= fast_btn_w;
     let fast_btn_rect = Rect::from_min_size(pos2(rx, header_rect.min.y + 3.0), vec2(fast_btn_w, header_h - 6.0));
-    let fast_resp = ui.interact(fast_btn_rect, egui::Id::unique("macro-tl-fast-toggle"), Sense::click());
-    if fast_resp.clicked() {
+    if ui.interact(fast_btn_rect, egui::Id::unique("macro-tl-fast-toggle"), Sense::click()).clicked() {
         app.ui.timeline.fast_selection_mode = !app.ui.timeline.fast_selection_mode;
     }
-    p.rect_filled(
-        fast_btn_rect,
-        3.0,
-        if fast_mode { Color32::from_rgba_unmultiplied(220, 160, 30, 200) } else { t.panel_bg },
-    );
-    p.text(
-        fast_btn_rect.center(),
-        Align2::CENTER_CENTER,
-        fast_btn_label,
-        Tokens::ui(10.0),
-        if fast_mode { Color32::BLACK } else { t.text },
-    );
+    p.rect_filled(fast_btn_rect, 3.0, if fast_mode { Color32::from_rgba_unmultiplied(220, 160, 30, 200) } else { t.panel_bg });
+    p.text(fast_btn_rect.center(), Align2::CENTER_CENTER, fast_btn_label, Tokens::ui(10.0), if fast_mode { Color32::BLACK } else { t.text });
 
-    // Middle Quick Action Nudge & Alignment Buttons
     let mut mid_x = rx - 8.0;
     let nudge_btns = [
         ("+5s ▶▶", Tick::from_seconds_f64(5.0), 44.0),
@@ -251,16 +182,11 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
                 seq.all_tracks().flat_map(|tr| tr.items.iter().map(|it| it.id.0)).collect()
             };
             if !target_clips.is_empty() {
-                let _ = app.session.execute("timeline.move", json!({
-                    "clips": target_clips,
-                    "offset": offset.0,
-                    "trackDelta": 0
-                }));
+                let _ = app.session.execute("timeline.move", json!({"clips": target_clips, "offset": offset.0, "trackDelta": 0}));
             }
         }
     }
 
-    // Align to playhead button
     let align_w = 95.0;
     mid_x -= align_w + 6.0;
     let align_r = Rect::from_min_size(pos2(mid_x, header_rect.min.y + 3.0), vec2(align_w, header_h - 6.0));
@@ -269,35 +195,47 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
     p.text(align_r.center(), Align2::CENTER_CENTER, "⏱ Al Cabezal", Tokens::ui(10.0), Color32::from_rgb(100, 200, 255));
     if align_resp.clicked() {
         let ph = app.session.playhead();
-        let target_clips: Vec<ClipId> = if !selection.is_empty() {
-            selection.iter().copied().collect()
-        } else {
-            seq.all_tracks().flat_map(|tr| tr.items.iter().map(|it| it.id)).collect()
-        };
-        // Find earliest start among target clips
-        let earliest = seq.all_tracks()
-            .flat_map(|tr| tr.items.iter())
-            .filter(|it| target_clips.contains(&it.id))
-            .map(|it| it.start)
-            .min();
+        let target_clips: Vec<ClipId> =
+            if !selection.is_empty() { selection.iter().copied().collect() } else { seq.all_tracks().flat_map(|tr| tr.items.iter().map(|it| it.id)).collect() };
+        let earliest = seq.all_tracks().flat_map(|tr| tr.items.iter()).filter(|it| target_clips.contains(&it.id)).map(|it| it.start).min();
         if let Some(min_t) = earliest {
             let offset = ph - min_t;
             if offset != Tick::ZERO {
                 let clip_nums: Vec<u64> = target_clips.iter().map(|c| c.0).collect();
-                let _ = app.session.execute("timeline.move", json!({
-                    "clips": clip_nums,
-                    "offset": offset.0,
-                    "trackDelta": 0
-                }));
+                let _ = app.session.execute("timeline.move", json!({"clips": clip_nums, "offset": offset.0, "trackDelta": 0}));
             }
         }
     }
+    header_rect
+}
+
+fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, in_timeline: bool) {
+    let p = ui.painter().clone();
+    let t = app.tokens;
+
+    // Background
+    p.rect_filled(rect, 0.0, if in_timeline { t.panel_bg } else { t.app_bg });
+
+    let Some(seq_id) = app.session.state.active_sequence else {
+        p.text(rect.center(), Align2::CENTER_CENTER, "No active sequence", Tokens::ui(12.0), t.text_faint);
+        return;
+    };
+    let project = app.session.project.clone();
+    let Some(seq) = project.sequence(seq_id) else {
+        p.text(rect.center(), Align2::CENTER_CENTER, "No active sequence", Tokens::ui(12.0), t.text_faint);
+        return;
+    };
+
+    let total_clips: usize = seq.all_tracks().map(|tr| tr.items.len()).sum();
+    let dur_ticks = seq.duration().max(Tick::from_seconds_f64(10.0));
+    let dur_secs = dur_ticks.seconds().max(1.0);
+    let fps = seq.settings.frame_rate.as_f64().max(1.0);
+    let selection: std::collections::HashSet<ClipId> = app.session.state.selection.iter().copied().collect();
+
+    let header_rect = render_macro_header(app, ui, rect, in_timeline, seq, total_clips, &selection);
 
     // Canvas layout
-    let canvas = Rect::from_min_max(
-        pos2(rect.min.x + 6.0, header_rect.max.y + 2.0),
-        pos2(rect.max.x - 6.0, rect.max.y - 2.0),
-    );
+    let canvas = Rect::from_min_max(pos2(rect.min.x + 6.0, header_rect.max.y + 2.0), pos2(rect.max.x - 6.0, rect.max.y - 2.0));
     if canvas.width() <= 20.0 || canvas.height() <= 16.0 {
         return;
     }
@@ -318,9 +256,7 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
     let total_tracks = (nv + na).max(1);
     let row_height = (tracks_canvas.height() / total_tracks as f32).clamp(4.0, 36.0);
 
-    let time_to_x = |t: Tick| -> f32 {
-        canvas.min.x + ((t.seconds() / dur_secs) as f32 * canvas.width()).clamp(0.0, canvas.width())
-    };
+    let time_to_x = |t: Tick| -> f32 { canvas.min.x + ((t.seconds() / dur_secs) as f32 * canvas.width()).clamp(0.0, canvas.width()) };
     let x_to_tick = |x: f32| -> Tick {
         let ratio = ((x - canvas.min.x) / canvas.width()).clamp(0.0, 1.0) as f64;
         Tick::from_seconds_f64(ratio * dur_secs)
@@ -366,7 +302,9 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
     }
 
     let ruler_resp = ui.interact(ruler_rect, egui::Id::unique("macro-timeline-ruler"), Sense::click_and_drag());
-    if (ruler_resp.clicked() || ruler_resp.dragged()) && let Some(p_pos) = pointer_pos {
+    if (ruler_resp.clicked() || ruler_resp.dragged())
+        && let Some(p_pos) = pointer_pos
+    {
         let target_tick = x_to_tick(p_pos.x);
         let _ = app.session.execute("playhead.set", json!({ "time": target_tick.0 }));
         if let Some(main_tl) = app.tl.layout.as_ref() {
@@ -382,11 +320,7 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
     // Hit test: user clicked on any MacroBlock
     let hit_block = pointer_pos.and_then(|p_pos| {
         blocks.iter().enumerate().find(|(_, b)| {
-            let row_idx = if b.is_video {
-                (nv.saturating_sub(1)).saturating_sub(b.track_index)
-            } else {
-                nv + b.track_index
-            };
+            let row_idx = if b.is_video { (nv.saturating_sub(1)).saturating_sub(b.track_index) } else { nv + b.track_index };
             let y0 = tracks_canvas.min.y + row_idx as f32 * row_height;
             let y1 = y0 + row_height;
             let x0 = time_to_x(b.start);
@@ -402,32 +336,21 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
             // User grabbed a block: ALWAYS prioritize block movement!
             let any_selected = hit_b.clips.iter().any(|c| selection.contains(c));
             let target_indices: Vec<usize> = if any_selected {
-                blocks
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, b)| b.clips.iter().any(|c| selection.contains(c)))
-                    .map(|(i, _)| i)
-                    .collect()
+                blocks.iter().enumerate().filter(|(_, b)| b.clips.iter().any(|c| selection.contains(c))).map(|(i, _)| i).collect()
             } else {
                 vec![hit_idx]
             };
 
-            let all_target_clips: Vec<ClipId> = target_indices
-                .iter()
-                .flat_map(|&idx| blocks.get(idx).map(|b| b.clips.as_ref().clone()).unwrap_or_default())
-                .collect();
+            let all_target_clips: Vec<ClipId> =
+                target_indices.iter().flat_map(|&idx| blocks.get(idx).map(|b| b.clips.as_ref().clone()).unwrap_or_default()).collect();
 
             // Select them in the engine so visual highlight is immediate
             let clip_nums: Vec<u64> = all_target_clips.iter().map(|c| c.0).collect();
             let _ = app.session.execute("timeline.select", json!({ "clips": clip_nums, "add": mods.shift }));
 
             let grab_t = x_to_tick(p_pos.x);
-            current_drag = Some(MacroDrag::MoveBlocks {
-                grab_tick: grab_t,
-                offset: Tick::ZERO,
-                clips: Arc::new(all_target_clips),
-                block_indices: target_indices,
-            });
+            current_drag =
+                Some(MacroDrag::MoveBlocks { grab_tick: grab_t, offset: Tick::ZERO, clips: Arc::new(all_target_clips), block_indices: target_indices });
         } else if mods.alt {
             let t = x_to_tick(p_pos.x);
             let _ = app.session.execute("playhead.set", json!({ "time": t.0 }));
@@ -436,15 +359,14 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
             current_drag = Some(MacroDrag::PanViewport { last_x: p_pos.x });
         } else {
             // Empty space: marquee box selection
-            current_drag = Some(MacroDrag::Marquee {
-                start: p_pos,
-                current: p_pos,
-            });
+            current_drag = Some(MacroDrag::Marquee { start: p_pos, current: p_pos });
         }
     }
 
     // Handle Active Dragging
-    if tracks_resp.dragged() && let Some(p_pos) = pointer_pos {
+    if tracks_resp.dragged()
+        && let Some(p_pos) = pointer_pos
+    {
         match current_drag {
             Some(MacroDrag::PanViewport { ref mut last_x }) => {
                 let dx = p_pos.x - *last_x;
@@ -469,58 +391,59 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
     }
 
     // Handle Drag Release / Commit
-    if tracks_resp.drag_stopped() {
-        if let Some(drag) = current_drag.take() {
-            match drag {
-                MacroDrag::MoveBlocks { offset, clips, .. } if offset != Tick::ZERO => {
-                    if app.ui.timeline.fast_selection_mode {
-                        // In fast selection mode, register as pending move
-                        app.tl.pending_move = Some(crate::panels::timeline::PendingMove {
-                            clips: clips.clone(),
-                            offset,
-                            track_delta: 0,
-                            new_track: None,
-                            copy: false,
-                            bounds: (Tick::ZERO, seq.duration()),
-                            all_unlocked: true,
-                        });
-                    } else {
-                        let clip_nums: Vec<u64> = clips.iter().map(|c| c.0).collect();
-                        let _ = app.session.execute("timeline.move", json!({
+    if tracks_resp.drag_stopped()
+        && let Some(drag) = current_drag.take()
+    {
+        match drag {
+            MacroDrag::MoveBlocks { offset, clips, .. } if offset != Tick::ZERO => {
+                if app.ui.timeline.fast_selection_mode {
+                    // In fast selection mode, register as pending move
+                    app.tl.pending_move = Some(crate::panels::timeline::PendingMove {
+                        clips: clips.clone(),
+                        offset,
+                        track_delta: 0,
+                        new_track: None,
+                        copy: false,
+                        bounds: (Tick::ZERO, seq.duration()),
+                        all_unlocked: true,
+                    });
+                } else {
+                    let clip_nums: Vec<u64> = clips.iter().map(|c| c.0).collect();
+                    let _ = app.session.execute(
+                        "timeline.move",
+                        json!({
                             "clips": clip_nums,
                             "offset": offset.0,
                             "trackDelta": 0
-                        }));
-                    }
+                        }),
+                    );
                 }
-                MacroDrag::Marquee { start, current } => {
-                    let box_rect = Rect::from_two_pos(start, current);
-                    let mut selected_clips = Vec::new();
-                    for b in &blocks {
-                        let row_idx = if b.is_video {
-                            (nv.saturating_sub(1)).saturating_sub(b.track_index)
-                        } else {
-                            nv + b.track_index
-                        };
-                        let y0 = tracks_canvas.min.y + row_idx as f32 * row_height;
-                        let y1 = y0 + row_height;
-                        let x0 = time_to_x(b.start);
-                        let x1 = time_to_x(b.end).max(x0 + 4.0);
-                        let b_rect = Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
-                        if box_rect.intersects(b_rect) {
-                            selected_clips.extend(b.clips.iter().copied());
-                        }
-                    }
-                    let ids: Vec<u64> = selected_clips.iter().map(|c| c.0).collect();
-                    let _ = app.session.execute("timeline.select", json!({ "clips": ids, "add": mods.shift }));
-                }
-                _ => {}
             }
+            MacroDrag::Marquee { start, current } => {
+                let box_rect = Rect::from_two_pos(start, current);
+                let mut selected_clips = Vec::new();
+                for b in &blocks {
+                    let row_idx = if b.is_video { (nv.saturating_sub(1)).saturating_sub(b.track_index) } else { nv + b.track_index };
+                    let y0 = tracks_canvas.min.y + row_idx as f32 * row_height;
+                    let y1 = y0 + row_height;
+                    let x0 = time_to_x(b.start);
+                    let x1 = time_to_x(b.end).max(x0 + 4.0);
+                    let b_rect = Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
+                    if box_rect.intersects(b_rect) {
+                        selected_clips.extend(b.clips.iter().copied());
+                    }
+                }
+                let ids: Vec<u64> = selected_clips.iter().map(|c| c.0).collect();
+                let _ = app.session.execute("timeline.select", json!({ "clips": ids, "add": mods.shift }));
+            }
+            _ => {}
         }
     }
 
     // Handle Plain Click (select or jump playhead)
-    if tracks_resp.clicked() && let Some(p_pos) = pointer_pos {
+    if tracks_resp.clicked()
+        && let Some(p_pos) = pointer_pos
+    {
         if let Some((_, b)) = hit_block {
             let ids: Vec<u64> = b.clips.iter().map(|c| c.0).collect();
             let _ = app.session.execute("timeline.select", json!({ "clips": ids, "add": mods.shift }));
@@ -538,45 +461,77 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
     // Save drag state back
     ui.ctx().data_mut(|d| d.insert_temp(macro_drag_id(), current_drag.clone()));
 
-    // ---- GPU Mesh Rendering of MacroBlocks ----
+    let first_moving_start =
+        render_macro_blocks_mesh(&p, &t, (canvas, tracks_canvas), (nv, na, row_height, dur_secs), &blocks, &selection, &current_drag, viewport_rect);
+
+    // Marquee Box
+    if let Some(MacroDrag::Marquee { start, current }) = &current_drag {
+        let mr = Rect::from_two_pos(*start, *current).intersect(tracks_canvas);
+        if mr.width() > 0.0 && mr.height() > 0.0 {
+            p.rect_filled(mr, 0.0, Color32::from_white_alpha(20));
+            p.rect_stroke(mr, 0.0, Stroke::new(1.0, Color32::from_white_alpha(150)), StrokeKind::Inside);
+        }
+    }
+
+    render_macro_overlays(
+        app,
+        ui,
+        &p,
+        &t,
+        (rect, canvas, ruler_rect, tracks_canvas),
+        dur_secs,
+        fps,
+        seq,
+        &current_drag,
+        pointer_pos,
+        &tracks_resp,
+        hit_block.is_some(),
+        first_moving_start,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_macro_blocks_mesh(
+    p: &egui::Painter,
+    t: &crate::theme::Tokens,
+    rects: (Rect, Rect),
+    grid: (usize, usize, f32, f64),
+    blocks: &[MacroBlock],
+    selection: &std::collections::HashSet<ClipId>,
+    current_drag: &Option<MacroDrag>,
+    viewport_rect: Option<Rect>,
+) -> Option<Tick> {
+    let (canvas, tracks_canvas) = rects;
+    let (nv, na, row_height, dur_secs) = grid;
+    let time_to_x = |tk: Tick| -> f32 { canvas.min.x + ((tk.seconds() / dur_secs) as f32 * canvas.width()).clamp(0.0, canvas.width()) };
+
     let mut mesh = egui::Mesh::default();
     let mut selected_mesh = egui::Mesh::default();
-
-    let move_offset = match &current_drag {
+    let move_offset = match current_drag {
         Some(MacroDrag::MoveBlocks { offset, .. }) => *offset,
         _ => Tick::ZERO,
     };
-    let moving_indices: &[usize] = match &current_drag {
+    let moving_indices: &[usize] = match current_drag {
         Some(MacroDrag::MoveBlocks { block_indices, .. }) => block_indices.as_slice(),
         _ => &[],
     };
-
     let mut first_moving_start: Option<Tick> = None;
 
     for (idx, b) in blocks.iter().enumerate() {
-        let row_idx = if b.is_video {
-            (nv.saturating_sub(1)).saturating_sub(b.track_index)
-        } else {
-            nv + b.track_index
-        };
+        let row_idx = if b.is_video { (nv.saturating_sub(1)).saturating_sub(b.track_index) } else { nv + b.track_index };
         let y0 = tracks_canvas.min.y + row_idx as f32 * row_height;
         let y1 = y0 + row_height;
-
         let is_moving = moving_indices.contains(&idx);
         let eff_offset = if is_moving { move_offset } else { Tick::ZERO };
         let draw_start = (b.start + eff_offset).max(Tick::ZERO);
         let draw_end = (b.end + eff_offset).max(Tick::ZERO);
-
         if is_moving && first_moving_start.is_none() {
             first_moving_start = Some(draw_start);
         }
-
         let x0 = time_to_x(draw_start);
         let x1 = time_to_x(draw_end).max(x0 + 2.0);
         let block_rect = Rect::from_min_max(pos2(x0, y0 + 1.0), pos2(x1, y1 - 1.0));
-
-        let is_selected = is_moving || b.clips.iter().any(|c| selection.contains(c));
-        if is_selected {
+        if is_moving || b.clips.iter().any(|c| selection.contains(c)) {
             selected_mesh.add_colored_rect(block_rect, t.clip_selected_border);
             if block_rect.width() > 3.0 && block_rect.height() > 3.0 {
                 selected_mesh.add_colored_rect(block_rect.shrink(1.0), lighten(b.color, 0.15));
@@ -592,29 +547,40 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
     if !selected_mesh.is_empty() {
         p.add(selected_mesh);
     }
-
-    // Video/Audio Track Divider
     if nv > 0 && na > 0 {
         let div_y = tracks_canvas.min.y + nv as f32 * row_height;
         p.line_segment([pos2(tracks_canvas.min.x, div_y), pos2(tracks_canvas.max.x, div_y)], Stroke::new(1.0, t.app_bg));
     }
-
-    // Viewport Minimap Overlay
     if let Some(vr) = viewport_rect {
         p.rect_filled(vr, 2.0, Color32::from_rgba_unmultiplied(60, 140, 240, 35));
         p.rect_stroke(vr, 2.0, Stroke::new(1.0, Color32::from_rgb(100, 180, 255)), StrokeKind::Inside);
     }
+    first_moving_start
+}
 
-    // Marquee Box
-    if let Some(MacroDrag::Marquee { start, current }) = &current_drag {
-        let mr = Rect::from_two_pos(*start, *current).intersect(tracks_canvas);
-        if mr.width() > 0.0 && mr.height() > 0.0 {
-            p.rect_filled(mr, 0.0, Color32::from_white_alpha(20));
-            p.rect_stroke(mr, 0.0, Stroke::new(1.0, Color32::from_white_alpha(150)), StrokeKind::Inside);
-        }
-    }
+#[allow(clippy::too_many_arguments)]
+fn render_macro_overlays(
+    app: &FilmcraftApp,
+    ui: &egui::Ui,
+    p: &egui::Painter,
+    t: &crate::theme::Tokens,
+    rects: (Rect, Rect, Rect, Rect),
+    dur_secs: f64,
+    fps: f64,
+    seq: &filmcraft_project::Sequence,
+    current_drag: &Option<MacroDrag>,
+    pointer_pos: Option<Pos2>,
+    tracks_resp: &egui::Response,
+    has_hit: bool,
+    first_moving_start: Option<Tick>,
+) {
+    let (rect, canvas, ruler_rect, tracks_canvas) = rects;
+    let time_to_x = |tk: Tick| -> f32 { canvas.min.x + ((tk.seconds() / dur_secs) as f32 * canvas.width()).clamp(0.0, canvas.width()) };
+    let x_to_tick = |x: f32| -> Tick {
+        let ratio = ((x - canvas.min.x) / canvas.width()).clamp(0.0, 1.0) as f64;
+        Tick::from_seconds_f64(ratio * dur_secs)
+    };
 
-    // Playhead line and diamond across ruler & tracks
     let ph_tick = app.session.playhead();
     let ph_x = time_to_x(ph_tick);
     if ph_x >= canvas.min.x && ph_x <= canvas.max.x {
@@ -624,8 +590,10 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
         p.add(egui::Shape::convex_polygon(diamond.to_vec(), t.playhead, Stroke::NONE));
     }
 
-    // 3. Hover Time Guide & Label
-    if current_drag.is_none() && let Some(p_pos) = pointer_pos && canvas.contains(p_pos) {
+    if current_drag.is_none()
+        && let Some(p_pos) = pointer_pos
+        && canvas.contains(p_pos)
+    {
         let h_tick = x_to_tick(p_pos.x);
         p.line_segment([pos2(p_pos.x, ruler_rect.min.y), pos2(p_pos.x, tracks_canvas.max.y)], Stroke::new(1.0, Color32::from_white_alpha(70)));
         let h_label = format!("⏱ {}", format_timecode_simple(h_tick, fps));
@@ -637,13 +605,13 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
         p.galley(pos2(bx + 3.0, ruler_rect.min.y + 2.0), gal, Color32::WHITE);
     }
 
-    // 4. Destination Marker on Ruler & Floating HUD while Moving Blocks
-    if let Some(MacroDrag::MoveBlocks { offset, clips, .. }) = &current_drag && *offset != Tick::ZERO {
+    if let Some(MacroDrag::MoveBlocks { offset, clips, .. }) = current_drag
+        && *offset != Tick::ZERO
+    {
         if let Some(target_start) = first_moving_start {
             let tx = time_to_x(target_start);
             let amber = Color32::from_rgb(245, 195, 55);
             p.line_segment([pos2(tx, ruler_rect.min.y), pos2(tx, tracks_canvas.max.y)], Stroke::new(1.5, amber));
-
             let dest_label = format!("🎯 Destino: {}", format_timecode_simple(target_start, fps));
             let gal = p.layout_no_wrap(dest_label, Tokens::semibold(10.0), Color32::BLACK);
             let bx = (tx - gal.size().x * 0.5).clamp(canvas.min.x + 2.0, canvas.max.x - gal.size().x - 8.0);
@@ -668,11 +636,7 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
     }
 
     if tracks_resp.hovered() {
-        if hit_block.is_some() {
-            ui.ctx().set_cursor_icon(CursorIcon::Grab);
-        } else {
-            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-        }
+        ui.ctx().set_cursor_icon(if has_hit { CursorIcon::Grab } else { CursorIcon::PointingHand });
     }
 }
 
@@ -699,5 +663,3 @@ mod tests {
         assert_eq!(total_clips_in_blocks, total_clips_in_seq, "all clips must be represented in macro blocks");
     }
 }
-
-

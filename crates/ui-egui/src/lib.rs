@@ -101,7 +101,7 @@ mod raw_input;
 use audio::shuttle_mix_rate;
 pub use audio::{AUDIO_RETRY_S, AUDIO_STALL_S, playback_mix};
 pub use gpu::{gpu_compositor_unsupported, software_rasterizer};
-pub use hooks::{AiControlStatus, AudioDevices, AudioOut, ClipboardMedia, HostHooks, RelinkHint, SystemThemeFn};
+pub use hooks::{AiControlInfo, AiControlStatus, AudioDevices, AudioOut, ClipboardMedia, HostHooks, RelinkHint, SystemThemeFn};
 pub(crate) use raw_input::rewrite_native_window_input;
 
 pub use ime_reset::install_ime_reset_callbacks;
@@ -392,6 +392,10 @@ pub struct FilmcraftApp {
     dock_dirty_since: Option<web_time::Instant>,
     /// Window ▸ Workspaces: saved layouts ([`dock::WORKSPACES_FILE`] in the data directory).
     pub workspaces: dock::WorkspacePrefs,
+    /// Independent top-bar layout presets ([`dock::HEADER_PRESETS_FILE`] in the data directory).
+    pub header_presets: dock::WorkspacePrefs,
+    /// User-defined composite panels (`custom_panels.json` in the data directory).
+    pub custom_panels: panels::custom_panels::CustomPanelStore,
     /// Workspace names and the current one, as last handed to the native menu.
     menu_workspaces: (Vec<String>, String),
 }

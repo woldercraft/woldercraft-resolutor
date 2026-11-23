@@ -287,39 +287,41 @@ fn save_rename_and_delete_through_the_dialogs() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
-/// The workspace menu in the header (the workspace's name at the top of the window) offers the
-/// actions of Window ▸ Workspaces under the list: Reset to Saved Layout, Save Changes to this
-/// Workspace, Save as New Workspace… and Edit Workspaces….
+/// The Layout Presets menu in the header (`header.workspaceName`) saves, resets, renames and
+/// deletes independent layout presets stored in `layout_presets.json`.
 #[test]
 fn the_header_workspace_menu_saves_resets_and_opens_the_dialogs() {
     use filmcraft_ui_egui::state::WorkspaceDialog;
     let data = data_dir("header");
     let mut d = Driver::launch(&data);
-    let ws = d.workspace();
-    d.ok("ui.panel.close", json!({"panel": "Metadata"}));
+    let presets_file = || -> Value { serde_json::from_slice(&std::fs::read(data.join(filmcraft_ui_egui::dock::HEADER_PRESETS_FILE)).unwrap()).unwrap() };
 
     d.click("header.workspaceName");
     d.snapshot("header-menu");
-    d.click("header.workspaces.saveChanges");
-    assert!(!d.has("header.workspaces.saveChanges"), "the menu closes");
-    assert_eq!(saved_file(&data)["saved"][0]["name"], json!(ws), "the layout is saved to the workspace in use");
+    d.click("header.presets.saveAs");
+    assert!(matches!(d.app().ui.preset_dialog, Some(WorkspaceDialog::SaveAs { .. })), "Save as New Preset… asks for a name");
+    d.retype("presets.save.name", "Compact");
+    d.click("presets.save.ok");
+    assert!(d.app().ui.preset_dialog.is_none());
+    assert_eq!(presets_file()["saved"][0]["name"], json!("Compact"), "preset is saved");
+
+    d.ok("ui.panel.close", json!({"panel": "Metadata"}));
+    d.frames(2);
+    d.click("header.workspaceName");
+    d.click("header.presets.saveChanges");
+    assert!(!d.has("header.presets.saveChanges"), "the menu closes");
 
     d.ok("ui.panel.show", json!({"panel": "Metadata"}));
     d.frames(2);
     assert!(d.shows(PanelKind::Metadata));
     d.click("header.workspaceName");
-    d.click("header.workspaces.reset");
-    assert!(!d.shows(PanelKind::Metadata), "Reset to Saved Layout brings back the saved layout");
-    assert_eq!(d.workspace(), ws);
+    d.click("header.presets.reset");
+    assert!(!d.shows(PanelKind::Metadata), "Reset Preset restores the saved layout");
 
     d.click("header.workspaceName");
-    d.click("header.workspaces.saveAs");
-    assert!(matches!(d.app().ui.workspace_dialog, Some(WorkspaceDialog::SaveAs { .. })), "Save as New Workspace… asks for a name");
-    d.click("workspaces.save.cancel");
-    assert!(d.app().ui.workspace_dialog.is_none());
-
-    d.click("header.workspaceName");
-    d.click("header.workspaces.edit");
-    assert!(matches!(d.app().ui.workspace_dialog, Some(WorkspaceDialog::Edit { .. })), "Edit Workspaces… opens its dialog");
+    d.click("header.presets.edit");
+    assert!(matches!(d.app().ui.preset_dialog, Some(WorkspaceDialog::Edit { .. })), "Edit Presets… opens its dialog");
+    d.click("presets.edit.close");
+    assert!(d.app().ui.preset_dialog.is_none());
     let _ = std::fs::remove_dir_all(&data);
 }

@@ -22,6 +22,8 @@ pub struct BridgeClient {
     addr: String,
     /// Inherited from the same owner-controlled environment as the desktop app.
     token: Option<String>,
+    /// Path to the local `control_token` file written by Preferences ▸ AI Integration.
+    token_file: Option<std::path::PathBuf>,
     /// Connections with no request in flight. A request takes one (or opens one) for its whole
     /// round trip and puts it back only once the reply is read, so a slow or abandoned request
     /// never holds up the others or leaves its late reply for the next one to read (#1538).
@@ -39,7 +41,8 @@ impl BridgeClient {
             return Err(AutomationError::BadRequest(format!("bridge address must be loopback, got `{addr}`")));
         }
         let token = env_token();
-        Ok(Self { addr, token, idle: Mutex::new(Vec::new()), next_id: AtomicU64::new(1) })
+        let token_file = default_token_file_path();
+        Ok(Self { addr, token, token_file, idle: Mutex::new(Vec::new()), next_id: AtomicU64::new(1) })
     }
 
     /// Run engine command `id` in the app. A blocking export (`file.exportMedia` with
@@ -81,6 +84,25 @@ impl BridgeClient {
 
     /// Call a control method; returns `result` or the app's error.
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, AutomationError> {
+        let primary_token = self.token.clone().or_else(|| self.read_token_file());
+        match self.call_with_token(method, &params, primary_token.as_deref()).await {
+            Ok(v) => Ok(v),
+            Err(AutomationError::App(msg)) if msg.contains("control authentication failed") => {
+                // If an inherited env token is stale (e.g. after enabling AI Integration or
+                // clicking Regenerate Token in Preferences), retry once with the local token file.
+                let file_token = self.read_token_file();
+                if let Some(ref ft) = file_token
+                    && primary_token.as_deref() != Some(ft.as_str())
+                {
+                    return self.call_with_token(method, &params, Some(ft.as_str())).await.map_err(|e| self.decorate_auth_error(e));
+                }
+                Err(self.decorate_auth_error(AutomationError::App(msg)))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn call_with_token(&self, method: &str, params: &Value, token: Option<&str>) -> Result<Value, AutomationError> {
         for attempt in 0..2 {
             // A retry gets a fresh connection: the failed one may have been closed by an app restart.
             let idle = if attempt == 0 { self.idle.lock().await.pop() } else { None };
@@ -89,7 +111,6 @@ impl BridgeClient {
                 None => self.connect().await?,
             };
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let token = self.token.clone().or_else(read_token_file);
             let line = format!("{}\n", json!({"id": id, "token": token, "method": method, "params": params}));
             let res: Result<Value, AutomationError> = async {
                 conn.1.write_all(line.as_bytes()).await.map_err(|e| AutomationError::Bridge(e.to_string()))?;
@@ -103,22 +124,42 @@ impl BridgeClient {
             .await;
             match res {
                 Ok(v) => {
-                    let mut idle = self.idle.lock().await;
-                    if idle.len() < MAX_IDLE {
-                        idle.push(conn);
+                    if v.get("ok").and_then(Value::as_bool) == Some(true) {
+                        let mut idle = self.idle.lock().await;
+                        if idle.len() < MAX_IDLE {
+                            idle.push(conn);
+                        }
+                        return Ok(v.get("result").cloned().unwrap_or(Value::Null));
                     }
-                    drop(idle);
-                    return if v.get("ok").and_then(Value::as_bool) == Some(true) {
-                        Ok(v.get("result").cloned().unwrap_or(Value::Null))
-                    } else {
-                        Err(AutomationError::App(v.get("error").and_then(Value::as_str).unwrap_or("error").to_string()))
-                    };
+                    // Do not recycle a connection after an error reply: auth or protocol errors
+                    // close the server side of the socket.
+                    return Err(AutomationError::App(v.get("error").and_then(Value::as_str).unwrap_or("error").to_string()));
                 }
                 Err(_) if attempt == 0 => {}
                 Err(e) => return Err(e),
             }
         }
         Err(AutomationError::Bridge("unreachable".into()))
+    }
+
+    fn read_token_file(&self) -> Option<String> {
+        let path = self.token_file.as_deref()?;
+        let raw = std::fs::read_to_string(path).ok()?;
+        let trimmed = raw.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    }
+
+    fn decorate_auth_error(&self, err: AutomationError) -> AutomationError {
+        match err {
+            AutomationError::App(msg) if msg.contains("control authentication failed") => {
+                let hint = match &self.token_file {
+                    Some(p) => format!("{msg}; copy the token from Preferences ▸ AI Integration (or check `{}` / RESOLUTOR_CONTROL_TOKEN)", p.display()),
+                    None => format!("{msg}; copy the token from Preferences ▸ AI Integration or set RESOLUTOR_CONTROL_TOKEN"),
+                };
+                AutomationError::App(hint)
+            }
+            other => other,
+        }
     }
 
     async fn connect(&self) -> Result<Conn, AutomationError> {
@@ -135,28 +176,21 @@ impl BridgeClient {
 }
 
 fn env_token() -> Option<String> {
-    std::env::var("RESOLUTOR_CONTROL_TOKEN")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("FILMCRAFT_CONTROL_TOKEN").ok().filter(|s| !s.is_empty()))
+    std::env::var("RESOLUTOR_CONTROL_TOKEN").ok().filter(|s| !s.is_empty()).or_else(|| std::env::var("FILMCRAFT_CONTROL_TOKEN").ok().filter(|s| !s.is_empty()))
 }
 
-fn read_token_file() -> Option<String> {
+fn default_token_file_path() -> Option<std::path::PathBuf> {
     let env_path = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
-    let data_dir = env_path("RESOLUTOR_DATA_DIR")
-        .or_else(|| env_path("FILMCRAFT_DATA_DIR"))
-        .or_else(|| {
-            if cfg!(target_os = "macos") {
-                env_path("HOME").map(|h| h.join("Library/Application Support/Resolutor"))
-            } else if cfg!(windows) {
-                env_path("APPDATA").map(|h| h.join("Resolutor"))
-            } else {
-                env_path("XDG_DATA_HOME").map(|d| d.join("resolutor")).or_else(|| env_path("HOME").map(|h| h.join(".local/share/resolutor")))
-            }
-        })?;
-    let raw = std::fs::read_to_string(data_dir.join("control_token")).ok()?;
-    let trimmed = raw.trim().to_string();
-    (!trimmed.is_empty()).then_some(trimmed)
+    let data_dir = env_path("RESOLUTOR_DATA_DIR").or_else(|| env_path("FILMCRAFT_DATA_DIR")).or_else(|| {
+        if cfg!(target_os = "macos") {
+            env_path("HOME").map(|h| h.join("Library/Application Support/Resolutor"))
+        } else if cfg!(windows) {
+            env_path("APPDATA").map(|h| h.join("Resolutor"))
+        } else {
+            env_path("XDG_DATA_HOME").map(|d| d.join("resolutor")).or_else(|| env_path("HOME").map(|h| h.join(".local/share/resolutor")))
+        }
+    })?;
+    Some(data_dir.join("control_token"))
 }
 
 #[cfg(test)]
@@ -343,5 +377,62 @@ mod tests {
         assert_eq!(seen.len(), 2);
         assert!(seen.iter().all(|request| request["token"] == token));
         assert_eq!(seen[1]["params"]["params"]["path"], "/owner/project.fcproj");
+    }
+
+    async fn auth_app(expected_token: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((s, _)) = listener.accept().await {
+                let expected = expected_token.clone();
+                tokio::spawn(async move {
+                    let (r, mut w) = s.into_split();
+                    let mut lines = BufReader::new(r).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let req: Value = serde_json::from_str(&line).unwrap();
+                        if req["token"].as_str() == Some(expected.as_str()) {
+                            let reply = format!("{}\n", json!({"id": req["id"], "ok": true, "result": "authorized"}));
+                            let _ = w.write_all(reply.as_bytes()).await;
+                        } else {
+                            let reply =
+                                format!("{}\n", json!({"id": req["id"], "ok": false, "error": "control authentication failed; closing the connection"}));
+                            let _ = w.write_all(reply.as_bytes()).await;
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn stale_env_token_falls_back_to_local_token_file() {
+        let fresh = "abcdef0123456789".repeat(4);
+        let stale = "0000000000000000".repeat(4);
+        let addr = auth_app(fresh.clone()).await;
+        let path = std::env::temp_dir().join(format!("resolutor_bridge_test_{}.token", std::process::id()));
+        std::fs::write(&path, format!("{fresh}\n")).unwrap();
+
+        let mut b = BridgeClient::new(addr).unwrap();
+        b.token = Some(stale);
+        b.token_file = Some(path.clone());
+
+        let result = b.call("ui.inspect", json!({})).await.unwrap();
+        assert_eq!(result, json!("authorized"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn auth_failure_hints_preferences_and_does_not_recycle_conn() {
+        let addr = auth_app("abcdef0123456789".repeat(4)).await;
+        let mut b = BridgeClient::new(addr).unwrap();
+        b.token = Some("1111111111111111".repeat(4));
+        b.token_file = Some(std::path::PathBuf::from("/tmp/nonexistent_resolutor_control_token"));
+
+        let err = b.call("ui.inspect", json!({})).await.unwrap_err().to_string();
+        assert!(err.contains("control authentication failed"), "{err}");
+        assert!(err.contains("Preferences"), "{err}");
+        assert!(b.idle.lock().await.is_empty(), "closed connection must not be recycled");
     }
 }

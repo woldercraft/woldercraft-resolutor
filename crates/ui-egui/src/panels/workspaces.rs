@@ -105,6 +105,7 @@ fn rename(app: &mut FilmcraftApp, from: &str, to: &str) -> Result<Value, String>
         next.current = to.clone();
     }
     app.set_workspaces(next)?;
+    app.rename_saved_dock_key(from, &to);
     if app.ui.workspace == from {
         app.ui.workspace = to.clone();
     }
@@ -121,7 +122,7 @@ fn delete(app: &mut FilmcraftApp, name: &str) -> Result<Value, String> {
     }
     app.set_workspaces(next)?;
     if app.ui.workspace == name {
-        app.set_workspace(if is_builtin(name) { name } else { "Editing" });
+        app.switch_workspace_discarding(if is_builtin(name) { name } else { "Editing" });
     }
     Ok(if is_builtin(name) { json!({"restored": name}) } else { json!({"deleted": name}) })
 }
@@ -258,5 +259,182 @@ pub fn dialogs(app: &mut FilmcraftApp, ctx: &egui::Context) {
     }
     if close {
         app.ui.workspace_dialog = None;
+    }
+}
+
+/// Save the current layout into the named top-bar preset.
+pub fn save_header_preset(app: &mut FilmcraftApp, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("the preset needs a name".into());
+    }
+    let entry = dock::SavedWorkspace::new(name, &app.ui.dock)?;
+    let mut next = app.header_presets.clone();
+    match next.saved.iter_mut().find(|s| s.name == name) {
+        Some(s) => *s = entry,
+        None => next.saved.push(entry),
+    }
+    next.current = name.to_string();
+    app.set_header_presets(next)?;
+    app.ui.active_preset = name.to_string();
+    Ok(())
+}
+
+/// Create a new top-bar preset from the current dock layout.
+pub fn save_new_header_preset(app: &mut FilmcraftApp, name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("the preset needs a name".into());
+    }
+    if let Some(existing) = dock::find_preset(&app.header_presets, trimmed) {
+        return Err(format!("a preset named `{existing}` already exists"));
+    }
+    save_header_preset(app, trimmed)
+}
+
+/// Rename a top-bar preset.
+fn rename_header_preset(app: &mut FilmcraftApp, from: &str, to: &str) -> Result<(), String> {
+    let to = to.trim();
+    if to.is_empty() {
+        return Err("the preset needs a name".into());
+    }
+    if let Some(existing) = dock::find_preset(&app.header_presets, to)
+        && existing != from
+    {
+        return Err(format!("a preset named `{existing}` already exists"));
+    }
+    let mut next = app.header_presets.clone();
+    let Some(entry) = next.saved.iter_mut().find(|s| s.name == from) else {
+        return Err(format!("unknown preset `{from}`"));
+    };
+    entry.name = to.to_string();
+    if next.current == from {
+        next.current = to.to_string();
+    }
+    app.set_header_presets(next)?;
+    if app.ui.active_preset == from {
+        app.ui.active_preset = to.to_string();
+    }
+    Ok(())
+}
+
+/// Delete a top-bar preset.
+fn delete_header_preset(app: &mut FilmcraftApp, name: &str) -> Result<(), String> {
+    let mut next = app.header_presets.clone();
+    let before = next.saved.len();
+    next.saved.retain(|s| s.name != name);
+    if next.saved.len() == before {
+        return Err(format!("unknown preset `{name}`"));
+    }
+    if next.current == name {
+        next.current.clear();
+    }
+    app.set_header_presets(next)?;
+    if app.ui.active_preset == name {
+        app.ui.active_preset.clear();
+    }
+    Ok(())
+}
+
+/// Save as New Preset… and Edit Presets… dialogs for the top-bar preset menu.
+pub fn preset_dialogs(app: &mut FilmcraftApp, ctx: &egui::Context) {
+    let Some(mut d) = app.ui.preset_dialog.clone() else { return };
+    let mut elems: Vec<(String, egui::Rect, String)> = Vec::new();
+    let mut push = |id: &str, r: &egui::Response, label: &str| elems.push((id.to_string(), r.rect, label.to_string()));
+    let mut close = crate::widgets::escape_closes(ctx);
+    let mut submitted = false;
+    let names = dock::preset_names(&app.header_presets);
+    let (title, shown) = match &d {
+        WorkspaceDialog::SaveAs { .. } => ("New Preset", tl!("New Preset")),
+        WorkspaceDialog::Edit { .. } => ("Edit Presets", tl!("Edit Presets")),
+    };
+    egui::Window::new(shown)
+        .id(egui::Id::unique(title))
+        .collapsible(false)
+        .resizable(false)
+        .pivot(Align2::CENTER_CENTER)
+        .default_pos(crate::widgets::dialog_center(ctx))
+        .show(ctx, |ui| match &mut d {
+            WorkspaceDialog::SaveAs { name } => {
+                ui.horizontal(|ui| {
+                    ui.label(tl!("Name:"));
+                    let r = ui.text_edit_singleline(name);
+                    push("presets.save.name", &r, "Name");
+                });
+                ui.horizontal(|ui| {
+                    let r = ui.button(tl!("Cancel"));
+                    push("presets.save.cancel", &r, "Cancel");
+                    close |= r.clicked();
+                    let r = ui.button(tl!("OK"));
+                    push("presets.save.ok", &r, "OK");
+                    if r.clicked() {
+                        match save_new_header_preset(app, name) {
+                            Ok(()) => submitted = true,
+                            Err(e) => app.ui.status = e,
+                        }
+                    }
+                });
+            }
+            WorkspaceDialog::Edit { selected, name } => {
+                if names.is_empty() {
+                    ui.label(tl!("No saved presets"));
+                } else {
+                    for (i, n) in names.iter().enumerate() {
+                        let r = ui.selectable_label(selected.as_ref() == Some(n), n);
+                        push(&format!("presets.edit.row.{i}"), &r, n);
+                        if r.clicked() {
+                            *selected = Some(n.clone());
+                            *name = n.clone();
+                        }
+                    }
+                }
+                ui.separator();
+                let sel = selected.clone().filter(|s| names.contains(s));
+                let has_sel = sel.is_some();
+                ui.horizontal(|ui| {
+                    ui.label(tl!("Name:"));
+                    let r = crate::widgets::accessible_name(ui.add_enabled(has_sel, egui::TextEdit::singleline(name)), "Name");
+                    push("presets.edit.name", &r, "Name");
+                    let r = ui.add_enabled(has_sel && sel.as_deref() != Some(name.trim()), egui::Button::new(tl!("Rename")));
+                    push("presets.edit.rename", &r, "Rename");
+                    if r.clicked()
+                        && let Some(s) = &sel
+                    {
+                        match rename_header_preset(app, s, name) {
+                            Ok(()) => *selected = Some(name.trim().to_string()),
+                            Err(e) => app.ui.status = e,
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let r = ui.add_enabled(has_sel, egui::Button::new(tl!("Delete")));
+                    push("presets.edit.delete", &r, "Delete");
+                    if r.clicked()
+                        && let Some(s) = &sel
+                    {
+                        match delete_header_preset(app, s) {
+                            Ok(()) => {
+                                *selected = None;
+                                name.clear();
+                            }
+                            Err(e) => app.ui.status = e,
+                        }
+                    }
+                    let r = ui.button(tl!("Close"));
+                    push("presets.edit.close", &r, "Close");
+                    close |= r.clicked();
+                });
+            }
+        });
+    for (id, r, l) in elems {
+        app.auto.add(&id, r, &l);
+    }
+    let keep_open = matches!(d, WorkspaceDialog::Edit { .. });
+    app.ui.preset_dialog = Some(d);
+    if submitted && !keep_open {
+        close = true;
+    }
+    if close {
+        app.ui.preset_dialog = None;
     }
 }

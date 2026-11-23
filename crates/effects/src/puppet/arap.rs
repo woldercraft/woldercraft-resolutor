@@ -148,6 +148,39 @@ const REG: f64 = 1e-9;
 /// Deform a mesh: `rest` vertices, CCW `tris` with per-triangle `weights` (1 = normal,
 /// larger = stiffer), constraints, and `refine` extra rigid-fit iterations. Returns the
 /// deformed vertex positions.
+fn add_tri_similarity_blocks(a: &mut Sparse, rest: &[[f64; 2]], t: [usize; 3], wk: f64) {
+    for (i, j, l) in [(t[0], t[1], t[2]), (t[1], t[2], t[0]), (t[2], t[0], t[1])] {
+        let e = [rest[j][0] - rest[i][0], rest[j][1] - rest[i][1]];
+        let d = [rest[l][0] - rest[i][0], rest[l][1] - rest[i][1]];
+        let ee = e[0] * e[0] + e[1] * e[1];
+        if ee <= 1e-18 {
+            continue;
+        }
+        // R90(u) = (-u.y, u.x).
+        let r90 = [-e[1], e[0]];
+        let x = (d[0] * e[0] + d[1] * e[1]) / ee;
+        let y = (d[0] * r90[0] + d[1] * r90[1]) / ee;
+        // residual = B_l v_l + B_i v_i + B_j v_j with 2x2 blocks; R = [[0,-1],[1,0]].
+        let bl = [[1.0, 0.0], [0.0, 1.0]];
+        let bi = [[x - 1.0, -y], [y, x - 1.0]];
+        let bj = [[-x, y], [-y, -x]];
+        let blocks = [(l, bl), (i, bi), (j, bj)];
+        for (va, ba) in &blocks {
+            for (vb, bb) in &blocks {
+                for r in 0..2 {
+                    for c in 0..2 {
+                        let v = ba[0][r] * bb[0][c] + ba[1][r] * bb[1][c];
+                        if v != 0.0 {
+                            a.add(2 * va + r, 2 * vb + c, wk * v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Deform the rest mesh (`rest` vertices, `tris` triangles) to satisfy `h` using ARAP.
 pub fn deform(rest: &[[f64; 2]], tris: &[[usize; 3]], weights: &[f64], h: &Handles, refine: usize) -> Vec<[f64; 2]> {
     let n = rest.len();
     if n == 0 {
@@ -180,38 +213,8 @@ pub fn deform(rest: &[[f64; 2]], tris: &[[usize; 3]], weights: &[f64], h: &Handl
     // ---- Step 1: similarity-invariant energy over 2n unknowns (x0, y0, x1, y1, …).
     let mut a = Sparse::new(2 * n);
     let mut b = vec![0.0; 2 * n];
-    for (k, t) in tris.iter().enumerate() {
-        let wk = w(k);
-        for (i, j, l) in [(t[0], t[1], t[2]), (t[1], t[2], t[0]), (t[2], t[0], t[1])] {
-            let e = [rest[j][0] - rest[i][0], rest[j][1] - rest[i][1]];
-            let d = [rest[l][0] - rest[i][0], rest[l][1] - rest[i][1]];
-            let ee = e[0] * e[0] + e[1] * e[1];
-            if ee <= 1e-18 {
-                continue;
-            }
-            // R90(u) = (-u.y, u.x).
-            let r90 = [-e[1], e[0]];
-            let x = (d[0] * e[0] + d[1] * e[1]) / ee;
-            let y = (d[0] * r90[0] + d[1] * r90[1]) / ee;
-            // residual = B_l v_l + B_i v_i + B_j v_j with 2x2 blocks; R = [[0,-1],[1,0]].
-            let bl = [[1.0, 0.0], [0.0, 1.0]];
-            let bi = [[x - 1.0, -y], [y, x - 1.0]];
-            let bj = [[-x, y], [-y, -x]];
-            let blocks = [(l, bl), (i, bi), (j, bj)];
-            for (va, ba) in &blocks {
-                for (vb, bb) in &blocks {
-                    // ba^T bb
-                    for r in 0..2 {
-                        for c in 0..2 {
-                            let v = ba[0][r] * bb[0][c] + ba[1][r] * bb[1][c];
-                            if v != 0.0 {
-                                a.add(2 * va + r, 2 * vb + c, wk * v);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    for (k, &tri) in tris.iter().enumerate() {
+        add_tri_similarity_blocks(&mut a, rest, tri, w(k));
     }
     for e in &h.edges {
         let ww = e.weight;

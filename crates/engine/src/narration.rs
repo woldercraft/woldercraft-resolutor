@@ -55,12 +55,8 @@ pub fn target_clip(s: &Session, p: &Value) -> Option<ClipId> {
     match u64_p(p, "clip") {
         Some(c) => Some(ClipId(c)).filter(|c| is_narration(*c)),
         None if s.state.selection.len() > 16 => {
-            let narration_clips: std::collections::HashSet<ClipId> = seq
-                .all_tracks()
-                .flat_map(|t| t.items.iter())
-                .filter(|it| s.project.narrations.contains_key(&it.item))
-                .map(|it| it.id)
-                .collect();
+            let narration_clips: std::collections::HashSet<ClipId> =
+                seq.all_tracks().flat_map(|t| t.items.iter()).filter(|it| s.project.narrations.contains_key(&it.item)).map(|it| it.id).collect();
             s.state.selection.iter().copied().find(|c| narration_clips.contains(c))
         }
         None => s.state.selection.iter().copied().find(|c| is_narration(*c)),

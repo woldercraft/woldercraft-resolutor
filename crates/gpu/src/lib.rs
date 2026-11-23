@@ -79,25 +79,9 @@ pub struct InFlightExport {
 }
 
 enum InFlightKind {
-    AccumF16 {
-        slot: usize,
-        w: u32,
-        h: u32,
-        row: u32,
-        rx: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
-    },
-    Rgba8 {
-        slot: usize,
-        w: u32,
-        h: u32,
-        row: u32,
-        rx: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
-    },
-    Nv12 {
-        w: u32,
-        h: u32,
-        ticket: nv12::Nv12InFlight,
-    },
+    AccumF16 { slot: usize, w: u32, h: u32, row: u32, rx: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>> },
+    Rgba8 { slot: usize, w: u32, h: u32, row: u32, rx: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>> },
+    Nv12 { w: u32, h: u32, ticket: nv12::Nv12InFlight },
 }
 
 /// Completed export frame read back from the GPU.
@@ -774,11 +758,8 @@ impl GpuCompositor {
                 let (cw, ch) = (w.div_ceil(1 << sx), h.div_ceil(1 << sy));
                 let scale = (1u32 << bits) as f32;
                 let use_unorm16 = prep.is_none() && self.device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM);
-                let (fmt, code_scale, alpha_num) = if use_unorm16 {
-                    (wgpu::TextureFormat::R16Unorm, 65535.0, 65535.0)
-                } else {
-                    (wgpu::TextureFormat::R16Float, scale, scale)
-                };
+                let (fmt, code_scale, alpha_num) =
+                    if use_unorm16 { (wgpu::TextureFormat::R16Unorm, 65535.0, 65535.0) } else { (wgpu::TextureFormat::R16Float, scale, scale) };
                 let owned;
                 let p = match prep {
                     Some(p) => p,
@@ -794,11 +775,7 @@ impl GpuCompositor {
                 let (ty, vy) = self.plane_texture(w, h, fmt, &p.planes[0], 2);
                 let (tu, vu) = self.plane_texture(cw, ch, fmt, &p.planes[1], 2);
                 let (tv, vv) = self.plane_texture(cw, ch, fmt, &p.planes[2], 2);
-                let mut texs = vec![
-                    (ty, vy.clone(), w, h, fmt),
-                    (tu, vu.clone(), cw, ch, fmt),
-                    (tv, vv.clone(), cw, ch, fmt),
-                ];
+                let mut texs = vec![(ty, vy.clone(), w, h, fmt), (tu, vu.clone(), cw, ch, fmt), (tv, vv.clone(), cw, ch, fmt)];
                 // (full-resolution alpha plane: its codes span 0..2^bits - 1, hence the scale)
                 let a = alpha.as_ref().and_then(|_| p.planes.get(3)).map(|b| {
                     let (ta, va) = self.plane_texture(w, h, fmt, b, 2);
@@ -1171,15 +1148,7 @@ impl GpuCompositor {
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             });
-            self.scope_slots[idx] = Some(ScopeReadbackSlot {
-                buf,
-                row,
-                w: sw,
-                h: sh,
-                mapped_bytes: needed,
-                tag,
-                ready: Arc::new(AtomicU8::new(SCOPE_IDLE)),
-            });
+            self.scope_slots[idx] = Some(ScopeReadbackSlot { buf, row, w: sw, h: sh, mapped_bytes: needed, tag, ready: Arc::new(AtomicU8::new(SCOPE_IDLE)) });
         } else if let Some(s) = self.scope_slots[idx].as_mut() {
             s.row = row;
             s.w = sw;
@@ -1442,9 +1411,7 @@ impl GpuCompositor {
             }
             i = end;
         }
-        if resolve
-            && let Some(final_bg) = final_bg.as_ref()
-        {
+        if resolve && let Some(final_bg) = final_bg.as_ref() {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("resolve"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {

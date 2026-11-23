@@ -675,8 +675,7 @@ mod tests {
         // Identical hardware prefs preserve safe_buffer; changing buffer size resets it.
         out.reset_safe_buffer_if_changed(&AudioHardwarePrefs::default());
         assert!(out.safe_buffer);
-        let mut hw = AudioHardwarePrefs::default();
-        hw.buffer_size = 4096;
+        let hw = AudioHardwarePrefs { buffer_size: 4096, ..Default::default() };
         out.reset_safe_buffer_if_changed(&hw);
         assert!(!out.safe_buffer);
     }

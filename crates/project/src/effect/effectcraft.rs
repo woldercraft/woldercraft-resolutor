@@ -13,6 +13,22 @@ pub const EFFECTCRAFT_TOP_FOLDER: &str = "EffectCraft VFX";
 
 const MASK_CHOICES: &[&str] = &["None", "Mask 1", "Mask 2", "Mask 3", "Mask 4"];
 
+/// EffectCraft effect IDs that have a matching `FxOp` implementation in FilmCraft's GPU pipeline.
+pub fn is_gpu_accelerated(id: &str) -> bool {
+    matches!(
+        id,
+        "ec.blur.gaussian"
+            | "ec.blur.directional"
+            | "ec.blur.sharpen"
+            | "ec.blur.unsharp"
+            | "ec.color.tint"
+            | "ec.color.levels"
+            | "ec.stylize.posterize"
+            | "ec.distort.mirror"
+            | "ec.distort.offset"
+    )
+}
+
 fn category_slice(cat: &'static str) -> &'static [&'static str] {
     match cat {
         "3D Channel" => &[EFFECTCRAFT_TOP_FOLDER, "3D Channel"],
@@ -38,11 +54,12 @@ fn category_slice(cat: &'static str) -> &'static [&'static str] {
     }
 }
 
-/// Convert `filmcraft_effects::registry()` into `filmcraft_project::EffectDef` definitions.
+/// Convert `filmcraft_effects::all()` (built-ins + registered plug-ins) into
+/// `filmcraft_project::EffectDef` definitions.
 /// Called once inside the `OnceLock` initialization of [`super::effect_defs`].
 pub fn defs() -> Vec<EffectDef> {
     let mut out = Vec::new();
-    for spec in filmcraft_effects::registry() {
+    for spec in filmcraft_effects::all() {
         // Audio and Expression Controls are non-visual; Lumetri is already provided natively.
         if matches!(spec.category, "Audio" | "Expression Controls") || spec.id == "ec.color.lumetri" {
             continue;
@@ -50,16 +67,10 @@ pub fn defs() -> Vec<EffectDef> {
         let mut params = Vec::new();
         for ps in &spec.params {
             let group = ps.id.split_once('/').map(|(g, _)| g);
+            let mut extra_z: Option<ParamDef> = None;
             let (kind, default, animatable) = match &ps.ui {
                 ParamUi::Slider { min, max, slider_min, slider_max, decimals } => (
-                    ParamKind::Float {
-                        min: *min,
-                        max: *max,
-                        soft_min: *slider_min,
-                        soft_max: *slider_max,
-                        unit: "",
-                        decimals: *decimals,
-                    },
+                    ParamKind::Float { min: *min, max: *max, soft_min: *slider_min, soft_max: *slider_max, unit: "", decimals: *decimals },
                     ParamValue::Float(ps.default.as_f64()),
                     true,
                 ),
@@ -79,20 +90,27 @@ pub fn defs() -> Vec<EffectDef> {
                     true,
                 ),
                 ParamUi::Angle => (ParamKind::Angle, ParamValue::Float(ps.default.as_f64()), true),
-                ParamUi::Point | ParamUi::Point3 => (
-                    ParamKind::Point,
-                    ParamValue::Vec2(Vec2::new(f64::NAN, f64::NAN)),
-                    true,
-                ),
+                ParamUi::Point => (ParamKind::Point, ParamValue::Vec2(Vec2::new(f64::NAN, f64::NAN)), true),
+                ParamUi::Point3 => {
+                    let [_, _, dfz] = ps.default.as_vec3();
+                    let z_id: &'static str = Box::leak(format!("{}.z", ps.id).into_boxed_str());
+                    let z_label: &'static str = Box::leak(format!("{} Z", ps.name).into_boxed_str());
+                    extra_z = Some(ParamDef {
+                        id: z_id,
+                        label: z_label,
+                        kind: ParamKind::Float { min: -100000.0, max: 100000.0, soft_min: -2000.0, soft_max: 2000.0, unit: "", decimals: 1 },
+                        default: ParamValue::Float(dfz),
+                        animatable: true,
+                        group,
+                    });
+                    (ParamKind::Point, ParamValue::Vec2(Vec2::new(f64::NAN, f64::NAN)), true)
+                }
                 ParamUi::Color => (ParamKind::Color, ParamValue::Color(ps.default.as_color()), true),
-                ParamUi::Checkbox => (ParamKind::Bool, ParamValue::Bool(ps.default.as_bool()), false),
+                ParamUi::Checkbox => (ParamKind::Bool, ParamValue::Bool(ps.default.as_bool()), true),
                 ParamUi::Popup { options } => {
-                    let leaked: Vec<&'static str> = options
-                        .iter()
-                        .map(|s| -> &'static str { Box::leak(s.clone().into_boxed_str()) })
-                        .collect();
+                    let leaked: Vec<&'static str> = options.iter().map(|s| -> &'static str { Box::leak(s.clone().into_boxed_str()) }).collect();
                     let slice: &'static [&'static str] = Box::leak(leaked.into_boxed_slice());
-                    (ParamKind::Choice(slice), ParamValue::Choice(ps.default.as_enum()), false)
+                    (ParamKind::Choice(slice), ParamValue::Choice(ps.default.as_enum()), true)
                 }
                 ParamUi::Layer => (ParamKind::Choice(TRACK_CHOICES), ParamValue::Choice(0), false),
                 ParamUi::Mask => (ParamKind::Choice(MASK_CHOICES), ParamValue::Choice(0), false),
@@ -103,9 +121,13 @@ pub fn defs() -> Vec<EffectDef> {
                     };
                     (ParamKind::Text, ParamValue::Text(s), false)
                 }
-                ParamUi::Path | ParamUi::Gradient | ParamUi::Hidden => continue,
+                ParamUi::Path => (ParamKind::Path, ParamValue::Path(Default::default()), true),
+                ParamUi::Gradient | ParamUi::Hidden => continue,
             };
             params.push(ParamDef { id: ps.id, label: ps.name, kind, default, animatable, group });
+            if let Some(z_param) = extra_z {
+                params.push(z_param);
+            }
         }
         out.push(EffectDef {
             id: spec.id,
@@ -114,7 +136,7 @@ pub fn defs() -> Vec<EffectDef> {
             category: category_slice(spec.category),
             params,
             intrinsic: false,
-            accelerated: spec.gpu,
+            accelerated: is_gpu_accelerated(spec.id),
             float32: spec.float,
             yuv: false,
         });

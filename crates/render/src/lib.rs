@@ -12,6 +12,7 @@
 pub mod audio;
 pub mod audio_fx;
 pub mod blend;
+pub mod color_graph;
 pub mod color_match;
 pub mod colorman;
 pub mod effectcraft_bridge;
@@ -36,6 +37,7 @@ mod stretch;
 pub mod track;
 pub mod transitions;
 pub mod vfx;
+pub mod vfx_graph;
 
 use std::sync::Arc;
 
@@ -328,6 +330,20 @@ fn seq_canvas(project: &Project, seq: &Sequence, t: Tick, opts: RenderOptions, s
             None => {}
         }
     }
+    if opts.effects && seq.timeline_color.has_enabled_nodes() && !canvas.is_empty() {
+        let cx = effects::FxCtx {
+            t,
+            px_scale: opts.scale,
+            seconds: t.seconds(),
+            timecode: &tc,
+            clip_name: "Timeline",
+            project: Some(project),
+            env: None,
+            frame_rate: seq.settings.frame_rate.as_f64(),
+            working: seq.settings.color.working,
+        };
+        color_graph::apply_color_graph_cpu(&seq.timeline_color, &project.shared_color_nodes, canvas.get(), &cx);
+    }
     if opts.depth == 0 && !opts.working_output && !colorman::display_is_identity(&seq.settings.color) {
         colorman::to_display(canvas.get(), &seq.settings.color);
     }
@@ -617,17 +633,78 @@ pub(crate) fn item_layer_ex(
             frame_rate: seq.settings.frame_rate.as_f64(),
             working: seq.settings.color.working,
         };
-        let group_effects = seq.color_group_of(item.id).into_iter().flat_map(|g| g.effects.iter());
-        for e in item
-            .effects
-            .iter()
-            .chain(group_effects)
-            .filter(|e| e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e))
+        let grp = seq.color_group_of(item.id);
+        if let Some(g) = grp
+            && g.pre_clip.has_enabled_nodes()
         {
             if filmcraft_media::cancel::cancelled() {
                 return None;
             }
-            mask::apply_effect(&mut layer, e, &cx);
+            color_graph::apply_color_graph_cpu(&g.pre_clip, &project.shared_color_nodes, &mut layer, &cx);
+        }
+        let mut applied_cg = false;
+        if let Some(vg) = item.vfx_graph.as_ref().filter(|g| !g.is_empty()) {
+            vfx_graph::apply_vfx_graph_cpu(vg, &mut layer, &cx, filmcraft_project::VfxEndpoint::MediaOut);
+            for e in item.effects.iter().filter(|e| e.effect == "lumetri" && e.enabled && !filmcraft_project::graphic::is_layer(e)) {
+                if filmcraft_media::cancel::cancelled() {
+                    return None;
+                }
+                if let Some(cg) = &item.color_graph {
+                    if !applied_cg {
+                        color_graph::apply_color_graph_cpu(cg, &project.shared_color_nodes, &mut layer, &cx);
+                        applied_cg = true;
+                    }
+                } else {
+                    mask::apply_effect(&mut layer, e, &cx);
+                }
+            }
+        } else {
+            let mut ec_chain: Vec<(usize, &filmcraft_project::EffectInstance)> = Vec::new();
+            let flush_ec = |layer: &mut Image, chain: &mut Vec<(usize, &filmcraft_project::EffectInstance)>| {
+                if !chain.is_empty() {
+                    effectcraft_bridge::apply_chain(layer, chain, &cx);
+                    chain.clear();
+                }
+            };
+            for (idx, e) in item.effects.iter().enumerate().filter(|(_, e)| e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e)) {
+                if filmcraft_media::cancel::cancelled() {
+                    return None;
+                }
+                if item.color_graph.is_some() && e.effect == "lumetri" {
+                    flush_ec(&mut layer, &mut ec_chain);
+                    if let Some(cg) = &item.color_graph
+                        && !applied_cg
+                    {
+                        color_graph::apply_color_graph_cpu(cg, &project.shared_color_nodes, &mut layer, &cx);
+                        applied_cg = true;
+                    }
+                    continue;
+                }
+                if !e.enabled {
+                    continue;
+                }
+                if e.effect.starts_with("ec.") && filmcraft_effects::find(&e.effect).is_some() {
+                    ec_chain.push((idx, e));
+                } else {
+                    flush_ec(&mut layer, &mut ec_chain);
+                    mask::apply_effect(&mut layer, e, &cx);
+                }
+            }
+            flush_ec(&mut layer, &mut ec_chain);
+        }
+        if let Some(cg) = &item.color_graph
+            && !applied_cg
+        {
+            color_graph::apply_color_graph_cpu(cg, &project.shared_color_nodes, &mut layer, &cx);
+        }
+        if let Some(g) = grp {
+            let post = g.effective_post_clip();
+            if post.has_enabled_nodes() {
+                if filmcraft_media::cancel::cancelled() {
+                    return None;
+                }
+                color_graph::apply_color_graph_cpu(&post, &project.shared_color_nodes, &mut layer, &cx);
+            }
         }
     }
     mask::apply_opacity_masks(&mut layer, item, mt, px_scale);
@@ -638,7 +715,7 @@ pub(crate) fn item_layer_ex(
 
 pub(crate) fn has_standard_or_group_effects(seq: &Sequence, item: &TrackItem) -> bool {
     item.has_standard_effects()
-        || seq.color_group_of(item.id).is_some_and(|g| g.effects.iter().any(|e| e.enabled))
+        || seq.color_group_of(item.id).is_some_and(|g| g.pre_clip.has_enabled_nodes() || g.post_clip.has_enabled_nodes() || g.effects.iter().any(|e| e.enabled))
 }
 
 /// The layer of a plain media frame (see [`item_layer_ex`]): only the part with alpha when the frame

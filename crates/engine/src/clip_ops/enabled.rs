@@ -64,8 +64,7 @@ pub(super) fn has_audio_items(s: &Session) -> std::result::Result<(), String> {
 pub(super) fn selected_audio_clips(s: &Session) -> Vec<ClipId> {
     let Some(q) = s.active_sequence() else { return Vec::new() };
     if s.state.selection.len() > 16 {
-        let audio_ids: std::collections::HashSet<ClipId> =
-            q.audio_tracks.iter().flat_map(|t| t.items.iter().map(|i| i.id)).collect();
+        let audio_ids: std::collections::HashSet<ClipId> = q.audio_tracks.iter().flat_map(|t| t.items.iter().map(|i| i.id)).collect();
         return s.state.selection.iter().copied().filter(|c| audio_ids.contains(c)).collect();
     }
     s.state.selection.iter().copied().filter(|c| q.audio_tracks.iter().any(|t| t.item(*c).is_some())).collect()
@@ -98,8 +97,7 @@ pub(super) fn extract_items(s: &Session) -> Vec<ItemId> {
         && !s.state.selection.is_empty()
     {
         if s.state.selection.len() > 16 {
-            let item_by_clip: std::collections::HashMap<ClipId, ItemId> =
-                q.all_tracks().flat_map(|t| t.items.iter().map(|i| (i.id, i.item))).collect();
+            let item_by_clip: std::collections::HashMap<ClipId, ItemId> = q.all_tracks().flat_map(|t| t.items.iter().map(|i| (i.id, i.item))).collect();
             let mut seen = std::collections::HashSet::new();
             for c in &s.state.selection {
                 if let Some(&item) = item_by_clip.get(c)
@@ -132,7 +130,9 @@ pub(super) fn has_extractable(s: &Session) -> std::result::Result<(), String> {
     {
         let has_any = if s.state.selection.len() > 16 {
             let sel: std::collections::HashSet<ClipId> = s.state.selection.iter().copied().collect();
-            q.all_tracks().flat_map(|t| t.items.iter()).any(|i| sel.contains(&i.id) && media_root(&s.project, i.item).is_some_and(|(_, m, _)| m.info.has_audio()))
+            q.all_tracks()
+                .flat_map(|t| t.items.iter())
+                .any(|i| sel.contains(&i.id) && media_root(&s.project, i.item).is_some_and(|(_, m, _)| m.info.has_audio()))
         } else {
             s.state.selection.iter().any(|c| q.find_item(*c).is_some_and(|(_, i)| media_root(&s.project, i.item).is_some_and(|(_, m, _)| m.info.has_audio())))
         };

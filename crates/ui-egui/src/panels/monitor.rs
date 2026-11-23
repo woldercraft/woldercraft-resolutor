@@ -82,8 +82,8 @@ fn draw_picture(app: &mut FilmcraftApp, ui: &mut egui::Ui, which: Which, mv: &cr
     // Draft decoding (opt-in): only while playing at 1/2 resolution or lower.
     let draft = crate::frames::draft_playback(playing, scale, app.session.prefs.playback.draft_decode);
     let bypass = which == Which::Program && app.ui.global_bypass;
+    let (rev, project) = highlight_project_override(app, which, rev);
     let key = FrameKey { target, frame, size: size_key, revision: rev, draft, bypass };
-    let project = app.session.project.clone();
     let speed = if which == Which::Program { app.playback.speed } else { app.source_playback.clock.speed };
     // while playing, which way: frames on the other side of the playhead are not due yet
     let dir = playing.then(|| play_direction(speed));
@@ -192,6 +192,14 @@ fn draw_picture(app: &mut FilmcraftApp, ui: &mut egui::Ui, which: Which, mv: &cr
     }
 }
 
+fn format_fps_number(fps: f32) -> String {
+    if !fps.is_finite() {
+        return String::from("0");
+    }
+    let rounded = fps.round();
+    if (fps - rounded).abs() < 0.05 { format!("{rounded:.0}") } else { format!("{fps:.2}").trim_end_matches('0').trim_end_matches('.').to_string() }
+}
+
 fn fps_indicator(app: &FilmcraftApp, ui: &mut egui::Ui, video_area: Rect, which: Which, rate: filmcraft_time::FrameRate, t: &Tokens) {
     if which != Which::Program || app.ui.fullscreen_program {
         return;
@@ -203,27 +211,69 @@ fn fps_indicator(app: &FilmcraftApp, ui: &mut egui::Ui, video_area: Rect, which:
         let dropped = app.playback.meter.counts().1;
         let lagging = dropped > 0 || actual_fps.is_some_and(|f| f < target_fps * 0.90);
         let dot = if lagging { t.render_yellow } else { t.render_green };
-        let text = match (actual_fps, dropped > 0) {
-            (Some(f), true) => format!("{f:.1} / {} fps · {dropped} drop", rate.label()),
-            (Some(f), false) => format!("{f:.1} / {} fps", rate.label()),
-            (None, _) => format!("… / {} fps", rate.label()),
-        };
+        let text = actual_fps.map(format_fps_number).unwrap_or_else(|| rate.label());
         (Some(dot), text, Color32::from_gray(235))
     } else {
-        (None, format!("{} fps", rate.label()), t.text_dim)
+        (None, rate.label(), t.text_dim)
     };
-    let font = Tokens::ui(10.5);
+    let font = Tokens::ui(10.0);
     let galley = ui.painter().layout_no_wrap(label, font, text_col);
-    let dot_w = if dot_col.is_some() { 11.0 } else { 0.0 };
-    let pad = vec2(7.0, 3.0);
+    let dot_w = if dot_col.is_some() { 10.0 } else { 0.0 };
+    let pad = vec2(5.0, 2.0);
     let pill = Rect::from_min_size(video_area.min + vec2(8.0, 8.0), vec2(galley.size().x + dot_w + pad.x * 2.0, galley.size().y + pad.y * 2.0));
     let bg = if playing { Color32::from_black_alpha(175) } else { Color32::from_black_alpha(120) };
     ui.painter().rect_filled(pill, 4.0, bg);
     ui.painter().rect_stroke(pill, 4.0, Stroke::new(1.0, Color32::from_white_alpha(24)), StrokeKind::Inside);
     if let Some(dot) = dot_col {
-        ui.painter().circle_filled(pos2(pill.min.x + pad.x + 3.5, pill.center().y), 3.5, dot);
+        ui.painter().circle_filled(pos2(pill.min.x + pad.x + 3.0, pill.center().y), 3.0, dot);
     }
     ui.painter().galley(pos2(pill.min.x + pad.x + dot_w, pill.center().y - galley.size().y * 0.5), galley, text_col);
+}
+
+fn highlight_project_override(app: &FilmcraftApp, which: Which, base_rev: u64) -> (u64, std::sync::Arc<filmcraft_project::Project>) {
+    if which != Which::Program || app.ui.color_highlight == 0 || app.ui.global_bypass {
+        return (base_rev, app.session.project.clone());
+    }
+    let Some(seq_id) = app.session.state.active_sequence else {
+        return (base_rev, app.session.project.clone());
+    };
+    let hl = app.ui.color_highlight.clamp(1, 3);
+    let rev = base_rev.wrapping_add(u64::from(hl).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    let mut p = (*app.session.project).clone();
+    let show_param = filmcraft_project::Param::new(filmcraft_project::ParamValue::Choice(u32::from(hl)));
+    if let Some(gid) = app.ui.active_color_group {
+        if let Some(grp) = p.sequence_mut(seq_id).and_then(|s| s.color_group_mut(gid))
+            && let Some(fx) = grp.effects.iter_mut().find(|e| e.effect == "lumetri" && e.enabled)
+        {
+            fx.params.insert("hsl_show_mask".into(), show_param);
+        }
+    } else if let Some((cid, _)) = crate::panels::lumetri::active_color_clip(app)
+        && let Some((_, it)) = p.sequence_mut(seq_id).and_then(|s| s.find_item_mut(cid))
+        && let Some(fx) = it.effects.iter_mut().filter(|e| e.effect == "lumetri" && e.enabled).nth(app.ui.active_color_node)
+    {
+        fx.params.insert("hsl_show_mask".into(), show_param);
+    }
+    (rev, std::sync::Arc::new(p))
+}
+
+fn highlight_indicator(app: &FilmcraftApp, ui: &mut egui::Ui, video_area: Rect, which: Which) {
+    if which != Which::Program || app.ui.color_highlight == 0 || app.ui.fullscreen_program {
+        return;
+    }
+    let label = match app.ui.color_highlight {
+        2 => tl!("HIGHLIGHT: Gray (Shift+H)"),
+        3 => tl!("HIGHLIGHT: Black (Shift+H)"),
+        _ => tl!("HIGHLIGHT: Matte (Shift+H)"),
+    };
+    let font = Tokens::ui(10.0);
+    let accent = Color32::from_rgb(240, 185, 65);
+    let galley = ui.painter().layout_no_wrap(label.to_string(), font, accent);
+    let pad = vec2(6.0, 2.0);
+    let size = vec2(galley.size().x + pad.x * 2.0, galley.size().y + pad.y * 2.0);
+    let pill = Rect::from_min_size(pos2(video_area.max.x - size.x - 8.0, video_area.min.y + 8.0), size);
+    ui.painter().rect_filled(pill, 4.0, Color32::from_black_alpha(190));
+    ui.painter().rect_stroke(pill, 4.0, Stroke::new(1.0, accent.gamma_multiply(0.75)), StrokeKind::Inside);
+    ui.painter().galley(pos2(pill.min.x + pad.x, pill.center().y - galley.size().y * 0.5), galley, accent);
 }
 
 /// DaVinci Resolve-style global "Bypass Color Grades & Effects" icon:
@@ -427,6 +477,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
         );
     }
     fps_indicator(app, ui, video_area, which, rate, &t);
+    highlight_indicator(app, ui, video_area, which);
     if cinema {
         ui.set_clip_rect(saved_clip);
         return;
@@ -454,9 +505,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
             crate::panels::motion_path::monitor_overlay(app, ui, pic, frame_size);
             crate::panels::transform_handles::monitor_overlay(app, ui, pic, frame_size);
         }
+        program_wipe_overlay(app, ui, video_area, pic, compare);
     }
     if show_picture {
         monitor_view::guides(app, ui, which, video_area, pic, frame_size);
+        program_pixel_readout(app, ui, which, compare, video_area, pic, rate, time);
     }
     ui.set_clip_rect(saved_clip);
     if let Some((top, left)) = ruler_rects {
@@ -573,15 +626,9 @@ fn controls_row(
     app.auto.add(&format!("{prefix}.settings"), wr, "Settings");
     if which == Which::Program {
         let br = Rect::from_min_size(pos2(wr.max.x + 6.0, settings_y + 1.0), vec2(22.0, 22.0));
-        let tip = if app.ui.global_bypass {
-            tl!("Enable Color Grades & Effects (Bypassed)")
-        } else {
-            tl!("Bypass Color Grades & Effects")
-        };
-        let bresp = ui
-            .interact(br, egui::Id::unique((prefix, "global-bypass")), Sense::click())
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(tip);
+        let tip = if app.ui.global_bypass { tl!("Enable Color Grades & Effects (Bypassed)") } else { tl!("Bypass Color Grades & Effects") };
+        let bresp =
+            ui.interact(br, egui::Id::unique((prefix, "global-bypass")), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip);
         bresp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tip));
         if app.ui.global_bypass {
             ui.painter().rect_filled(br, 4.0, Color32::from_rgb(232, 106, 56).gamma_multiply(0.18));
@@ -803,13 +850,195 @@ fn eyedropper(app: &mut FilmcraftApp, ui: &mut egui::Ui, resp: &egui::Response, 
         return;
     };
     // the parameter stores linear values, like the colour picker beside it
-    let lin = egui::Rgba::from(Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
-    let mut params = json!({"clip": armed.clip, "effect": armed.effect, "param": armed.param, "value": [lin.r(), lin.g(), lin.b(), 1.0]});
-    if let Some(k) = armed.mask {
-        params["mask"] = json!(k);
+    match &armed.kind {
+        crate::state::EyedropperKind::ColorParam => {
+            let lin = egui::Rgba::from(Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+            let mut params = json!({"clip": armed.clip, "effect": armed.effect, "param": armed.param, "value": [lin.r(), lin.g(), lin.b(), 1.0]});
+            if let Some(k) = armed.mask {
+                params["mask"] = json!(k);
+            }
+            if let Err(e) = app.session.execute("effects.setParam", params) {
+                app.ui.status = e.to_string();
+            }
+        }
+        crate::state::EyedropperKind::LumetriWb => {
+            let (r, g, b) = (rgb[0] as f64 / 255.0, rgb[1] as f64 / 255.0, rgb[2] as f64 / 255.0);
+            let avg = ((r + g + b) / 3.0).max(0.05);
+            let temp = ((b - r) / avg * 100.0).clamp(-100.0, 100.0).round();
+            let tint = ((g - (r + b) * 0.5) / avg * 100.0).clamp(-100.0, 100.0).round();
+            if let Err(e) = app.session.edit_group("White Balance Eyedropper", |s| {
+                s.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "temperature", "value": temp}))?;
+                s.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "tint", "value": tint}))
+            }) {
+                app.ui.status = e.to_string();
+            }
+        }
+        crate::state::EyedropperKind::LumetriHsl => {
+            let (r, g, b) = (rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0);
+            let (h, s, l) = rgb_to_hsl_deg(r, g, b);
+            let hsl_mode = app
+                .session
+                .active_sequence()
+                .and_then(|q| q.find_item(filmcraft_project::ClipId(armed.clip)))
+                .and_then(|(_, it)| it.effects.get(armed.effect))
+                .and_then(|e| e.param("hsl_mode"))
+                .and_then(|p| match p.value {
+                    filmcraft_project::ParamValue::Choice(c) => Some(c),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            if hsl_mode == 3 {
+                apply_3d_eyedropper(app, armed.clip, armed.effect, r, g, b, false);
+            } else if hsl_mode == 1 {
+                let (rp, gp, bp) = (r * 100.0, g * 100.0, b * 100.0);
+                let tol = 15.0;
+                if let Err(err) = app.session.edit_group("RGB Qualifier Eyedropper", |sess| {
+                    sess.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_on", "value": true}))?;
+                    sess.execute(
+                        "effects.setParam",
+                        json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_r_min", "value": (rp - tol).clamp(0.0, 100.0).round()}),
+                    )?;
+                    sess.execute(
+                        "effects.setParam",
+                        json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_r_max", "value": (rp + tol).clamp(0.0, 100.0).round()}),
+                    )?;
+                    sess.execute(
+                        "effects.setParam",
+                        json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_g_min", "value": (gp - tol).clamp(0.0, 100.0).round()}),
+                    )?;
+                    sess.execute(
+                        "effects.setParam",
+                        json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_g_max", "value": (gp + tol).clamp(0.0, 100.0).round()}),
+                    )?;
+                    sess.execute(
+                        "effects.setParam",
+                        json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_b_min", "value": (bp - tol).clamp(0.0, 100.0).round()}),
+                    )?;
+                    sess.execute(
+                        "effects.setParam",
+                        json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_b_max", "value": (bp + tol).clamp(0.0, 100.0).round()}),
+                    )
+                }) {
+                    app.ui.status = err.to_string();
+                }
+            } else if hsl_mode == 2 {
+                let y = (0.2126 * r + 0.7152 * g + 0.0722 * b) * 100.0;
+                let lmin = (y - 15.0).clamp(0.0, 100.0).round();
+                let lmax = (y + 15.0).clamp(0.0, 100.0).round();
+                if let Err(err) = app.session.edit_group("Luma Qualifier Eyedropper", |sess| {
+                    sess.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_on", "value": true}))?;
+                    sess.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_luma_min", "value": lmin}))?;
+                    sess.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_luma_max", "value": lmax}))
+                }) {
+                    app.ui.status = err.to_string();
+                }
+            } else {
+                let sat_min = (s * 100.0 - 15.0).clamp(0.0, 100.0).round();
+                let sat_max = (s * 100.0 + 25.0).clamp(sat_min, 100.0).round();
+                let luma_min = (l * 100.0 - 20.0).clamp(0.0, 100.0).round();
+                let luma_max = (l * 100.0 + 20.0).clamp(luma_min, 100.0).round();
+                if let Err(err) = app.session.edit_group("HSL Secondary Eyedropper", |sess| {
+                    sess.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_on", "value": true}))?;
+                    sess.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_hue", "value": h.round()}))?;
+                    sess.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_sat_min", "value": sat_min}))?;
+                    sess.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_sat_max", "value": sat_max}))?;
+                    sess.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_luma_min", "value": luma_min}))?;
+                    sess.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": "hsl_luma_max", "value": luma_max}))
+                }) {
+                    app.ui.status = err.to_string();
+                }
+            }
+        }
+        crate::state::EyedropperKind::Lumetri3d(subtract) => {
+            let (r, g, b) = (rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0);
+            apply_3d_eyedropper(app, armed.clip, armed.effect, r, g, b, *subtract);
+        }
+        crate::state::EyedropperKind::LumetriCurve(param) => {
+            let (r, g, b) = (rgb[0] as f32 / 255.0, rgb[1] as f32 / 255.0, rgb[2] as f32 / 255.0);
+            let (h, s, l) = rgb_to_hsl_deg(r, g, b);
+            let is_hue_curve = matches!(param.as_str(), "hue_vs_hue" | "hue_vs_sat" | "hue_vs_luma" | "luma_vs_sat" | "sat_vs_sat" | "sat_vs_luma");
+            let x = match param.as_str() {
+                "curve_red" => r,
+                "curve_green" => g,
+                "curve_blue" => b,
+                "curve_luma" => 0.2126 * r + 0.7152 * g + 0.0722 * b,
+                "hue_vs_hue" | "hue_vs_sat" | "hue_vs_luma" => h / 360.0,
+                "luma_vs_sat" => l,
+                "sat_vs_sat" | "sat_vs_luma" => s,
+                _ => 0.2126 * r + 0.7152 * g + 0.0722 * b,
+            }
+            .clamp(0.0, 1.0);
+            let y = if is_hue_curve { 0.5 } else { x };
+            let mut pts = app
+                .session
+                .active_sequence()
+                .and_then(|q| q.find_item(filmcraft_project::ClipId(armed.clip)))
+                .and_then(|(_, it)| it.effects.get(armed.effect))
+                .and_then(|e| e.param(param))
+                .and_then(|p| p.value.as_curve())
+                .map(|c| c.to_vec())
+                .unwrap_or_else(|| if is_hue_curve { vec![] } else { vec![[0.0, 0.0], [1.0, 1.0]] });
+            if !pts.iter().any(|p| (p[0] - x).abs() < 0.015) {
+                pts.push([x, y]);
+                pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
+                let val: Vec<serde_json::Value> = pts.iter().map(|q| json!([q[0], q[1]])).collect();
+                if let Err(err) = app.session.execute("effects.setParam", json!({"clip": armed.clip, "effect": armed.effect, "param": param, "value": val})) {
+                    app.ui.status = err.to_string();
+                }
+            }
+        }
     }
-    if let Err(e) = app.session.execute("effects.setParam", params) {
-        app.ui.status = e.to_string();
+}
+
+fn rgb_to_hsl_deg(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) * 0.5;
+    let d = max - min;
+    if d <= 1e-5 {
+        return (0.0, 0.0, l);
+    }
+    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let mut h = if (max - r).abs() < 1e-5 {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if (max - g).abs() < 1e-5 {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    h *= 60.0;
+    (h.rem_euclid(360.0), s.clamp(0.0, 1.0), l.clamp(0.0, 1.0))
+}
+
+fn apply_3d_eyedropper(app: &mut FilmcraftApp, clip: u64, effect: usize, r: f32, g: f32, b: f32, subtract: bool) {
+    let raw = app
+        .session
+        .active_sequence()
+        .and_then(|q| q.find_item(filmcraft_project::ClipId(clip)))
+        .and_then(|(_, it)| it.effects.get(effect))
+        .and_then(|e| e.param("hsl_3d_samples"))
+        .and_then(|p| match &p.value {
+            filmcraft_project::ParamValue::Text(s) => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let mut samples: Vec<[f32; 4]> = serde_json::from_str(&raw).unwrap_or_default();
+    if samples.len() >= 64 {
+        app.ui.status = tl!("3D Qualifier: maximum of 64 sample points reached").to_string();
+        return;
+    }
+    let round3 = |v: f32| (v * 1000.0).round() / 1000.0;
+    let tol = if subtract { -0.12 } else { 0.12 };
+    samples.push([round3(r), round3(g), round3(b), tol]);
+    let Ok(serialized) = serde_json::to_string(&samples) else {
+        return;
+    };
+    if let Err(err) = app.session.edit_group("3D Qualifier Eyedropper", |sess| {
+        sess.execute("effects.setParam", json!({"clip": clip, "effect": effect, "param": "hsl_on", "value": true}))?;
+        sess.execute("effects.setParam", json!({"clip": clip, "effect": effect, "param": "hsl_mode", "value": 3}))?;
+        sess.execute("effects.setParam", json!({"clip": clip, "effect": effect, "param": "hsl_3d_samples", "value": serialized}))
+    }) {
+        app.ui.status = err.to_string();
     }
 }
 
@@ -1234,29 +1463,42 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
             monitor_view::view_mut(app, which).transport_hidden = edited_hidden;
         }
     }
-    let available = (row.width() - 46.0).max(0.0);
+    let left_reserve = if !src && row.width() >= 90.0 {
+        overlay_selector(app, ui, Rect::from_min_size(pos2(row.min.x + 6.0, row.min.y + 4.0), vec2(42.0, 24.0)));
+        52.0
+    } else {
+        0.0
+    };
+    let available = (row.width() - 46.0 - left_reserve).max(0.0);
     let widths = vec![TRANSPORT_BUTTON; buttons.len()];
     // roomy spacing when every button fits with it, tight spacing before any goes to the overflow menu
     let count = buttons.len() as f32;
     let gap = if count * TRANSPORT_BUTTON + (count - 1.0).max(0.0) * 6.0 <= available { 6.0 } else { 2.0 };
     let Some(fit) = craft_ui::layout::fit_toolbar(&widths, available, gap, TRANSPORT_BUTTON) else {
-        ui.scope_builder(egui::UiBuilder::new().max_rect(Rect::from_min_max(row.min, pos2((row.right() - 30.0).max(row.left()), row.bottom()))), |ui| {
-            egui::ScrollArea::horizontal().id_salt((prefix, "transport-scroll")).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for (icon, command, label) in &buttons {
-                        let (rect, _) = ui.allocate_exact_size(vec2(TRANSPORT_BUTTON, TRANSPORT_BUTTON), Sense::hover());
-                        if transport_button(app, ui, rect, prefix, *icon, command, label) {
-                            invoke_transport(app, ui.ctx(), which, command);
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(Rect::from_min_max(
+                pos2(row.min.x + left_reserve, row.min.y),
+                pos2((row.right() - 30.0).max(row.left() + left_reserve), row.bottom()),
+            )),
+            |ui| {
+                egui::ScrollArea::horizontal().id_salt((prefix, "transport-scroll")).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (icon, command, label) in &buttons {
+                            let (rect, _) = ui.allocate_exact_size(vec2(TRANSPORT_BUTTON, TRANSPORT_BUTTON), Sense::hover());
+                            if transport_button(app, ui, rect, prefix, *icon, command, label) {
+                                invoke_transport(app, ui.ctx(), which, command);
+                            }
                         }
-                    }
+                    });
                 });
-            });
-        });
+            },
+        );
         return;
     };
     let pitch = TRANSPORT_BUTTON + gap;
     let total = fit.shown.len() as f32 * pitch - gap + if fit.overflow.is_empty() { 0.0 } else { pitch };
-    let mut x = row.center().x - 15.0 - total.max(TRANSPORT_BUTTON) / 2.0;
+    let center_x = (row.min.x + left_reserve + row.max.x - 30.0) * 0.5;
+    let mut x = (center_x - total.max(TRANSPORT_BUTTON) / 2.0).max(row.min.x + left_reserve);
     for (index, _) in &fit.shown {
         let Some((icon, command, label)) = buttons.get(*index) else { continue };
         let rect = Rect::from_min_size(pos2(x, row.min.y + 2.0), vec2(TRANSPORT_BUTTON, TRANSPORT_BUTTON));
@@ -1297,6 +1539,86 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
                 }
             }
         });
+    }
+}
+
+/// DaVinci Resolve-style On-Screen Controls split button (`[box] ⌄`) on the Program monitor.
+fn overlay_selector(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    use crate::state::ViewerOverlayMode;
+    let t = app.tokens;
+    let mv = monitor_view::view(app, Which::Program);
+    let enabled = mv.viewer_overlay_enabled;
+    let mode = mv.viewer_overlay_mode;
+    let toggle_rect = Rect::from_min_size(rect.min, vec2(26.0, rect.height()));
+    let drop_rect = Rect::from_min_max(pos2(toggle_rect.max.x, rect.min.y), rect.max);
+
+    let tip = tlf!("On-Screen Controls ({mode})", mode = crate::i18n::t(mode.label()));
+    let tresp = ui.interact(toggle_rect, egui::Id::unique(("program", "overlay-toggle")), Sense::click()).on_hover_text(tip.clone());
+    app.auto.add_response("program.overlay.toggle", &tresp, &tip);
+    if tresp.hovered() || enabled {
+        let fill = if enabled { Color32::from_rgba_unmultiplied(0xe5, 0x7e, 0x2a, 38) } else { t.hover };
+        ui.painter().rect_filled(toggle_rect, 4.0, fill);
+    }
+    let icon_col = if enabled {
+        Color32::from_rgb(0xe5, 0x7e, 0x2a)
+    } else if tresp.hovered() {
+        t.tab_text_active
+    } else {
+        t.icon
+    };
+    paint_overlay_icon(ui.painter(), toggle_rect.shrink2(vec2(6.0, 5.0)), mode, icon_col);
+    if tresp.clicked() {
+        monitor_view::view_mut(app, Which::Program).viewer_overlay_enabled = !enabled;
+    }
+
+    let dresp = ui.interact(drop_rect, egui::Id::unique(("program", "overlay-mode")), Sense::click()).on_hover_text(tl!("On-Screen Controls Mode"));
+    app.auto.add_response("program.overlay.mode", &dresp, "On-Screen Controls Mode");
+    if dresp.hovered() {
+        ui.painter().rect_filled(drop_rect, 4.0, t.hover);
+    }
+    let c = drop_rect.center();
+    let acol = if dresp.hovered() { t.tab_text_active } else { t.text_dim };
+    ui.painter().line_segment([c + vec2(-3.5, -1.5), c + vec2(0.0, 2.0)], Stroke::new(1.3, acol));
+    ui.painter().line_segment([c + vec2(0.0, 2.0), c + vec2(3.5, -1.5)], Stroke::new(1.3, acol));
+
+    egui::Popup::menu(&dresp).show(|ui| {
+        for m in ViewerOverlayMode::ALL {
+            let selected = enabled && mode == m;
+            let r = ui.selectable_label(selected, crate::i18n::t(m.label()));
+            app.auto.add_response(&format!("program.overlay.mode.{}", m.id()), &r, m.label());
+            if r.clicked() {
+                let v = monitor_view::view_mut(app, Which::Program);
+                v.viewer_overlay_mode = m;
+                v.viewer_overlay_enabled = true;
+                ui.close();
+            }
+        }
+    });
+}
+
+fn paint_overlay_icon(p: &egui::Painter, r: Rect, mode: crate::state::ViewerOverlayMode, col: Color32) {
+    use crate::state::ViewerOverlayMode;
+    let s = Stroke::new(1.2, col);
+    match mode {
+        ViewerOverlayMode::Transform => {
+            p.rect_stroke(r, 0.0, s, StrokeKind::Inside);
+            for pt in [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()] {
+                p.rect_filled(Rect::from_center_size(pt, vec2(3.0, 3.0)), 0.0, col);
+            }
+        }
+        ViewerOverlayMode::Crop => {
+            let arm = (r.width().min(r.height()) * 0.36).max(3.0);
+            for (pt, dx, dy) in [(r.left_top(), arm, arm), (r.right_top(), -arm, arm), (r.right_bottom(), -arm, -arm), (r.left_bottom(), arm, -arm)] {
+                p.line_segment([pt, pt + vec2(dx, 0.0)], s);
+                p.line_segment([pt, pt + vec2(0.0, dy)], s);
+            }
+        }
+        ViewerOverlayMode::EffectOverlay => {
+            let c = r.center();
+            let rad = (r.width().min(r.height()) * 0.34).max(3.0);
+            p.circle_stroke(c, rad, s);
+            p.circle_filled(c, 1.5, col);
+        }
     }
 }
 
@@ -1432,6 +1754,228 @@ fn paint_ruler_markers(
     }
 }
 
+/// Half-plane polygon clip (used for Diagonal Image Wipe UV mesh over `pic`).
+fn clip_diagonal_poly(pic: Rect, split: f32, invert: bool) -> Vec<egui::Pos2> {
+    let w = pic.width().max(1.0);
+    let h = pic.height().max(1.0);
+    let signed = |p: egui::Pos2| -> f32 {
+        let val = (p.x - pic.min.x) / w + (p.y - pic.min.y) / h - 2.0 * split;
+        if invert { val } else { -val }
+    };
+    let poly = [pic.left_top(), pic.right_top(), pic.right_bottom(), pic.left_bottom()];
+    let mut out = Vec::with_capacity(6);
+    for i in 0..poly.len() {
+        let a = poly[i];
+        let b = poly[(i + 1) % poly.len()];
+        let da = signed(a);
+        let db = signed(b);
+        if da >= 0.0 {
+            out.push(a);
+            if db < 0.0 {
+                let denom = (da - db).max(1e-6);
+                out.push(a.lerp(b, (da / denom).clamp(0.0, 1.0)));
+            }
+        } else if db >= 0.0 {
+            let denom = (db - da).max(1e-6);
+            out.push(a.lerp(b, (-da / denom).clamp(0.0, 1.0)));
+        }
+    }
+    out
+}
+
+fn program_wipe_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, video_area: Rect, pic: Rect, compare: bool) {
+    if compare || !app.ui.program_wipe.enabled {
+        return;
+    }
+    use crate::state::WipeMode;
+    let w = app.ui.program_wipe;
+    let split = w.split.clamp(0.05, 0.95);
+    let target_still = w
+        .still_id
+        .and_then(|id| app.session.project.color_stills.iter().find(|s| s.id == id).or_else(|| app.ui.powergrades.iter().find(|s| s.id == id)))
+        .or_else(|| app.session.project.color_stills.first())
+        .or_else(|| app.ui.powergrades.first());
+    let still_label = target_still.map(|s| s.label.clone()).unwrap_or_else(|| tl!("Still Reference").to_string());
+    let still_tex = target_still.and_then(|s| crate::panels::color_gallery::still_texture(ui.ctx(), s));
+
+    let full_uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    let handle_rect = match w.mode {
+        WipeMode::Horizontal => {
+            let x = pic.min.x + pic.width() * split;
+            let region = if w.invert { Rect::from_min_max(pos2(x, pic.min.y), pic.max) } else { Rect::from_min_max(pic.min, pos2(x, pic.max.y)) };
+            if let Some(tex) = &still_tex {
+                ui.painter().with_clip_rect(region.intersect(pic)).image(tex.id(), pic, full_uv, Color32::WHITE);
+            } else {
+                ui.painter().rect_filled(region.intersect(pic), 0.0, Color32::from_rgba_unmultiplied(30, 40, 56, 70));
+            }
+            ui.painter().line_segment([pos2(x, pic.min.y), pos2(x, pic.max.y)], Stroke::new(1.5, app.tokens.accent));
+            Rect::from_center_size(pos2(x, pic.center().y), vec2(14.0, pic.height().max(24.0)))
+        }
+        WipeMode::Vertical => {
+            let y = pic.min.y + pic.height() * split;
+            let region = if w.invert { Rect::from_min_max(pos2(pic.min.x, y), pic.max) } else { Rect::from_min_max(pic.min, pos2(pic.max.x, y)) };
+            if let Some(tex) = &still_tex {
+                ui.painter().with_clip_rect(region.intersect(pic)).image(tex.id(), pic, full_uv, Color32::WHITE);
+            } else {
+                ui.painter().rect_filled(region.intersect(pic), 0.0, Color32::from_rgba_unmultiplied(30, 40, 56, 70));
+            }
+            ui.painter().line_segment([pos2(pic.min.x, y), pos2(pic.max.x, y)], Stroke::new(1.5, app.tokens.accent));
+            Rect::from_center_size(pos2(pic.center().x, y), vec2(pic.width().max(24.0), 14.0))
+        }
+        WipeMode::Diagonal => {
+            let poly = clip_diagonal_poly(pic, split, w.invert);
+            if poly.len() >= 3 {
+                if let Some(tex) = &still_tex {
+                    let mut mesh = egui::Mesh::with_texture(tex.id());
+                    let pw = pic.width().max(1.0);
+                    let ph = pic.height().max(1.0);
+                    for p in &poly {
+                        let uv = pos2(((p.x - pic.min.x) / pw).clamp(0.0, 1.0), ((p.y - pic.min.y) / ph).clamp(0.0, 1.0));
+                        mesh.vertices.push(egui::epaint::Vertex { pos: *p, uv, color: Color32::WHITE });
+                    }
+                    for i in 1..(poly.len() - 1) {
+                        mesh.indices.extend_from_slice(&[0, i as u32, (i + 1) as u32]);
+                    }
+                    ui.painter().with_clip_rect(pic).add(egui::Shape::mesh(mesh));
+                } else {
+                    ui.painter().with_clip_rect(pic).add(egui::Shape::convex_polygon(poly, Color32::from_rgba_unmultiplied(30, 40, 56, 70), Stroke::NONE));
+                }
+            }
+            let pw = pic.width().max(1.0);
+            let ph = pic.height().max(1.0);
+            let p0 = pos2(
+                pic.min.x + pw * (2.0 * split - 1.0).clamp(0.0, 1.0),
+                pic.min.y + ph * ((2.0 * split - (2.0 * split - 1.0).clamp(0.0, 1.0)).clamp(0.0, 1.0)),
+            );
+            let p1 = pos2(pic.min.x + pw * (2.0 * split).clamp(0.0, 1.0), pic.min.y + ph * ((2.0 * split - (2.0 * split).clamp(0.0, 1.0)).clamp(0.0, 1.0)));
+            ui.painter().line_segment([p0, p1], Stroke::new(1.5, app.tokens.accent));
+            Rect::from_center_size(p0.lerp(p1, 0.5), vec2(20.0, 20.0))
+        }
+        WipeMode::Box => {
+            let box_rect = Rect::from_center_size(pic.center(), pic.size() * split);
+            if w.invert {
+                let strips = [
+                    Rect::from_min_max(pic.min, pos2(pic.max.x, box_rect.min.y)),
+                    Rect::from_min_max(pos2(pic.min.x, box_rect.max.y), pic.max),
+                    Rect::from_min_max(pos2(pic.min.x, box_rect.min.y), pos2(box_rect.min.x, box_rect.max.y)),
+                    Rect::from_min_max(pos2(box_rect.max.x, box_rect.min.y), pos2(pic.max.x, box_rect.max.y)),
+                ];
+                for srect in strips {
+                    let clip = srect.intersect(pic);
+                    if clip.is_positive() {
+                        if let Some(tex) = &still_tex {
+                            ui.painter().with_clip_rect(clip).image(tex.id(), pic, full_uv, Color32::WHITE);
+                        } else {
+                            ui.painter().rect_filled(clip, 0.0, Color32::from_rgba_unmultiplied(30, 40, 56, 70));
+                        }
+                    }
+                }
+            } else if let Some(tex) = &still_tex {
+                ui.painter().with_clip_rect(box_rect.intersect(pic)).image(tex.id(), pic, full_uv, Color32::WHITE);
+            } else {
+                ui.painter().rect_filled(box_rect.intersect(pic), 0.0, Color32::from_rgba_unmultiplied(30, 40, 56, 70));
+            }
+            ui.painter().rect_stroke(box_rect, 0.0, Stroke::new(1.5, app.tokens.accent), StrokeKind::Inside);
+            Rect::from_center_size(pos2(box_rect.max.x, box_rect.center().y), vec2(16.0, box_rect.height().max(24.0)))
+        }
+    };
+
+    if handle_rect.is_positive() {
+        let hresp = ui.interact(handle_rect, egui::Id::unique("program-wipe-handle"), Sense::drag());
+        app.auto.add("program.wipe.handle", handle_rect.intersect(pic), "Drag Image Wipe Split");
+        if hresp.dragged() {
+            let delta = hresp.drag_delta();
+            let pw = pic.width().max(1.0);
+            let ph = pic.height().max(1.0);
+            let d = match w.mode {
+                WipeMode::Vertical => delta.y / ph,
+                WipeMode::Diagonal => (delta.x / pw + delta.y / ph) * 0.5,
+                WipeMode::Box => (delta.x / pw) * 2.0,
+                WipeMode::Horizontal => delta.x / pw,
+            };
+            app.ui.program_wipe.split = (split + d).clamp(0.05, 0.95);
+        }
+        let grip = Rect::from_center_size(handle_rect.center(), vec2(8.0, 8.0));
+        ui.painter().circle_filled(grip.center(), 4.5, app.tokens.accent);
+        ui.painter().circle_stroke(grip.center(), 4.5, Stroke::new(1.0, Color32::BLACK));
+    }
+
+    // Compact interactive Wipe bar at top-right of video_area.
+    let bar_rect = Rect::from_min_size(pos2((video_area.max.x - 248.0).max(video_area.min.x + 8.0), video_area.min.y + 8.0), vec2(240.0, 22.0));
+    ui.painter().rect_filled(bar_rect, 4.0, Color32::from_black_alpha(180));
+    ui.painter().rect_stroke(bar_rect, 4.0, Stroke::new(1.0, Color32::from_white_alpha(32)), StrokeKind::Inside);
+    let mut b_ui = ui.new_child(egui::UiBuilder::new().max_rect(bar_rect.shrink2(vec2(6.0, 2.0))).id_salt("program-wipe-bar"));
+    b_ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let m_btn = ui.small_button(crate::i18n::t(w.mode.label())).on_hover_text(tl!("Cycle Wipe Mode (Horizontal / Vertical / Diagonal / Box)"));
+        app.auto.add("program.wipe.mode", m_btn.rect, "Wipe Mode");
+        if m_btn.clicked() {
+            app.ui.program_wipe.mode = w.mode.next();
+        }
+        let inv_btn = ui.selectable_label(w.invert, egui::RichText::new(tl!("Inv")).small()).on_hover_text(tl!("Invert Wipe Side"));
+        app.auto.add("program.wipe.invert", inv_btn.rect, "Invert Wipe");
+        if inv_btn.clicked() {
+            app.ui.program_wipe.invert = !w.invert;
+        }
+        ui.add(egui::Label::new(egui::RichText::new(still_label).small().color(app.tokens.text_dim)).truncate());
+        let x_btn = ui.small_button("×").on_hover_text(tl!("Close Image Wipe"));
+        app.auto.add("program.wipe.close", x_btn.rect, "Close Image Wipe");
+        if x_btn.clicked() {
+            app.ui.program_wipe.enabled = false;
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn program_pixel_readout(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    which: Which,
+    compare: bool,
+    video_area: Rect,
+    pic: Rect,
+    rate: filmcraft_time::FrameRate,
+    time: Tick,
+) {
+    if which != Which::Program || compare {
+        return;
+    }
+    let Some(pos) = ui.ctx().input(|i| i.pointer.hover_pos()) else { return };
+    if !pic.contains(pos) || !video_area.contains(pos) {
+        return;
+    }
+    let u = ((pos.x - pic.min.x) / pic.width().max(1.0)).clamp(0.0, 1.0);
+    let v = ((pos.y - pic.min.y) / pic.height().max(1.0)).clamp(0.0, 1.0);
+    let frame_idx = rate.frame_at(time).max(0);
+    let st = crate::panels::panel_state::ScopesState::default();
+    let Some(sf) = crate::panels::scopes::frame_signal(app, ui.ctx(), "program", frame_idx, &st, 5) else {
+        return;
+    };
+    let sig = &sf.signal;
+    if sig.w == 0 || sig.h == 0 || sig.rgb.is_empty() {
+        return;
+    }
+    let px = ((u * sig.w as f32).floor() as usize).min(sig.w - 1);
+    let py = ((v * sig.h as f32).floor() as usize).min(sig.h - 1);
+    let Some([r, g, b]) = sig.rgb.get(py * sig.w + px).copied() else { return };
+    let r8 = (r.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let g8 = (g.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let b8 = (b.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let ire = ((0.2126 * r + 0.7152 * g + 0.0722 * b) * 100.0).round() as i32;
+    let (h, s, l) = rgb_to_hsl_deg(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
+    let txt = format!("RGB {r8:3} {g8:3} {b8:3}  ·  IRE {ire:3}%  ·  H {:.0}° S {:.0}% L {:.0}%", h, s * 100.0, l * 100.0);
+    let galley = ui.painter().layout_no_wrap(txt.clone(), Tokens::ui(10.0), Color32::from_gray(235));
+    let pad = vec2(7.0, 3.0);
+    let pill = Rect::from_min_size(
+        pos2(video_area.min.x + 8.0, (video_area.max.y - galley.size().y - pad.y * 2.0 - 8.0).max(video_area.min.y + 8.0)),
+        galley.size() + pad * 2.0,
+    );
+    ui.painter().rect_filled(pill, 4.0, Color32::from_black_alpha(180));
+    ui.painter().rect_stroke(pill, 4.0, Stroke::new(1.0, Color32::from_white_alpha(28)), StrokeKind::Inside);
+    ui.painter().galley(pill.min + pad, galley, Color32::from_gray(235));
+    app.auto.add("program.pixel_readout", pill, &txt);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1510,10 +2054,7 @@ mod tests {
         assert!(!app.ui.global_bypass);
         crate::menus::invoke(&mut app, &ctx, "view.toggleGlobalBypass", json!({})).expect("toggle on");
         assert!(app.ui.global_bypass);
-        let checked = crate::menus::menu_items(&app)
-            .into_iter()
-            .find(|it| it.id == "view.toggleGlobalBypass")
-            .and_then(|it| it.checked);
+        let checked = crate::menus::menu_items(&app).into_iter().find(|it| it.id == "view.toggleGlobalBypass").and_then(|it| it.checked);
         assert_eq!(checked, Some(true));
         crate::menus::invoke(&mut app, &ctx, "view.toggleGlobalBypass", json!({})).expect("toggle off");
         assert!(!app.ui.global_bypass);

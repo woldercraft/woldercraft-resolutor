@@ -210,12 +210,41 @@ fn selected_effect(app: &FilmcraftApp) -> Option<(Target, &TrackItem, &EffectIns
     Some(((sel.clip, index), it, e, e.def()?))
 }
 
+/// The topmost enabled video clip selected in the timeline that covers the playhead.
+fn selected_timeline_clip(app: &FilmcraftApp) -> Option<(ClipId, &TrackItem)> {
+    let seq = app.session.active_sequence()?;
+    let t = app.session.playhead();
+    seq.video_tracks
+        .iter()
+        .rev()
+        .filter(|tr| tr.enabled)
+        .filter_map(|tr| tr.item_at(t))
+        .find(|it| it.enabled && app.session.state.selection.contains(&it.id))
+        .map(|it| (it.id, it))
+}
+
+/// Whether the Program monitor's Resolve-style On-Screen Controls are currently active.
+fn overlay_mode(app: &FilmcraftApp) -> Option<crate::state::ViewerOverlayMode> {
+    (app.ui.program.viewer_overlay_enabled && !app.playback.playing).then_some(app.ui.program.viewer_overlay_mode)
+}
+
 /// The selected effect (its clip and index) and its box, while it is Motion or Transform of a
-/// selected clip under the playhead.
-fn selected_placement(app: &FilmcraftApp, pic: Rect, reach: Rect, frame: (u32, u32)) -> Option<(Target, &'static EffectDef, Placement)> {
-    let (sel, it, e, def) = selected_effect(app).filter(|s| s.3.id == "motion" || s.3.id == "transform")?;
-    let pl = placement(app, it, e, it.effect_time_at(app.session.playhead()), pic, reach, frame)?;
-    Some((sel, def, pl))
+/// selected clip under the playhead — or Motion of the selected timeline clip when Transform
+/// On-Screen Controls are enabled.
+fn selected_placement(app: &FilmcraftApp, pic: Rect, reach: Rect, frame: (u32, u32)) -> Option<(Target, &'static EffectDef, Placement, bool)> {
+    if let Some((sel, it, e, def)) = selected_effect(app).filter(|s| s.3.id == "motion" || s.3.id == "transform") {
+        let pl = placement(app, it, e, it.effect_time_at(app.session.playhead()), pic, reach, frame)?;
+        return Some((sel, def, pl, true));
+    }
+    if overlay_mode(app) == Some(crate::state::ViewerOverlayMode::Transform)
+        && let Some((clip, it)) = selected_timeline_clip(app)
+        && let Some((idx, e)) = it.effects.iter().enumerate().find(|(_, e)| e.effect == "motion" && e.enabled)
+        && let Some(def) = e.def()
+    {
+        let pl = placement(app, it, e, it.effect_time_at(app.session.playhead()), pic, reach, frame)?;
+        return Some(((clip, idx), def, pl, false));
+    }
+    None
 }
 
 /// Corner Pin's four corners on the monitor and the values they are drawn from.
@@ -233,7 +262,16 @@ struct Pins {
 /// The selected effect (its clip and index) and its corners, while it is Corner Pin of a selected
 /// clip under the playhead.
 fn selected_pins(app: &FilmcraftApp, pic: Rect, reach: Rect, frame: (u32, u32)) -> Option<(Target, Pins)> {
-    let (sel, it, e, _) = selected_effect(app).filter(|s| s.3.id == "corner_pin")?;
+    let (sel, it, e) = if let Some((sel, it, e, _)) = selected_effect(app).filter(|s| s.3.id == "corner_pin") {
+        (sel, it, e)
+    } else if overlay_mode(app) == Some(crate::state::ViewerOverlayMode::EffectOverlay)
+        && let Some((clip, it)) = selected_timeline_clip(app)
+        && let Some((idx, e)) = it.effects.iter().enumerate().find(|(_, e)| e.effect == "corner_pin" && e.enabled)
+    {
+        ((clip, idx), it, e)
+    } else {
+        return None;
+    };
     let seq = app.session.active_sequence()?;
     let project = &app.session.project;
     let mt = it.effect_time_at(app.session.playhead());
@@ -347,14 +385,7 @@ struct EcPointDrag {
 
 /// Interactive crosshair gizmos on the Program monitor for `ParamKind::Point` parameters of the
 /// selected EffectCraft VFX effect (`"ec.*"`).
-fn ec_point_overlay(
-    app: &mut FilmcraftApp,
-    ui: &mut egui::Ui,
-    pic: Rect,
-    reach: Rect,
-    frame: (u32, u32),
-    actions: &mut Vec<(String, Value)>,
-) {
+fn ec_point_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, reach: Rect, frame: (u32, u32), actions: &mut Vec<(String, Value)>) {
     let (sel, eff_name, to_screen, point_items) = {
         let Some((sel, it, e, def)) = selected_effect(app).filter(|s| s.3.id.starts_with("ec.")) else {
             return;
@@ -363,13 +394,8 @@ fn ec_point_overlay(
         let project = &app.session.project;
         let mt = it.effect_time_at(app.session.playhead());
         let size = filmcraft_render::source_size(project, it.item).unwrap_or(frame);
-        let to_screen = frame_to_screen(pic, frame).then_apply(&filmcraft_render::motion_matrix(
-            seq,
-            it,
-            size,
-            filmcraft_render::source_par(project, it.item),
-            mt,
-        ));
+        let to_screen =
+            frame_to_screen(pic, frame).then_apply(&filmcraft_render::motion_matrix(seq, it, size, filmcraft_render::source_par(project, it.item), mt));
         let (w, h) = (f64::from(size.0), f64::from(size.1));
         let items: Vec<(&'static str, &'static str, Vec2, Pos2)> = def
             .params
@@ -629,6 +655,151 @@ fn clip_under(app: &FilmcraftApp, pic: Rect, frame: (u32, u32), p: Pos2) -> Opti
     })
 }
 
+const CROP_MERGE: &str = "programCrop";
+const CROP_COLOR: Color32 = Color32::from_rgb(0xe5, 0x7e, 0x2a);
+
+#[derive(Clone, Copy, Debug)]
+struct CropPlacement {
+    clip: ClipId,
+    has_crop: bool,
+    size: (u32, u32),
+    to_screen: Affine,
+    /// Current `[left, top, right, bottom]` in percent `0.0..=100.0`.
+    edges: [f64; 4],
+    quad: [Pos2; 4],
+    handles: [Pos2; 8],
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CropDrag {
+    clip: ClipId,
+    handle: usize,
+    start: Pos2,
+    from: [f64; 4],
+    applied: bool,
+}
+
+fn crop_placement(app: &FilmcraftApp, pic: Rect, reach: Rect, frame: (u32, u32)) -> Option<CropPlacement> {
+    let (clip, it) = selected_timeline_clip(app)?;
+    let seq = app.session.active_sequence()?;
+    let project = &app.session.project;
+    let size = filmcraft_render::source_size(project, it.item).unwrap_or(frame);
+    if size.0 == 0 || size.1 == 0 || frame.0 == 0 || frame.1 == 0 {
+        return None;
+    }
+    let t = it.effect_time_at(app.session.playhead());
+    let par = filmcraft_render::source_par(project, it.item);
+    let to_screen = frame_to_screen(pic, frame).then_apply(&filmcraft_render::motion_matrix(seq, it, size, par, t));
+    let crop_inst = it.effects.iter().find(|e| e.effect == "crop" && e.enabled);
+    let pct = |name: &str| crop_inst.map_or(0.0_f64, |e| e.f64_at(name, t)).clamp(0.0, 99.0);
+    let edges = [pct("left"), pct("top"), pct("right"), pct("bottom")];
+    let (w, h) = (f64::from(size.0), f64::from(size.1));
+    let x0 = edges[0] / 100.0 * w;
+    let y0 = edges[1] / 100.0 * h;
+    let x1 = (1.0 - edges[2] / 100.0) * w;
+    let y1 = (1.0 - edges[3] / 100.0) * h;
+    let quad = [sp(&to_screen, Vec2::new(x0, y0)), sp(&to_screen, Vec2::new(x1, y0)), sp(&to_screen, Vec2::new(x1, y1)), sp(&to_screen, Vec2::new(x0, y1))];
+    if !quad.iter().all(|p| p.x.is_finite() && p.y.is_finite()) {
+        return None;
+    }
+    Some(CropPlacement { clip, has_crop: crop_inst.is_some(), size, to_screen, edges, quad, handles: within(handle_points(&quad), reach) })
+}
+
+fn crop_handle_at(handles: &[Pos2; 8], p: Pos2) -> Option<usize> {
+    handles.iter().enumerate().min_by(|(_, a), (_, b)| a.distance(p).total_cmp(&b.distance(p))).filter(|(_, h)| h.distance(p) <= GRAB).map(|(i, _)| i)
+}
+
+fn crop_cursor(ui: &egui::Ui, handle: usize) {
+    let icon = match handle {
+        0 | 2 => CursorIcon::ResizeNwSe,
+        1 | 3 => CursorIcon::ResizeNeSw,
+        4 | 6 => CursorIcon::ResizeVertical,
+        _ => CursorIcon::ResizeHorizontal,
+    };
+    ui.ctx().set_cursor_icon(icon);
+}
+
+fn crop_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, reach: Rect, frame: (u32, u32), actions: &mut Vec<(String, Value)>) {
+    let Some(pl) = crop_placement(app, pic, reach, frame) else { return };
+    let p = ui.painter();
+    let outline = Stroke::new(1.5, CROP_COLOR);
+    for i in 0..4 {
+        p.line_segment([pl.quad[i], pl.quad[(i + 1) % 4]], outline);
+    }
+    for (i, &h) in pl.handles.iter().enumerate() {
+        let side = if i < 4 { CORNER + 1.5 } else { EDGE + 1.5 };
+        let r = Rect::from_center_size(h, vec2(side, side));
+        p.rect_filled(r, 0.0, CROP_COLOR);
+        p.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::WHITE), StrokeKind::Outside);
+        app.auto.add(&format!("program.crop.handle.{i}"), r, &format!("crop handle {i}"));
+    }
+    let box_rect = Rect::from_points(&pl.quad).union(Rect::from_points(&pl.handles));
+    app.auto.add("program.crop.box", box_rect, "crop box");
+
+    let id = egui::Id::unique("program-crop");
+    let drag_id = id.with("drag");
+    let resp = ui.interact(box_rect.expand(GRAB), id, Sense::click_and_drag());
+    let left = egui::PointerButton::Primary;
+    if resp.drag_started_by(left) {
+        let pos = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos()).unwrap_or(box_rect.center());
+        if let Some(handle) = crop_handle_at(&pl.handles, pos) {
+            ui.data_mut(|d| d.insert_temp(drag_id, CropDrag { clip: pl.clip, handle, start: pos, from: pl.edges, applied: pl.has_crop }));
+        } else {
+            ui.data_mut(|d| d.remove::<CropDrag>(drag_id));
+        }
+    }
+    let drag: Option<CropDrag> = ui.data(|d| d.get_temp(drag_id)).filter(|d: &CropDrag| d.clip == pl.clip);
+    if let Some(mut d) = drag
+        && resp.dragged_by(left)
+    {
+        crop_cursor(ui, d.handle);
+        if !d.applied {
+            actions.push(("effects.apply".into(), json!({"clip": pl.clip.0, "effect": "Crop"})));
+            d.applied = true;
+            ui.data_mut(|m| m.insert_temp(drag_id, d));
+        }
+        let cur = resp.interact_pointer_pos().unwrap_or(d.start);
+        if let Some(inv) = pl.to_screen.inverse() {
+            let a = inv.apply(Vec2::new(f64::from(d.start.x), f64::from(d.start.y)));
+            let b = inv.apply(Vec2::new(f64::from(cur.x), f64::from(cur.y)));
+            let dx_pct = (b.x - a.x) / f64::from(pl.size.0) * 100.0;
+            let dy_pct = (b.y - a.y) / f64::from(pl.size.1) * 100.0;
+            let mut next = d.from;
+            let touch_left = matches!(d.handle, 0 | 3 | 7);
+            let touch_top = matches!(d.handle, 0 | 1 | 4);
+            let touch_right = matches!(d.handle, 1 | 2 | 5);
+            let touch_bottom = matches!(d.handle, 2 | 3 | 6);
+            if touch_left {
+                next[0] = (d.from[0] + dx_pct).clamp(0.0, (99.0 - d.from[2]).max(0.0));
+            }
+            if touch_top {
+                next[1] = (d.from[1] + dy_pct).clamp(0.0, (99.0 - d.from[3]).max(0.0));
+            }
+            if touch_right {
+                next[2] = (d.from[2] - dx_pct).clamp(0.0, (99.0 - next[0]).max(0.0));
+            }
+            if touch_bottom {
+                next[3] = (d.from[3] - dy_pct).clamp(0.0, (99.0 - next[1]).max(0.0));
+            }
+            for (idx, param) in ["left", "top", "right", "bottom"].iter().enumerate() {
+                if (next[idx] - pl.edges[idx]).abs() > 1e-3 || resp.drag_started_by(left) {
+                    actions.push((
+                        "effects.setParam".into(),
+                        json!({"clip": pl.clip.0, "effect": "crop", "param": param, "value": next[idx], "merge": CROP_MERGE}),
+                    ));
+                }
+            }
+        }
+    } else if let Some(pos) = resp.hover_pos()
+        && let Some(handle) = crop_handle_at(&pl.handles, pos)
+    {
+        crop_cursor(ui, handle);
+    }
+    if resp.drag_stopped() {
+        ui.data_mut(|d| d.remove::<CropDrag>(drag_id));
+    }
+}
+
 /// The selected effect's box (or Corner Pin's corners) on the Program monitor picture `pic`, and
 /// double-clicking a clip's picture to select its Motion.
 pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, frame: (u32, u32)) {
@@ -641,7 +812,15 @@ pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, fra
     let double = ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary));
     // the monitor around the picture as well as on it (its clip reaches past the picture area)
     let reach = ui.clip_rect().shrink(REACH_INSET);
-    if let Some((sel, def, pl)) = selected_placement(app, pic, reach, frame) {
+    let mode = overlay_mode(app);
+    if mode == Some(crate::state::ViewerOverlayMode::Crop) {
+        crop_overlay(app, ui, pic, reach, frame, &mut actions);
+        crate::panels::effect_controls::run(app, ui.ctx(), actions);
+        return;
+    }
+    if mode != Some(crate::state::ViewerOverlayMode::EffectOverlay)
+        && let Some((sel, def, pl, from_effect_sel)) = selected_placement(app, pic, reach, frame)
+    {
         draw(app, ui, &pl, def.name);
         // (as far again beyond the rotate zone, where a click lets go of the box; and the handles
         // held at the monitor's edge)
@@ -701,7 +880,7 @@ pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, fra
             });
         }
         // a click beside the box (not on it, a handle or a corner's rotate zone) lets go of it
-        if resp.clicked() && !double && resp.interact_pointer_pos().is_some_and(|p| grab_at(&pl, p).is_none()) {
+        if from_effect_sel && resp.clicked() && !double && resp.interact_pointer_pos().is_some_and(|p| grab_at(&pl, p).is_none()) {
             actions.push(("effects.select".into(), json!({"none": true})));
         }
     }

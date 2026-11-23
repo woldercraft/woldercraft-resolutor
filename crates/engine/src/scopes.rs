@@ -112,6 +112,10 @@ fn scopes_read(s: &mut Session, p: &Value) -> Result<Value> {
                 v
             }
             scopes::Computed::Vectorscope(vs) => vectorscope_json(&vs, npeaks),
+            scopes::Computed::Cie1931(c) => json!({
+                "samples": c.samples,
+                "mean": [(c.mean[0] as f64 * 10_000.0).round() / 10_000.0, (c.mean[1] as f64 * 10_000.0).round() / 10_000.0],
+            }),
         };
         out[k.name()] = v;
     }

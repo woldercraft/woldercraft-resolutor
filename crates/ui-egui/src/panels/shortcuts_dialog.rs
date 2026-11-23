@@ -22,12 +22,37 @@ use crate::FilmcraftApp;
 use crate::native_dialogs::FileDialog;
 use crate::theme::Tokens;
 
-/// Key colours (our own palette): application-wide, panel-specific, unassigned, held modifier.
-pub const APP_KEY: Color32 = Color32::from_rgb(0x74, 0x57, 0xc8);
-pub const PANEL_KEY: Color32 = Color32::from_rgb(0x4a, 0xa6, 0x84);
-pub const FREE_KEY: Color32 = Color32::from_rgb(0x5a, 0x5a, 0x5e);
-const MOD_KEY: Color32 = Color32::from_rgb(0x2f, 0x62, 0xc0);
+/// Key colours (DaVinci Resolve-inspired palette): application-wide, panel-specific, unassigned, held modifier.
+pub const APP_KEY: Color32 = Color32::from_rgb(0x41, 0x5c, 0x76);
+pub const PANEL_KEY: Color32 = Color32::from_rgb(0x3a, 0x7d, 0x6b);
+pub const FREE_KEY: Color32 = Color32::from_rgb(0x2d, 0x2e, 0x33);
+const MOD_KEY: Color32 = Color32::from_rgb(0xd9, 0x73, 0x26);
+const KEY_BORDER: Color32 = Color32::from_rgb(0x42, 0x44, 0x4a);
+const TRAY_BG: Color32 = Color32::from_rgb(0x1b, 0x1c, 0x20);
 const WARN: Color32 = Color32::from_rgb(0xe8, 0xa0, 0x3c);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CommandFilter {
+    #[default]
+    All,
+    Assigned,
+    Unassigned,
+    Conflicts,
+}
+
+impl CommandFilter {
+    const ALL: [Self; 4] = [Self::All, Self::Assigned, Self::Unassigned, Self::Conflicts];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All Commands",
+            Self::Assigned => "Assigned",
+            Self::Unassigned => "Unassigned",
+            Self::Conflicts => "Conflicts",
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +60,12 @@ pub struct EditorState {
     pub search: String,
     /// "Application" or a panel name (which panel's shortcuts the keyboard and assignments use).
     pub context: String,
+    /// Selected category in the left-hand command tree (`None` = All Commands).
+    pub category: Option<String>,
+    /// Show filter (All / Assigned / Unassigned / Conflicts).
+    pub filter: CommandFilter,
+    /// When true and `key` is Some, filter the command list to commands bound to `key`.
+    pub filter_by_key: bool,
     pub selected: Option<String>,
     /// Waiting for a key press: (command, add instead of replace).
     pub recording: Option<(String, bool)>,
@@ -149,8 +180,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
     let size = dialog_size(screen.size());
     let mut close: Option<bool> = None; // Some(true) = OK, Some(false) = Cancel
     let mut open = true;
-    egui::Window::new(tl!("Keyboard Shortcuts"))
-        .id(egui::Id::unique("Keyboard Shortcuts"))
+    egui::Window::new(tl!("Keyboard Customization"))
         .id(egui::Id::unique("keyboard-shortcuts"))
         .open(&mut open)
         .collapsible(false)
@@ -162,21 +192,33 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
         .show(ctx, |ui| {
             ui.set_width(size.x);
             header(app, ui, &t);
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             let kb_h = keyboard_height(size);
-            let (kb, _) = ui.allocate_exact_size(vec2(size.x, kb_h), Sense::hover());
-            keyboard(app, ui, kb, &t);
+            let (tray, _) = ui.allocate_exact_size(vec2(size.x, kb_h + 12.0), Sense::hover());
+            ui.painter().rect(tray, CornerRadius::same(6), TRAY_BG, Stroke::new(1.0, KEY_BORDER), StrokeKind::Inside);
+            keyboard(app, ui, tray.shrink(6.0), &t);
+            ui.add_space(4.0);
             legend(ui, &t);
             ui.add_space(6.0);
-            let rest_h = (size.y - kb_h - 160.0).max(160.0);
+            let rest_h = (size.y - kb_h - 178.0).max(160.0);
+            let all_rows = app.session.execute("shortcuts.list", json!({})).unwrap_or_default();
+            let all_rows = all_rows.as_array().cloned().unwrap_or_default();
             ui.horizontal_top(|ui| {
+                let cat_w = (size.x * 0.19).clamp(140.0, 220.0);
+                let detail_w = (size.x * 0.29).clamp(220.0, 360.0);
+                let list_w = (size.x - cat_w - detail_w - 20.0).max(260.0);
                 ui.vertical(|ui| {
-                    ui.set_width(size.x * 0.6);
-                    command_list(app, ui, rest_h, &t);
+                    ui.set_width(cat_w);
+                    category_tree(app, ui, rest_h, &all_rows, &t);
                 });
-                ui.add_space(12.0);
+                ui.add_space(10.0);
                 ui.vertical(|ui| {
-                    ui.set_width(size.x * 0.4 - 14.0);
+                    ui.set_width(list_w);
+                    command_list(app, ui, rest_h, &all_rows, &t);
+                });
+                ui.add_space(10.0);
+                ui.vertical(|ui| {
+                    ui.set_width(detail_w);
                     key_detail(app, ui, rest_h, &t);
                 });
             });
@@ -266,6 +308,10 @@ fn header(app: &mut FilmcraftApp, ui: &mut egui::Ui, t: &Tokens) {
                 None => app.shortcut_editor.message = tl!("Import: no file chosen (agents: shortcuts.import {path})").into(),
             });
         }
+        if small_button(app, ui, "shortcuts.reset", tl!("Reset"), modified) {
+            exec(app, "shortcuts.loadPreset", json!({"name": active}));
+            app.shortcut_editor.message = tlf!("Reset to “{active}”", active);
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(RichText::new(if cfg!(target_os = "macos") { tl!("Keyboard: US (macOS)") } else { tl!("Keyboard: US") }).size(12.0).color(t.text_dim));
         });
@@ -295,7 +341,7 @@ fn header(app: &mut FilmcraftApp, ui: &mut egui::Ui, t: &Tokens) {
         ui.label(RichText::new(tl!("Commands:")).size(13.0).color(t.text_dim));
         let cur = app.shortcut_editor.context.clone();
         let r = craft_ui::ComboBox::from_id_salt("shortcuts-context")
-            .width(280.0)
+            .width(220.0)
             .selected_text(crate::i18n::t(if cur.is_empty() { APPLICATION } else { &cur }))
             .show_ui(ui, |ui| {
                 for c in std::iter::once(APPLICATION).chain(PANELS.iter().copied()) {
@@ -308,6 +354,47 @@ fn header(app: &mut FilmcraftApp, ui: &mut egui::Ui, t: &Tokens) {
                 }
             });
         app.auto.add("shortcuts.context", r.response.rect, "Commands");
+        ui.add_space(10.0);
+        ui.label(RichText::new(tl!("Show:")).size(13.0).color(t.text_dim));
+        let cur_filter = app.shortcut_editor.filter;
+        let fr = craft_ui::ComboBox::from_id_salt("shortcuts-filter").width(150.0).selected_text(crate::i18n::t(cur_filter.label())).show_ui(ui, |ui| {
+            for f in CommandFilter::ALL {
+                let r = ui.selectable_label(cur_filter == f, crate::i18n::t(f.label()));
+                app.auto.add(&format!("shortcuts.filter.{}", f.label()), r.rect, f.label());
+                if r.clicked() {
+                    app.shortcut_editor.filter = f;
+                }
+            }
+        });
+        app.auto.add("shortcuts.filter", fr.response.rect, "Show");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let mac = cfg!(target_os = "macos");
+            let mod_items: [(&str, bool, &str); 4] = [
+                ("Shift", app.shortcut_editor.mods.shift, "Shift"),
+                ("Alt", app.shortcut_editor.mods.alt, if mac { "Option" } else { "Alt" }),
+                ("Ctrl", app.shortcut_editor.mods.ctrl, "Ctrl"),
+                ("Cmd", app.shortcut_editor.mods.cmd, if mac { "Cmd" } else { "Ctrl/Cmd" }),
+            ];
+            for (key, on, label) in mod_items {
+                if key == "Ctrl" && !mac {
+                    continue;
+                }
+                let btn = egui::Button::new(RichText::new(label).size(11.5).color(if on { Color32::WHITE } else { t.text_dim }))
+                    .fill(if on { MOD_KEY } else { FREE_KEY })
+                    .min_size(vec2(0.0, 22.0));
+                let r = ui.add(btn);
+                app.auto.add(&format!("shortcuts.modPill.{key}"), r.rect, label);
+                if r.clicked() {
+                    match key {
+                        "Shift" => app.shortcut_editor.mods.shift = !app.shortcut_editor.mods.shift,
+                        "Alt" => app.shortcut_editor.mods.alt = !app.shortcut_editor.mods.alt,
+                        "Cmd" => app.shortcut_editor.mods.cmd = !app.shortcut_editor.mods.cmd,
+                        _ => app.shortcut_editor.mods.ctrl = !app.shortcut_editor.mods.ctrl,
+                    }
+                }
+            }
+            ui.label(RichText::new(tl!("Modifiers:")).size(12.0).color(t.text_dim));
+        });
     });
 }
 
@@ -456,7 +543,7 @@ fn key_legend(name: &str, mac: bool) -> String {
     }
 }
 
-fn keyboard(app: &mut FilmcraftApp, ui: &mut egui::Ui, area: Rect, t: &Tokens) {
+fn keyboard(app: &mut FilmcraftApp, ui: &mut egui::Ui, area: Rect, _t: &Tokens) {
     let mac = cfg!(target_os = "macos");
     // held modifiers count as the filter too (outside recording)
     let held = ui.input(|i| i.modifiers);
@@ -504,16 +591,17 @@ fn keyboard(app: &mut FilmcraftApp, ui: &mut egui::Ui, area: Rect, t: &Tokens) {
         } else {
             FREE_KEY
         };
-        p.rect_filled(r, CornerRadius::same(3), base);
+        p.rect_filled(r, CornerRadius::same(4), base);
+        p.rect_stroke(r, CornerRadius::same(4), Stroke::new(1.0, KEY_BORDER), StrokeKind::Inside);
         if app_cmd.is_some() && panel_cmd.is_some() {
             // both: lower-right triangle in the panel colour
             p.add(egui::Shape::convex_polygon(vec![r.right_top(), r.right_bottom(), r.left_bottom()], PANEL_KEY, Stroke::NONE));
         }
         if resp.hovered() {
-            p.rect_stroke(r, CornerRadius::same(3), Stroke::new(1.5, Color32::WHITE), StrokeKind::Inside);
+            p.rect_stroke(r, CornerRadius::same(4), Stroke::new(1.5, Color32::WHITE), StrokeKind::Inside);
         }
         if app.shortcut_editor.key.as_deref() == Some(name) {
-            p.rect_stroke(r, CornerRadius::same(3), Stroke::new(2.0, t.accent), StrokeKind::Inside);
+            p.rect_stroke(r, CornerRadius::same(4), Stroke::new(2.0, MOD_KEY), StrokeKind::Inside);
         }
         let fs = (uy * 0.2).clamp(8.5, 12.0);
         if let Some(cmd) = app_cmd.as_ref().or(panel_cmd.as_ref()) {
@@ -585,7 +673,12 @@ fn keyboard(app: &mut FilmcraftApp, ui: &mut egui::Ui, area: Rect, t: &Tokens) {
         }
     }
     if let Some(k) = clicked_key {
-        ed.key = Some(k);
+        if ed.key.as_deref() == Some(k.as_str()) {
+            ed.key = None;
+            ed.filter_by_key = false;
+        } else {
+            ed.key = Some(k);
+        }
     }
 }
 
@@ -779,36 +872,133 @@ fn legend(ui: &mut egui::Ui, t: &Tokens) {
     });
 }
 
-fn command_list(app: &mut FilmcraftApp, ui: &mut egui::Ui, height: f32, t: &Tokens) {
+fn category_tree(app: &mut FilmcraftApp, ui: &mut egui::Ui, height: f32, all_rows: &[Value], t: &Tokens) {
+    let w = ui.available_width();
+    let (hr, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
+    ui.painter().text(hr.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, tl!("Categories"), Tokens::semibold(12.5), t.text_dim);
+    let mut cats: Vec<(String, usize)> = Vec::new();
+    for row in all_rows {
+        let cat = row["category"].as_str().unwrap_or("").to_string();
+        if let Some((_, count)) = cats.iter_mut().find(|(c, _)| *c == cat) {
+            *count += 1;
+        } else if !cat.is_empty() {
+            cats.push((cat, 1));
+        }
+    }
+    egui::ScrollArea::vertical().id_salt("shortcuts-categories").max_height((height - 26.0).max(80.0)).auto_shrink([false, false]).show(ui, |ui| {
+        let mut draw_cat = |label: &str, count: usize, selected: bool, id_suffix: &str| -> bool {
+            let (r, resp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::click());
+            let bg = if selected {
+                t.row_selected
+            } else if resp.hovered() {
+                t.row_alt
+            } else {
+                Color32::TRANSPARENT
+            };
+            ui.painter().rect_filled(r, 3.0, bg);
+            let text_col = if selected { Color32::WHITE } else { t.text };
+            ui.painter().text(r.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, label, Tokens::ui(12.5), text_col);
+            ui.painter().text(r.right_center() + vec2(-8.0, 0.0), Align2::RIGHT_CENTER, count.to_string(), Tokens::ui(11.0), t.text_dim);
+            app.auto.add(&format!("shortcuts.category.{id_suffix}"), r, label);
+            resp.clicked()
+        };
+        if draw_cat(tl!("All Commands"), all_rows.len(), app.shortcut_editor.category.is_none(), "all") {
+            app.shortcut_editor.category = None;
+        }
+        for (cat, count) in cats {
+            let selected = app.shortcut_editor.category.as_deref() == Some(cat.as_str());
+            if draw_cat(crate::i18n::t(&cat), count, selected, &cat) {
+                app.shortcut_editor.category = Some(cat);
+            }
+        }
+    });
+}
+
+fn unbind_shortcut(app: &mut FilmcraftApp, command: &str, keys: &str, panel: Option<&str>) {
+    let panel_arg = panel.unwrap_or(APPLICATION);
+    if exec(app, "shortcuts.clear", json!({"command": command, "keys": keys, "panel": panel_arg})).is_some() {
+        let disp = Chord::parse(keys).map(|c| c.display(Platform::current())).unwrap_or_else(|_| keys.to_string());
+        app.shortcut_editor.message = tlf!("Removed {key} from {command}", key = disp, command = label_of(app, command));
+    }
+}
+
+fn row_matches_key(row: &Value, key: &str) -> bool {
+    row["shortcuts"].as_array().into_iter().flatten().any(|b| b["keys"].as_str().and_then(|k| Chord::parse(k).ok()).is_some_and(|c| c.key == key))
+}
+
+fn command_list(app: &mut FilmcraftApp, ui: &mut egui::Ui, height: f32, all_rows: &[Value], t: &Tokens) {
     let plat = Platform::current();
+    let conflict_cmds: std::collections::HashSet<String> = if app.shortcut_editor.filter == CommandFilter::Conflicts {
+        app.session.shortcuts.conflicts(plat).into_iter().flat_map(|(_, _, cmds)| cmds).collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     ui.horizontal(|ui| {
         let mut q = app.shortcut_editor.search.clone();
         let r = crate::widgets::accessible_name(
-            ui.add(egui::TextEdit::singleline(&mut q).hint_text(tl!("Search commands or keys")).desired_width(320.0)),
+            ui.add(egui::TextEdit::singleline(&mut q).hint_text(tl!("Search commands or keys")).desired_width(220.0)),
             "Search commands or keys",
         );
         app.auto.add("shortcuts.search", r.rect, "Search");
         app.shortcut_editor.search = q;
-        if let Some(sel) = app.shortcut_editor.selected.clone() {
-            ui.label(RichText::new(tlf!("Selected: {command}", command = label_of(app, &sel))).size(12.0).color(t.text_dim));
+        if !app.shortcut_editor.search.is_empty() && small_button(app, ui, "shortcuts.searchClear", "×", true) {
+            app.shortcut_editor.search.clear();
+        }
+        if let Some(k) = app.shortcut_editor.key.clone() {
+            let on = app.shortcut_editor.filter_by_key;
+            let lbl = tlf!("Key: {key}", key = key_legend(&k, plat.is_mac()));
+            let btn = egui::Button::new(RichText::new(lbl.clone()).size(11.5).color(if on { Color32::WHITE } else { t.text_dim }))
+                .fill(if on { MOD_KEY } else { FREE_KEY })
+                .min_size(vec2(0.0, 22.0));
+            let fr = ui.add(btn).on_hover_text(tl!("Filter commands by selected key"));
+            app.auto.add("shortcuts.filterKey", fr.rect, &lbl);
+            if fr.clicked() {
+                app.shortcut_editor.filter_by_key = !on;
+            }
         }
     });
     ui.add_space(4.0);
-    let rows = app.session.execute("shortcuts.list", json!({})).unwrap_or_default();
-    let rows = rows.as_array().cloned().unwrap_or_default();
     let query = app.shortcut_editor.search.trim();
-    let rows: Vec<_> = rows.into_iter().filter(|row| matches_search(row, query)).collect();
+    let cat_filter = app.shortcut_editor.category.clone();
+    let filter = app.shortcut_editor.filter;
+    let key_filter = if app.shortcut_editor.filter_by_key { app.shortcut_editor.key.clone() } else { None };
+    let rows: Vec<_> = all_rows
+        .iter()
+        .filter(|row| {
+            if let Some(cat) = &cat_filter
+                && row["category"].as_str() != Some(cat.as_str())
+            {
+                return false;
+            }
+            let has_bindings = row["shortcuts"].as_array().is_some_and(|a| !a.is_empty());
+            match filter {
+                CommandFilter::All => {}
+                CommandFilter::Assigned if !has_bindings => return false,
+                CommandFilter::Unassigned if has_bindings => return false,
+                CommandFilter::Conflicts if !conflict_cmds.contains(row["id"].as_str().unwrap_or("")) => return false,
+                _ => {}
+            }
+            if let Some(k) = &key_filter
+                && !row_matches_key(row, k)
+            {
+                return false;
+            }
+            matches_search(row, query)
+        })
+        .collect();
     let w = ui.available_width();
+    let col_x = w * 0.50;
     // column header
     let (hr, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
     ui.painter().text(hr.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, tl!("Command"), Tokens::semibold(12.5), t.text_dim);
-    ui.painter().text(pos2(hr.min.x + w * 0.58, hr.center().y), Align2::LEFT_CENTER, tl!("Shortcut"), Tokens::semibold(12.5), t.text_dim);
-    egui::ScrollArea::vertical().id_salt("shortcuts-list").max_height(height - 50.0).auto_shrink([false, false]).show(ui, |ui| {
+    ui.painter().text(pos2(hr.min.x + col_x, hr.center().y), Align2::LEFT_CENTER, tl!("Shortcut"), Tokens::semibold(12.5), t.text_dim);
+    let mut unbind: Option<(String, String, Option<String>)> = None;
+    egui::ScrollArea::vertical().id_salt("shortcuts-list").max_height((height - 52.0).max(80.0)).auto_shrink([false, false]).show(ui, |ui| {
         let mut last_cat = String::new();
         for (i, row) in rows.iter().enumerate() {
             let id = row["id"].as_str().unwrap_or("").to_string();
             let cat = row["category"].as_str().unwrap_or("").to_string();
-            if cat != last_cat {
+            if cat_filter.is_none() && cat != last_cat {
                 let (cr, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
                 let c = cr.left_center() + vec2(9.0, 0.0);
                 ui.painter().add(egui::Shape::convex_polygon(vec![c + vec2(-4.0, -2.5), c + vec2(4.0, -2.5), c + vec2(0.0, 3.0)], t.text_dim, Stroke::NONE));
@@ -825,8 +1015,9 @@ fn command_list(app: &mut FilmcraftApp, ui: &mut egui::Ui, height: f32, t: &Toke
                 t.row_alt
             };
             ui.painter().rect_filled(r, 0.0, bg);
-            ui.painter().text(
-                r.left_center() + vec2(22.0, 0.0),
+            let cmd_rect = Rect::from_min_max(r.min, pos2(r.min.x + col_x - 6.0, r.max.y));
+            ui.painter().with_clip_rect(cmd_rect).text(
+                r.left_center() + vec2(16.0, 0.0),
                 Align2::LEFT_CENTER,
                 crate::i18n::t(row["label"].as_str().unwrap_or("")),
                 Tokens::ui(12.5),
@@ -836,39 +1027,77 @@ fn command_list(app: &mut FilmcraftApp, ui: &mut egui::Ui, height: f32, t: &Toke
             if resp.clicked() {
                 app.shortcut_editor.selected = Some(id.clone());
             }
-            // shortcut cell: click to record (replace); "+" adds another
-            let cell = Rect::from_min_max(pos2(r.min.x + w * 0.58, r.min.y + 2.0), pos2(r.max.x - 34.0, r.max.y - 2.0));
+            // shortcut cell: Resolve-style pills with inline ×, click cell to record (replace), "+" adds another
+            let cell = Rect::from_min_max(pos2(r.min.x + col_x, r.min.y + 2.0), pos2(r.max.x - 28.0, r.max.y - 2.0));
             let recording = app.shortcut_editor.recording.as_ref().is_some_and(|(c, _)| *c == id);
-            let text = if recording {
-                tl!("Type a shortcut… (Esc cancels)").to_string()
-            } else {
-                row["shortcuts"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|b| {
-                        let d = b["display"].as_str().unwrap_or("").to_string();
-                        match b["panel"].as_str() {
-                            Some(pn) => format!("{d} ({pn})"),
-                            None => d,
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",  ")
-            };
+            let bindings = row["shortcuts"].as_array().cloned().unwrap_or_default();
+            let summary_text = bindings
+                .iter()
+                .map(|b| {
+                    let d = b["display"].as_str().unwrap_or("").to_string();
+                    match b["panel"].as_str() {
+                        Some(pn) => format!("{d} ({pn})"),
+                        None => d,
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(",  ");
+
+            // Check pill × buttons first so they don't get swallowed by the cell click
+            let mut pill_x_clicked = false;
             let cresp = ui.interact(cell, egui::Id::unique(("shortcut-cell", &id)), Sense::click());
             if recording {
-                ui.painter().rect(cell, 3.0, t.field_bg, Stroke::new(1.5, t.accent), StrokeKind::Inside);
-            } else if cresp.hovered() {
-                ui.painter().rect_stroke(cell, 3.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
+                ui.painter().rect(cell, 4.0, t.field_bg, Stroke::new(1.5, MOD_KEY), StrokeKind::Inside);
+                ui.painter().with_clip_rect(cell).text(
+                    cell.left_center() + vec2(6.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    tl!("Type a shortcut… (Esc cancels)"),
+                    Tokens::ui(12.0),
+                    MOD_KEY,
+                );
+            } else {
+                if cresp.hovered() {
+                    ui.painter().rect_stroke(cell, 4.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
+                }
+                let mut px = cell.min.x + 2.0;
+                for (bi, b) in bindings.iter().enumerate() {
+                    let disp = b["display"].as_str().unwrap_or("");
+                    let panel = b["panel"].as_str();
+                    let label = match panel {
+                        Some(pn) => format!("{disp} ({pn})"),
+                        None => disp.to_string(),
+                    };
+                    let text_w = ui.fonts_mut(|f| f.layout_no_wrap(label.clone(), Tokens::ui(11.5), Color32::WHITE).size().x);
+                    let pill_w = (text_w + 22.0).min((cell.max.x - px).max(0.0));
+                    if pill_w < 24.0 {
+                        break;
+                    }
+                    let pill = Rect::from_min_size(pos2(px, cell.min.y + 1.0), vec2(pill_w, cell.height() - 2.0));
+                    let fill = if panel.is_some() { PANEL_KEY } else { APP_KEY };
+                    ui.painter().rect_filled(pill, 4.0, fill.gamma_multiply(0.85));
+                    ui.painter().with_clip_rect(pill).text(pill.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, &label, Tokens::ui(11.5), Color32::WHITE);
+                    let xr = Rect::from_min_size(pos2(pill.max.x - 16.0, pill.min.y), vec2(15.0, pill.height()));
+                    let xresp = ui.interact(xr, egui::Id::unique(("shortcut-rm", &id, bi)), Sense::click());
+                    ui.painter().text(
+                        xr.center(),
+                        Align2::CENTER_CENTER,
+                        "×",
+                        Tokens::semibold(11.5),
+                        if xresp.hovered() { Color32::WHITE } else { Color32::from_white_alpha(180) },
+                    );
+                    if xresp.clicked() {
+                        pill_x_clicked = true;
+                        unbind = Some((id.clone(), b["keys"].as_str().unwrap_or("").to_string(), panel.map(str::to_string)));
+                    }
+                    px += pill_w + 4.0;
+                }
             }
-            ui.painter().text(cell.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, &text, Tokens::ui(12.5), if recording { t.accent } else { t.hot_text });
-            app.auto.add(&format!("shortcuts.cell.{id}"), cell, &text);
-            if cresp.clicked() {
+            app.auto.add(&format!("shortcuts.cell.{id}"), cell, if recording { "Type a shortcut…" } else { &summary_text });
+            if cresp.clicked() && !pill_x_clicked {
                 app.shortcut_editor.selected = Some(id.clone());
                 app.shortcut_editor.recording = Some((id.clone(), false));
             }
-            let plus = Rect::from_min_size(pos2(r.max.x - 30.0, r.min.y + 3.0), vec2(20.0, 20.0));
+            let plus = Rect::from_min_size(pos2(r.max.x - 24.0, r.min.y + 3.0), vec2(20.0, 20.0));
             let presp = ui.interact(plus, egui::Id::unique(("shortcut-add", &id)), Sense::click()).on_hover_text(tl!("Add another shortcut"));
             ui.painter().text(
                 plus.center(),
@@ -887,7 +1116,9 @@ fn command_list(app: &mut FilmcraftApp, ui: &mut egui::Ui, height: f32, t: &Toke
             ui.label(RichText::new(tl!("No matching commands")).color(t.text_dim));
         }
     });
-    let _ = plat;
+    if let Some((cmd, keys, panel)) = unbind {
+        unbind_shortcut(app, &cmd, &keys, panel.as_deref());
+    }
 }
 
 fn matches_search(row: &serde_json::Value, query: &str) -> bool {
@@ -903,14 +1134,16 @@ fn key_detail(app: &mut FilmcraftApp, ui: &mut egui::Ui, height: f32, t: &Tokens
     ui.horizontal(|ui| {
         ui.label(RichText::new(tl!("Key:")).size(13.0).strong().color(t.text));
         if let Some(k) = &key {
-            ui.label(RichText::new(key_legend(k, plat.is_mac())).size(13.0).color(t.hot_text));
+            ui.label(RichText::new(key_legend(k, plat.is_mac())).size(13.0).color(MOD_KEY));
         }
     });
     let (hr, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
-    ui.painter().text(hr.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, tl!("Modifiers"), Tokens::semibold(12.5), t.text_dim);
-    ui.painter().text(hr.left_center() + vec2(110.0, 0.0), Align2::LEFT_CENTER, tl!("Command"), Tokens::semibold(12.5), t.text_dim);
+    ui.painter().text(hr.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, tl!("Modifiers"), Tokens::semibold(12.0), t.text_dim);
+    ui.painter().text(hr.left_center() + vec2(88.0, 0.0), Align2::LEFT_CENTER, tl!("Command"), Tokens::semibold(12.0), t.text_dim);
     let list = key.as_ref().and_then(|k| app.session.execute("shortcuts.forKey", json!({"key": k})).ok()).unwrap_or_default();
-    egui::ScrollArea::vertical().id_salt("shortcuts-key").max_height(height - 90.0).auto_shrink([false, false]).show(ui, |ui| {
+    let mut unbind: Option<(String, String, Option<String>)> = None;
+    let scroll_h = (height - 130.0).max(70.0);
+    egui::ScrollArea::vertical().id_salt("shortcuts-key").max_height(scroll_h).auto_shrink([false, false]).show(ui, |ui| {
         let w = ui.available_width();
         for (i, b) in list.as_array().into_iter().flatten().enumerate() {
             let (r, _) = ui.allocate_exact_size(vec2(w, 24.0), Sense::hover());
@@ -923,13 +1156,21 @@ fn key_detail(app: &mut FilmcraftApp, ui: &mut egui::Ui, height: f32, t: &Tokens
                 let m = d.trim_end_matches(&legend).trim_end_matches(c.key).trim_end_matches('+').to_string();
                 if m.is_empty() { tl!("None").to_string() } else { m }
             });
-            ui.painter().text(r.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, mods.unwrap_or_default(), Tokens::ui(12.5), t.text);
+            ui.painter().text(r.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, mods.unwrap_or_default(), Tokens::ui(12.0), t.text_dim);
             let cmd = b["command"].as_str().unwrap_or("");
-            let label = match b["panel"].as_str() {
+            let panel = b["panel"].as_str();
+            let label = match panel {
                 Some(p) => format!("{} ({p})", label_of(app, cmd)),
                 None => label_of(app, cmd),
             };
-            ui.painter().text(r.left_center() + vec2(110.0, 0.0), Align2::LEFT_CENTER, label, Tokens::ui(12.5), t.text);
+            let cmd_clip = Rect::from_min_max(pos2(r.min.x + 88.0, r.min.y), pos2(r.max.x - 22.0, r.max.y));
+            ui.painter().with_clip_rect(cmd_clip).text(r.left_center() + vec2(88.0, 0.0), Align2::LEFT_CENTER, label, Tokens::ui(12.0), t.text);
+            let xr = Rect::from_min_size(pos2(r.max.x - 20.0, r.min.y + 2.0), vec2(18.0, 20.0));
+            let xresp = ui.interact(xr, egui::Id::unique(("key-detail-rm", i)), Sense::click()).on_hover_text(tl!("Remove shortcut"));
+            ui.painter().text(xr.center(), Align2::CENTER_CENTER, "×", Tokens::semibold(12.0), if xresp.hovered() { Color32::WHITE } else { t.text_faint });
+            if xresp.clicked() {
+                unbind = Some((cmd.to_string(), keys.to_string(), panel.map(str::to_string)));
+            }
         }
         if key.is_some() && list.as_array().is_none_or(|a| a.is_empty()) {
             ui.label(RichText::new(tl!("Nothing is assigned to this key")).color(t.text_dim));
@@ -938,14 +1179,24 @@ fn key_detail(app: &mut FilmcraftApp, ui: &mut egui::Ui, height: f32, t: &Tokens
             ui.label(RichText::new(tl!("Click a key on the keyboard to see its shortcuts")).color(t.text_dim));
         }
     });
+    if let Some((cmd, keys, panel)) = unbind {
+        unbind_shortcut(app, &cmd, &keys, panel.as_deref());
+    }
     // assign the selected command to the clicked key with the selected modifiers
     if let (Some(k), Some(cmd)) = (key, app.shortcut_editor.selected.clone()) {
+        ui.add_space(4.0);
         let keys = format!("{}{}", app.shortcut_editor.mods.prefix(), k);
         let disp = Chord::parse(&keys).map(|c| c.display(plat)).unwrap_or(keys.clone());
         let label = tlf!("Assign {key} to {command}", key = disp, command = label_of(app, &cmd));
         if small_button(app, ui, "shortcuts.assignKey", &label, true) {
             assign(app, &cmd, &keys, false);
         }
+    }
+    if let Some(sel) = app.shortcut_editor.selected.clone() {
+        ui.add_space(6.0);
+        ui.separator();
+        ui.label(RichText::new(label_of(app, &sel)).size(12.5).strong().color(t.text));
+        ui.label(RichText::new(sel).size(11.0).color(t.text_dim));
     }
 }
 

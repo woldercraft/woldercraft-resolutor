@@ -1363,7 +1363,8 @@ mod tests {
         a
     };
     static FAKE_TOPOLOGY: Topology = Topology { outline: &FAKE_OUTLINE, landmarks: &FAKE_LANDMARKS };
-    static FAKE_INFO: crate::effectcraft_segment::ModelInfo = crate::effectcraft_segment::ModelInfo { id: "fake", name: "Fake", ..crate::effectcraft_segment::FACE_LANDMARKER };
+    static FAKE_INFO: crate::effectcraft_segment::ModelInfo =
+        crate::effectcraft_segment::ModelInfo { id: "fake", name: "Fake", ..crate::effectcraft_segment::FACE_LANDMARKER };
 
     impl Fake {
         fn face(t: usize) -> Face {

@@ -346,20 +346,18 @@ fn speed_duration_from_the_clip_menu_opens_the_dialog() {
     assert_eq!(got.time_interpolation, filmcraft_project::TimeInterpolation::FrameBlending);
 }
 
-/// The Properties panel's speed footer opens Clip ▸ Speed/Duration… on click instead of doing
-/// nothing; Cancel leaves the clip alone.
+/// Clip ▸ Speed/Duration… opens from the menu and Cancel leaves the clip alone; the Inspector Video
+/// panel shows its inline Speed section cleanly alongside.
 #[test]
 fn the_properties_speed_button_opens_the_speed_dialog() {
     let mut d = Driver::new();
     let c = d.v1(0);
     d.exec("timeline.select", json!({"clips": [c.id.0]}));
-    d.ok("ui.panel.show", json!({"panel": "Properties"}));
+    d.app().ui.expanded_fx.push("props:Speed".into());
+    d.ok("ui.panel.show", json!({"panel": "InspectorVideo"}));
     d.frames(3);
-    assert!(d.has("properties.speed"), "the speed button is laid out");
-    // the demo project's panel is short: the footer sits below the fold (#1322)
-    d.ok("ui.scroll", json!({"id": "panel.Properties", "dy": -2000.0}));
-    d.frames(3);
-    d.click("properties.speed");
+    assert!(d.has("panel.InspectorVideo"), "the video inspector is laid out");
+    d.menu("clip.speedDuration");
     let dlg = d.app().ui.clip_dialog.clone().expect("the dialog opened");
     assert_eq!(dlg.command, "clip.speedDuration");
     assert_eq!(dlg.params["speed"], json!(100.0), "starts at the clip's speed");

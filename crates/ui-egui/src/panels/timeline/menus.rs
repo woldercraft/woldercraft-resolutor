@@ -60,6 +60,7 @@ pub(crate) const CLIP_MENU: &[&[(&str, &str)]] = &[
         ("Scene Edit Detection…", "clip.sceneEditDetection"),
         ("Audio Gain…", "clip.audioGain"),
         ("Remove Silence…", "clip.removeSilence"),
+        ("Generate Audio Waveform", "clip.generateAudioWaveform"),
     ],
     &[
         ("Frame Hold Options…", "clip.frameHoldOptions"),

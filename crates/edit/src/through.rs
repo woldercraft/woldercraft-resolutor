@@ -201,6 +201,8 @@ mod tests {
             source_channels: Vec::new(),
             audio_stream: 0,
             graphic: None,
+            color_graph: None,
+            vfx_graph: None,
         }
     }
 

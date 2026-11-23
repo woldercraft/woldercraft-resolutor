@@ -100,9 +100,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if appearance.clicked() {
         crate::panels::settings::cycle_appearance(app, ui.ctx());
     }
-    let ws_resp = btn(ui, Icon::Workspaces, "workspaces", tl!("Workspaces"), app);
-    // workspace name (caps)
-    let ws = crate::i18n::to_uppercase(crate::i18n::t(&app.ui.workspace));
+    let ws_resp = btn(ui, Icon::Workspaces, "workspaces", tl!("Layout Presets"), app);
+    // active layout preset name (caps), or "PRESETS" when empty
+    let preset_label = if app.ui.active_preset.is_empty() { tl!("Layout Presets").to_string() } else { app.ui.active_preset.clone() };
+    let ws = crate::i18n::to_uppercase(&preset_label);
     let wg = p.layout_no_wrap(ws.clone(), Tokens::ui(11.0), t.text_dim);
     let wr = Rect::from_min_size(pos2(rx - wg.size().x + 10.0, rect.center().y - 10.0), vec2(wg.size().x + 8.0, 20.0));
     let wresp = ui.interact(wr, egui::Id::unique("hdr-ws-name"), Sense::click());
@@ -114,9 +115,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let insp_g = p.layout_no_wrap(insp_label.to_string(), Tokens::semibold(11.0), if insp_open { Color32::WHITE } else { t.text_dim });
     let insp_w = insp_g.size().x + 20.0;
     let insp_r = Rect::from_min_size(pos2(wr.min.x - insp_w - 10.0, rect.center().y - 11.0), vec2(insp_w, 22.0));
-    let insp_resp = ui
-        .interact(insp_r, egui::Id::unique("hdr-inspector"), Sense::click())
-        .on_hover_text(tl!("Show or hide the Inspector (Video / Audio / Properties)"));
+    let insp_resp =
+        ui.interact(insp_r, egui::Id::unique("hdr-inspector"), Sense::click()).on_hover_text(tl!("Show or hide the Inspector (Video / Audio / Properties)"));
     app.auto.add("header.inspector", insp_r, insp_label);
     let insp_bg = if insp_open {
         if insp_resp.hovered() { t.accent_hover } else { t.accent.gamma_multiply(0.85) }
@@ -126,12 +126,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         t.tl_header_bg
     };
     ui.painter().rect_filled(insp_r, 4.0, insp_bg);
-    ui.painter().rect_stroke(
-        insp_r,
-        4.0,
-        Stroke::new(1.0, if insp_open { t.accent } else { t.separator }),
-        egui::StrokeKind::Inside,
-    );
+    ui.painter().rect_stroke(insp_r, 4.0, Stroke::new(1.0, if insp_open { t.accent } else { t.separator }), egui::StrokeKind::Inside);
     ui.painter().galley(
         pos2(insp_r.center().x - insp_g.size().x * 0.5, insp_r.center().y - insp_g.size().y * 0.5),
         insp_g,
@@ -144,18 +139,18 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Localized menus and user titles can be wider than English. Use the actual gap.
     let left = left_end + 12.0;
     let right = insp_r.min.x - 12.0;
-        if right > left + 40.0 {
-            let mut job = egui::text::LayoutJob::simple_singleline(title, Tokens::ui(14.0), t.tab_text_active);
-            job.wrap.max_width = right - left;
-            job.wrap.max_rows = 1;
-            let galley = p.layout_job(job);
-            let half = galley.size().x / 2.0;
-            let center = if rect.center().x - half >= left && rect.center().x + half <= right { rect.center().x } else { (left + right) / 2.0 };
-            p.with_clip_rect(Rect::from_min_max(pos2(left, rect.min.y), pos2(right, rect.max.y))).galley(
-                pos2(center - half, rect.center().y - galley.size().y / 2.0),
-                galley,
-                t.tab_text_active,
-            );
+    if right > left + 40.0 {
+        let mut job = egui::text::LayoutJob::simple_singleline(title, Tokens::ui(14.0), t.tab_text_active);
+        job.wrap.max_width = right - left;
+        job.wrap.max_rows = 1;
+        let galley = p.layout_job(job);
+        let half = galley.size().x / 2.0;
+        let center = if rect.center().x - half >= left && rect.center().x + half <= right { rect.center().x } else { (left + right) / 2.0 };
+        p.with_clip_rect(Rect::from_min_max(pos2(left, rect.min.y), pos2(right, rect.max.y))).galley(
+            pos2(center - half, rect.center().y - galley.size().y / 2.0),
+            galley,
+            t.tab_text_active,
+        );
     }
     let popup_id = egui::Id::unique("workspaces-popup");
     if ws_resp.clicked() || wresp.clicked() {
@@ -168,31 +163,49 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
                     ui.set_min_width(220.0);
-                    for w in crate::dock::names(&app.workspaces) {
-                        let sel = app.ui.workspace == w;
-                        if ui.selectable_label(sel, crate::i18n::t(&w)).clicked() {
-                            app.set_workspace(&w);
-                            ui.ctx().data_mut(|d| d.insert_temp(popup_id, false));
+                    let preset_names = crate::dock::preset_names(&app.header_presets);
+                    if preset_names.is_empty() {
+                        ui.add_enabled(false, egui::Label::new(tl!("No saved presets")));
+                    } else {
+                        for p_name in &preset_names {
+                            let sel = app.ui.active_preset == *p_name;
+                            if ui.selectable_label(sel, p_name).clicked() {
+                                app.apply_header_preset(p_name);
+                                ui.ctx().data_mut(|d| d.insert_temp(popup_id, false));
+                            }
                         }
                     }
                     ui.separator();
-                    // the actions of Window ▸ Workspaces, as in Premiere's workspace menu
-                    let actions = [
-                        ("reset", tl!("Reset to Saved Layout")),
-                        ("saveChanges", tl!("Save Changes to this Workspace")),
-                        ("saveAs", tl!("Save as New Workspace…")),
-                        ("edit", tl!("Edit Workspaces…")),
-                    ];
-                    for (action, label) in actions {
-                        let resp = ui.button(label);
-                        app.auto.add(&format!("header.workspaces.{action}"), resp.rect, label);
-                        if resp.clicked() {
+                    let has_active = !app.ui.active_preset.is_empty() && app.header_presets.saved.iter().any(|s| s.name == app.ui.active_preset);
+                    if has_active {
+                        let reset_resp = ui.button(tl!("Reset Preset"));
+                        app.auto.add("header.presets.reset", reset_resp.rect, tl!("Reset Preset"));
+                        if reset_resp.clicked() {
+                            let active = app.ui.active_preset.clone();
+                            app.apply_header_preset(&active);
                             ui.ctx().data_mut(|d| d.insert_temp(popup_id, false));
-                            let ctx = ui.ctx().clone();
-                            if let Err(e) = crate::menus::invoke(app, &ctx, &format!("window.workspace.{action}"), serde_json::json!({})) {
+                        }
+                        let save_resp = ui.button(tl!("Save Changes to this Preset"));
+                        app.auto.add("header.presets.saveChanges", save_resp.rect, tl!("Save Changes to this Preset"));
+                        if save_resp.clicked() {
+                            let active = app.ui.active_preset.clone();
+                            if let Err(e) = crate::panels::workspaces::save_header_preset(app, &active) {
                                 app.ui.status = e;
                             }
+                            ui.ctx().data_mut(|d| d.insert_temp(popup_id, false));
                         }
+                    }
+                    let save_as_resp = ui.button(tl!("Save as New Preset…"));
+                    app.auto.add("header.presets.saveAs", save_as_resp.rect, tl!("Save as New Preset…"));
+                    if save_as_resp.clicked() {
+                        app.ui.preset_dialog = Some(crate::state::WorkspaceDialog::SaveAs { name: tl!("Untitled Preset").into() });
+                        ui.ctx().data_mut(|d| d.insert_temp(popup_id, false));
+                    }
+                    let edit_resp = ui.add_enabled(!preset_names.is_empty(), egui::Button::new(tl!("Edit Presets…")));
+                    app.auto.add("header.presets.edit", edit_resp.rect, tl!("Edit Presets…"));
+                    if edit_resp.clicked() {
+                        app.ui.preset_dialog = Some(crate::state::WorkspaceDialog::Edit { selected: None, name: String::new() });
+                        ui.ctx().data_mut(|d| d.insert_temp(popup_id, false));
                     }
                 });
             });

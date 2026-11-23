@@ -1033,12 +1033,16 @@ fn remove_silence_persists_preferences() {
     assert_eq!(s.prefs.silence.pre_head, crate::sequence_tools::DEFAULT_PRE_HEAD_FRAMES);
 
     // Run removeSilence with custom parameters
-    s.execute("sequence.removeSilence", json!({
-        "threshold": -24.5,
-        "preHead": 5,
-        "postTail": 7,
-        "minStrip": 15,
-    })).unwrap();
+    s.execute(
+        "sequence.removeSilence",
+        json!({
+            "threshold": -24.5,
+            "preHead": 5,
+            "postTail": 7,
+            "minStrip": 15,
+        }),
+    )
+    .unwrap();
 
     // Verify preferences were updated
     assert_eq!(s.prefs.silence.threshold, -24.5);

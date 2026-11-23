@@ -8,7 +8,6 @@
 //!   (pixels/second), evaluated through an arc-length table.
 //! * Auto-Bezier and continuous-Bezier keys derive their tangents from their neighbours.
 
-
 pub mod text_doc;
 pub mod value;
 

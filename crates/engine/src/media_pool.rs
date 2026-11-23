@@ -316,12 +316,7 @@ impl MediaPool {
     }
 
     fn item_open_lock(&self, item: ItemId) -> Arc<Mutex<()>> {
-        self.opening
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(item)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+        self.opening.lock().unwrap_or_else(|e| e.into_inner()).entry(item).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     }
 
     fn resolve(&self, p: &Project, item: ItemId, services: &dyn Services, proxies: bool) -> Option<SharedSource> {
