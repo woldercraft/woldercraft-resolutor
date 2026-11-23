@@ -345,13 +345,18 @@ fn rounded_rectangle_masks_cut_their_corners() {
     let r = s.execute("masks.roundCorners", json!({"radius": 200})).unwrap();
     assert_eq!(r["corners"], 4);
     assert_eq!(s.render_program(0.25).unwrap().px, img.px, "rounding afterwards = creating rounded");
-    // nothing left to round; bad radii are refused without changing the mask
-    assert!(s.execute("masks.roundCorners", json!({"radius": 50})).is_err());
-    for radius in [json!(0), json!(-5), json!("big"), json!(null)] {
+    // re-editable corner radius: re-rounding to 50 and back to 0 updates without failing;
+    // bad radii are refused without changing the mask
+    assert_eq!(s.execute("masks.roundCorners", json!({"radius": 50})).unwrap()["corners"], 4);
+    assert_eq!(s.execute("masks.roundCorners", json!({"radius": 0})).unwrap()["corners"], 4);
+    assert_eq!(s.render_program(0.25).unwrap().px, sharp.px, "radius 0 restores sharp corners");
+    for radius in [json!(-5), json!("big"), json!(null)] {
         assert!(s.execute("masks.roundCorners", json!({"radius": radius})).is_err(), "{radius}");
     }
     s.undo();
-    assert_eq!(s.render_program(0.25).unwrap().px, sharp.px, "one undo step restores the sharp corners");
+    s.undo();
+    s.undo();
+    assert_eq!(s.render_program(0.25).unwrap().px, sharp.px, "undo restores the sharp corners");
 }
 
 #[test]

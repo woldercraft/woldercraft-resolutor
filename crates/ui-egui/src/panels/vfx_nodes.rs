@@ -1,867 +1,1252 @@
-//! DaVinci Resolve / Fusion-style VFX Node Pipeline panel (`PanelKind::VfxNodes`).
+//! DaVinci Resolve / Fusion-style VFX Compositing Node Graph Editor (`VfxNodes`).
 //!
-//! Visualizes the active clip's visual effects stack (EffectCraft VFX `"ec.*"` and standard
-//! video effects) as an interactive serial node chain:
-//! `[ IN ] ──► [ 01: Glow ] ──► [ 02: Turbulent Displace ] ──► ... ──► [ OUT ]`
-//!
-//! Clicking a node selects it in `Effect Controls` (`effects.select`) and reveals its interactive
-//! 2D gizmos on the `Program Monitor`. Effects dragged from the `Effects` library panel can also
-//! be dropped directly onto the node graph canvas to append them to the chain.
-//!
-//! Keyboard shortcuts:
-//! - `Alt + S`: Add Quick VFX Node (Glow)
-//! - `Ctrl + D` / `Cmd + D`: Bypass Active Node
-//! - `Shift + D`: Bypass All VFX Nodes
-//! - `Delete` / `Backspace`: Delete Active Node
-//! - `Alt + Home`: Reset Active Node
-//! - `Alt + F` / `Z`: Fit all nodes to canvas (Ajustar)
-//! - `Ctrl + =` / `Ctrl + +`: Zoom In
-//! - `Ctrl + -`: Zoom Out
-//! - `Ctrl + 0`: Reset Zoom (100%)
+//! Renders and edits [`filmcraft_project::VfxGraph`] with:
+//! - Colored Fusion ports (Yellow `Main`/BG, Green `Foreground`, Blue `EffectMask`, White `Output`)
+//! - Live wire dragging (`vfxGraph.connect` / `vfxGraph.disconnect`), `Shift+Drag` splice & extract
+//!   (`vfxGraph.insertOnEdge` / `vfxGraph.extractNode`), and `Ctrl+Shift+Drag` knife wire cutting
+//! - Floating `Shift+Space` *Select Tool* fuzzy finder, `Ctrl+P` Pass-Through, `Ctrl+T` Swap Merge,
+//!   `F2` Rename, `1`/`2` Viewer dots, `Underlays`, and green dashed `Instance` links
+//! - Toggleable integrated bottom `Keyframes` / `Spline` drawer strictly isolated to the active node
 
-use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
-use filmcraft_project::{ClipId, EffectDef, EffectInstance, EffectKind};
+use std::collections::HashMap;
+
+use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
+use filmcraft_engine::EffectSel;
+use filmcraft_project::{
+    ClipId, EffectKind, Param, ParamValue, TrackKind, VfxEdge, VfxEndpoint, VfxGraph, VfxInputSlot, VfxNode, VfxNodeId, VfxNodeKind, VfxPortKind,
+};
+use filmcraft_time::Tick;
 use serde_json::json;
 
 use crate::FilmcraftApp;
-use crate::panels::lumetri::active_color_clip;
 use crate::theme::Tokens;
 
-/// Featured EffectCraft VFX quick-add presets shown in the `+ VFX` popup menu.
-const QUICK_VFX_PRESETS: &[(&str, &str, &str)] = &[
-    ("ec.stylize.glow", "Glow", "Stylize"),
-    ("ec.blur.gaussian", "Gaussian Blur", "Blur & Sharpen"),
-    ("ec.distort.turbulentdisplace", "Turbulent Displace", "Distort"),
-    ("ec.color.colorama", "Colorama", "Color Correction"),
-    ("ec.perspective.dropshadow", "Drop Shadow", "Perspective"),
-    ("ec.generate.lensflare", "Lens Flare", "Generate"),
-    ("ec.noise.fractal", "Fractal Noise", "Noise & Grain"),
-    ("ec.sim.ccparticleworld", "Particle World", "Simulation"),
-    ("ec.keying.keylight", "Keylight (1.2)", "Keying"),
-    ("ec.time.echo", "Echo", "Time"),
-    ("ec.distort.opticscompensation", "Optics Compensation", "Distort"),
-    ("ec.stylize.findedges", "Find Edges", "Stylize"),
-];
+const NODE_W: f32 = 164.0;
+const NODE_H: f32 = 64.0;
+const ROUTER_R: f32 = 14.0;
+const IO_W: f32 = 88.0;
+const IO_H: f32 = 46.0;
 
-/// Compute category & capability badges for a VFX node card.
-fn detect_vfx_badges(e: &EffectInstance, def: &EffectDef) -> Vec<(&'static str, &'static str)> {
-    let mut badges = Vec::new();
-    let sub = def.category.get(1).copied().unwrap_or("");
-    let cat_badge = match sub {
-        "Blur & Sharpen" => ("BLUR", "Blur & Sharpen"),
-        "Stylize" | "Lights & Glows" => ("STYL", "Stylize / Glow"),
-        "Distort" => ("DIST", "Distort"),
-        "Color Correction" => ("COL", "Color Correction"),
-        "Generate" => ("GEN", "Generate"),
-        "Keying" | "Matte" => ("KEY", "Keying & Matte"),
-        "Simulation" => ("SIM", "Simulation"),
-        "Perspective" => ("3D", "Perspective"),
-        "Noise & Grain" => ("NOIS", "Noise & Grain"),
-        "Time" => ("TIME", "Time"),
-        "Transition" => ("TRNS", "Transition"),
-        "Channel" | "3D Channel" => ("CHN", "Channel"),
-        _ => ("VFX", "Visual Effect"),
-    };
-    badges.push(cat_badge);
+const COL_MAIN: Color32 = Color32::from_rgb(234, 179, 8); // Yellow
+const COL_FG: Color32 = Color32::from_rgb(34, 197, 94); // Green
+const COL_MASK: Color32 = Color32::from_rgb(59, 130, 246); // Blue
+const COL_OUT: Color32 = Color32::from_rgb(235, 240, 248); // White
 
-    if e.effect.starts_with("ec.") {
-        badges.push(("EC", "EffectCraft VFX Engine"));
-    }
-    if def.accelerated {
-        badges.push(("GPU", "GPU Accelerated"));
-    } else if def.float32 {
-        badges.push(("32f", "32-bit Float Pipeline"));
-    }
-    if e.params.values().any(|p| p.is_animated() || !p.keyframes.is_empty()) {
-        badges.push(("KF", "Animated Keyframes"));
-    }
-    if !e.masks.is_empty() {
-        badges.push(("MSK", "Effect Mask"));
-    }
-    badges
+#[derive(Clone, Copy, Debug)]
+struct PendingVfxWire {
+    from: VfxEndpoint,
+    kind: VfxPortKind,
+    start_pos: Pos2,
 }
 
-/// Draw a smooth cubic bezier connection line between two pins.
-fn draw_bezier_wire(painter: &egui::Painter, p0: Pos2, p1: Pos2, stroke: Stroke) {
-    let (c0, c1) = if p1.x >= p0.x {
-        let dx = ((p1.x - p0.x) * 0.55).max(30.0);
-        (pos2(p0.x + dx, p0.y), pos2(p1.x - dx, p1.y))
-    } else {
-        let dy = (p1.y - p0.y).abs();
-        let bend_x = (dy * 0.35).max(50.0);
-        (pos2(p0.x + bend_x, p0.y + dy * 0.2), pos2(p1.x - bend_x, p1.y - dy * 0.2))
-    };
-    let steps = 28;
+#[derive(Clone, Copy, Debug)]
+struct KnifeCut {
+    start: Pos2,
+    current: Pos2,
+}
+
+#[derive(Clone, Debug)]
+struct SelectToolPopup {
+    open: bool,
+    query: String,
+    after_node: Option<u64>,
+}
+
+/// Distance from point `p` to a horizontal-tangent cubic Bézier wire from `p0` to `p3`.
+/// Shared with `color_nodes.rs` for hit-testing and wire splicing.
+pub(crate) fn bezier_wire_distance(p: Pos2, p0: Pos2, p3: Pos2, steps: usize) -> f32 {
+    let n = steps.max(4);
+    let dx = ((p3.x - p0.x).abs() * 0.45).max(32.0);
+    let p1 = Pos2::new(p0.x + dx, p0.y);
+    let p2 = Pos2::new(p3.x - dx, p3.y);
     let mut prev = p0;
-    for i in 1..=steps {
-        let t = i as f32 / steps as f32;
-        let u = 1.0 - t;
-        let p = pos2(
-            u * u * u * p0.x + 3.0 * u * u * t * c0.x + 3.0 * u * t * t * c1.x + t * t * t * p1.x,
-            u * u * u * p0.y + 3.0 * u * u * t * c0.y + 3.0 * u * t * t * c1.y + t * t * t * p1.y,
-        );
-        painter.line_segment([prev, p], stroke);
-        prev = p;
+    let mut best = f32::MAX;
+    for i in 1..=n {
+        let t = i as f32 / n as f32;
+        let cur = eval_cubic_bezier(p0, p1, p2, p3, t);
+        best = best.min(point_segment_distance(p, prev, cur));
+        prev = cur;
     }
+    best
 }
 
-/// Select a VFX node and focus it in `Effect Controls`.
-fn select_vfx_node(app: &mut FilmcraftApp, clip: ClipId, node_idx: usize, fx_idx: usize) {
-    app.ui.active_vfx_node = node_idx;
-    for key in [format!("ec:{}:{fx_idx}", clip.0), format!("props:fx:{}:{fx_idx}", clip.0)] {
-        if !app.ui.expanded_fx.contains(&key) {
-            app.ui.expanded_fx.push(key);
-        }
+/// True if line segments `(a0, a1)` and `(b0, b1)` intersect. Shared with `color_nodes.rs`.
+pub(crate) fn segments_intersect(a0: Pos2, a1: Pos2, b0: Pos2, b1: Pos2) -> bool {
+    let cross = |o: Pos2, a: Pos2, b: Pos2| (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    let d1 = cross(a0, a1, b0);
+    let d2 = cross(a0, a1, b1);
+    let d3 = cross(b0, b1, a0);
+    let d4 = cross(b0, b1, a1);
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0)) && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0)) {
+        return true;
     }
-    let _ = app.session.execute("effects.select", json!({"clip": clip.0, "effect": fx_idx}));
-}
-
-/// Accept an effect dropped from the `Effects` library panel onto the VFX Nodes canvas.
-fn handle_effect_drop(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, clip: ClipId, next_node_idx: usize) {
-    let Some(effect) = crate::panels::dragged_effect(ui) else { return };
-    let is_transition = filmcraft_project::find_effect(&effect).is_some_and(|d| matches!(d.kind, EffectKind::VideoTransition | EffectKind::AudioTransition));
-    let ctx = ui.ctx().clone();
-    let over = ctx.pointer_hover_pos().is_some_and(|p| rect.contains(p) && ctx.layer_id_at(p) == Some(ui.layer_id()));
-    if is_transition || !over {
-        return;
-    }
-    app.auto.add("vfx_nodes.dropTarget", rect, "drop an effect here");
-    ui.painter().rect_stroke(rect.shrink(1.0), 3.0, Stroke::new(2.0, Color32::from_rgb(130, 100, 255)), StrokeKind::Inside);
-    if !ctx.input(|i| i.pointer.any_released()) {
-        return;
-    }
-    let res = if let Some(name) = effect.strip_prefix("preset:") {
-        app.session.execute("presets.apply", json!({"preset": name, "clips": [clip.0]}))
-    } else {
-        app.session.execute("effects.apply", json!({"effect": effect, "clips": [clip.0]}))
+    let on_seg = |o: Pos2, a: Pos2, p: Pos2| {
+        p.x >= o.x.min(a.x) - 1e-3 && p.x <= o.x.max(a.x) + 1e-3 && p.y >= o.y.min(a.y) - 1e-3 && p.y <= o.y.max(a.y) + 1e-3
     };
-    match res {
-        Ok(v) => {
-            if let Some(fx_idx) = v["applied"].as_array().and_then(|a| a.first()).and_then(|e| e["index"].as_u64()) {
-                select_vfx_node(app, clip, next_node_idx, fx_idx as usize);
-            }
-        }
-        Err(e) => app.ui.status = e.to_string(),
-    }
-    crate::panels::clear_drag(ui);
+    (d1.abs() < 1e-3 && on_seg(a0, a1, b0))
+        || (d2.abs() < 1e-3 && on_seg(a0, a1, b1))
+        || (d3.abs() < 1e-3 && on_seg(b0, b1, a0))
+        || (d4.abs() < 1e-3 && on_seg(b0, b1, a1))
 }
 
-pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
-    let t = app.tokens;
-
-    // Outer frame with dark background
-    ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(20, 22, 26));
-
-    let Some((clip, it)) = active_color_clip(app) else {
-        crate::dock::placeholder(ui, rect, &t, tl!("(no clip selected)"));
-        return;
-    };
-
-    // Collect all non-intrinsic video effects (excluding Lumetri which belongs to Color Nodes)
-    let vfx_effects: Vec<(usize, &EffectInstance, &'static EffectDef)> = it
-        .effects
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, e)| {
-            let def = e.def()?;
-            (!def.intrinsic && def.kind == EffectKind::Video && e.effect != "lumetri").then_some((idx, e, def))
-        })
-        .collect();
-
-    let node_count = vfx_effects.len();
-
-    // Sync active_vfx_node if the user selected an effect inside Effect Controls
-    if let Some(sel_idx) = app.session.state.selected_effect.as_ref().filter(|s| s.clip == clip).and_then(|s| s.index(&it.effects))
-        && let Some(pos) = vfx_effects.iter().position(|(idx, _, _)| *idx == sel_idx)
-    {
-        app.ui.active_vfx_node = pos;
-    }
-
-    let active_node = if node_count == 0 { 0 } else { app.ui.active_vfx_node.min(node_count - 1) };
-    app.ui.active_vfx_node = active_node;
-
-    handle_effect_drop(app, ui, rect, clip, node_count);
-
-    // Handle Keyboard Shortcuts when typing isn't active
-    let mut add_fx_id: Option<&'static str> = None;
-    let mut bypass_active = false;
-    let mut bypass_all = false;
-    let mut delete_active = false;
-    let mut reset_active = false;
-    let mut fit_view = false;
-    let mut zoom_in_action = false;
-    let mut zoom_out_action = false;
-    let mut zoom_reset_action = false;
-
-    if !ui.ctx().egui_wants_keyboard_input() && ui.rect_contains_pointer(rect) {
-        ui.input(|i| {
-            if i.modifiers.alt && i.key_pressed(egui::Key::S) {
-                add_fx_id = Some("ec.stylize.glow");
-            } else if (i.modifiers.command || i.modifiers.ctrl) && !i.modifiers.shift && i.key_pressed(egui::Key::D) {
-                bypass_active = true;
-            } else if i.modifiers.shift && i.key_pressed(egui::Key::D) {
-                bypass_all = true;
-            } else if (i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) && node_count > 0 {
-                delete_active = true;
-            } else if i.modifiers.alt && i.key_pressed(egui::Key::Home) {
-                reset_active = true;
-            } else if (i.modifiers.alt && i.key_pressed(egui::Key::F)) || i.key_pressed(egui::Key::Z) {
-                fit_view = true;
-            } else if (i.modifiers.command || i.modifiers.ctrl) && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals)) {
-                zoom_in_action = true;
-            } else if (i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(egui::Key::Minus) {
-                zoom_out_action = true;
-            } else if (i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(egui::Key::Num0) {
-                zoom_reset_action = true;
-            }
-        });
-    }
-
-    let mut act = VfxActions { fit_view, zoom_in_action, zoom_out_action, zoom_reset_action };
-    let toolbar_r = render_vfx_toolbar(
-        app,
-        ui,
-        rect,
-        clip,
-        &it.name,
-        &vfx_effects,
-        active_node,
-        (&mut add_fx_id, &mut bypass_active, &mut bypass_all, &mut reset_active, &mut delete_active, &mut act),
-    );
-    fit_view = act.fit_view;
-    zoom_in_action = act.zoom_in_action;
-    zoom_out_action = act.zoom_out_action;
-    zoom_reset_action = act.zoom_reset_action;
-
-    if execute_vfx_actions(app, clip, &vfx_effects, active_node, add_fx_id, bypass_active, bypass_all, reset_active, delete_active) {
-        return;
-    }
-
-    // Canvas Area
-    let canvas_r = Rect::from_min_max(pos2(rect.min.x, toolbar_r.max.y), rect.max);
-    if canvas_r.width() < 10.0 || canvas_r.height() < 10.0 {
-        return;
-    }
-
-    handle_vfx_zoom_pan(app, ui, canvas_r, clip.0, node_count, zoom_in_action, zoom_out_action, zoom_reset_action);
-
-    if node_count == 0 {
-        let painter = ui.painter_at(canvas_r).with_clip_rect(canvas_r);
-        let center = canvas_r.center();
-        painter.text(
-            pos2(center.x, center.y - 22.0),
-            Align2::CENTER_CENTER,
-            tl!("No VFX nodes on active clip — double-click or drag an effect from the Effects panel"),
-            Tokens::ui(12.5),
-            t.text_dim,
-        );
-        let btn_r = Rect::from_center_size(pos2(center.x, center.y + 15.0), vec2(200.0, 30.0));
-        let btn_resp = ui.interact(btn_r, egui::Id::unique("init_vfx_node_btn"), Sense::click());
-        app.auto.add("vfx_nodes.init_node", btn_r, "Add Initial VFX Node");
-        if btn_resp.hovered() {
-            painter.rect_filled(btn_r, 4.0, t.hover);
-        } else {
-            painter.rect_filled(btn_r, 4.0, Color32::from_rgba_unmultiplied(120, 85, 240, 48));
+/// True if a horizontal-tangent cubic Bézier wire `(p0 -> p3)` intersects line segment `(s0, s1)`.
+/// Shared with `color_nodes.rs` for `Ctrl+Shift+Drag` knife wire cutting.
+pub(crate) fn bezier_intersects_segment(p0: Pos2, p3: Pos2, s0: Pos2, s1: Pos2, steps: usize) -> bool {
+    let n = steps.max(6);
+    let dx = ((p3.x - p0.x).abs() * 0.45).max(32.0);
+    let p1 = Pos2::new(p0.x + dx, p0.y);
+    let p2 = Pos2::new(p3.x - dx, p3.y);
+    let mut prev = p0;
+    for i in 1..=n {
+        let t = i as f32 / n as f32;
+        let cur = eval_cubic_bezier(p0, p1, p2, p3, t);
+        if segments_intersect(prev, cur, s0, s1) {
+            return true;
         }
-        painter.rect_stroke(btn_r, 4.0, Stroke::new(1.0, Color32::from_rgb(135, 100, 250)), StrokeKind::Inside);
-        painter.text(btn_r.center(), Align2::CENTER_CENTER, tl!("+ Add EffectCraft Glow"), Tokens::ui(12.0), t.text);
-        if btn_resp.clicked()
-            && let Ok(v) = app.session.execute("effects.apply", json!({"clips": [clip.0], "effect": "ec.stylize.glow"}))
-            && let Some(fx_idx) = v["applied"].as_array().and_then(|a| a.first()).and_then(|e| e["index"].as_u64())
-        {
-            select_vfx_node(app, clip, 0, fx_idx as usize);
-        }
-        return;
-    }
-
-    // Base node layout parameters (unscaled)
-    let base_node_w = 152.0;
-    let base_node_h = 80.0;
-    let base_gap = 52.0;
-    let base_v_gap = 36.0;
-    let base_port_w = 42.0;
-    let base_port_h = 32.0;
-
-    let nodes_per_row = if node_count <= 4 { node_count.max(1) } else { 4 };
-    let total_rows = node_count.div_ceil(nodes_per_row);
-    let max_cols = if total_rows > 1 { nodes_per_row } else { node_count };
-    let row_w = max_cols as f32 * base_node_w + (max_cols.saturating_sub(1)) as f32 * base_gap;
-    let total_chain_w = base_port_w + base_gap + row_w + base_gap + base_port_w;
-    let start_x = ((canvas_r.width() - total_chain_w) * 0.5).max(base_port_w + base_gap + 20.0);
-
-    let total_h = total_rows as f32 * base_node_h + (total_rows.saturating_sub(1)) as f32 * base_v_gap;
-    let start_y = ((canvas_r.height() - total_h) * 0.5).max(20.0);
-
-    if node_count > 4 && app.ui.vfx_node_zoom == 1.0 && app.ui.vfx_node_pan == [0.0, 0.0] {
-        fit_view = true;
-    }
-
-    if fit_view && node_count > 0 {
-        let mut min_x = f32::MAX;
-        let mut min_y = f32::MAX;
-        let mut max_x = f32::MIN;
-        let mut max_y = f32::MIN;
-        for i in 0..node_count {
-            let key = format!("{}:{i}", clip.0);
-            let [x, y] = app.ui.vfx_node_positions.get(&key).copied().unwrap_or_else(|| {
-                let r = i / nodes_per_row;
-                let c = i % nodes_per_row;
-                [start_x + c as f32 * (base_node_w + base_gap), start_y + r as f32 * (base_node_h + base_v_gap)]
-            });
-            min_x = min_x.min(x);
-            min_y = min_y.min(y);
-            max_x = max_x.max(x + base_node_w);
-            max_y = max_y.max(y + base_node_h);
-        }
-        min_x -= base_port_w + base_gap;
-        max_x += base_port_w + base_gap;
-
-        let graph_w = (max_x - min_x).max(100.0);
-        let graph_h = (max_y - min_y).max(80.0);
-        let pad = 32.0;
-        let avail_w = (canvas_r.width() - pad * 2.0).max(100.0);
-        let avail_h = (canvas_r.height() - pad * 2.0).max(80.0);
-
-        let target_zoom = (avail_w / graph_w).min(avail_h / graph_h).clamp(0.28, 1.15);
-        let graph_center_x = (min_x + max_x) * 0.5;
-        let graph_center_y = (min_y + max_y) * 0.5;
-        let canvas_center = canvas_r.size() * 0.5;
-
-        app.ui.vfx_node_pan = [canvas_center.x - graph_center_x * target_zoom, canvas_center.y - graph_center_y * target_zoom];
-        app.ui.vfx_node_zoom = target_zoom;
-    }
-
-    let zoom = app.ui.vfx_node_zoom.clamp(0.25, 2.5);
-    let pan = vec2(app.ui.vfx_node_pan[0], app.ui.vfx_node_pan[1]);
-
-    let painter = ui.painter_at(canvas_r).with_clip_rect(canvas_r);
-
-    // Subtle Fusion/Resolve dot grid panning with canvas
-    let base_spacing = 24.0;
-    let grid_spacing = base_spacing * zoom;
-    let dot_color = Color32::from_rgb(34, 37, 44);
-    if grid_spacing >= 12.0 {
-        let off_x = ((pan.x % grid_spacing) + grid_spacing) % grid_spacing;
-        let off_y = ((pan.y % grid_spacing) + grid_spacing) % grid_spacing;
-        let mut gx = canvas_r.min.x + off_x;
-        while gx < canvas_r.max.x {
-            let mut gy = canvas_r.min.y + off_y;
-            while gy < canvas_r.max.y {
-                painter.circle_filled(pos2(gx, gy), 1.0, dot_color);
-                gy += grid_spacing;
-            }
-            gx += grid_spacing;
-        }
-    }
-
-    let mut node_rects = Vec::with_capacity(node_count);
-    let mut default_rels = Vec::with_capacity(node_count);
-    for i in 0..node_count {
-        let key = format!("{}:{i}", clip.0);
-        let r = i / nodes_per_row;
-        let c = i % nodes_per_row;
-        let default_rel = [start_x + c as f32 * (base_node_w + base_gap), start_y + r as f32 * (base_node_h + base_v_gap)];
-        default_rels.push(default_rel);
-        let rel_pos = app.ui.vfx_node_positions.get(&key).copied().unwrap_or(default_rel);
-        let screen_min = canvas_r.min + pan + vec2(rel_pos[0] * zoom, rel_pos[1] * zoom);
-        let screen_size = vec2(base_node_w * zoom, base_node_h * zoom);
-        node_rects.push(Rect::from_min_size(screen_min, screen_size));
-    }
-
-    // Terminals
-    let port_w = base_port_w * zoom;
-    let port_h = base_port_h * zoom;
-    let port_corner = (4.0 * zoom).clamp(2.0, 4.0);
-
-    // [ IN ] Terminal
-    let in_y = node_rects[0].center().y;
-    let in_x = node_rects[0].min.x - (base_gap * zoom) - port_w;
-    let in_rect = Rect::from_min_size(pos2(in_x, in_y - port_h * 0.5), vec2(port_w, port_h));
-    painter.rect_filled(in_rect, port_corner, Color32::from_rgb(28, 30, 36));
-    painter.rect_stroke(in_rect, port_corner, Stroke::new(1.0, Color32::from_rgb(50, 54, 64)), StrokeKind::Inside);
-    if zoom >= 0.5 {
-        painter.text(in_rect.center(), Align2::CENTER_CENTER, "IN", Tokens::ui((11.0 * zoom).clamp(8.0, 11.0)), Color32::from_rgb(140, 150, 170));
-    }
-
-    let in_pin = pos2(in_rect.max.x, in_y);
-    let term_pin_r = (4.0 * zoom).clamp(2.0, 5.0);
-    painter.circle_filled(in_pin, term_pin_r, Color32::from_rgb(140, 105, 255));
-
-    // [ OUT ] Terminal
-    let last_idx = node_count - 1;
-    let out_y = node_rects[last_idx].center().y;
-    let out_x = node_rects[last_idx].max.x + (base_gap * zoom);
-    let out_rect = Rect::from_min_size(pos2(out_x, out_y - port_h * 0.5), vec2(port_w, port_h));
-    painter.rect_filled(out_rect, port_corner, Color32::from_rgb(28, 30, 36));
-    painter.rect_stroke(out_rect, port_corner, Stroke::new(1.0, Color32::from_rgb(50, 54, 64)), StrokeKind::Inside);
-    if zoom >= 0.5 {
-        painter.text(out_rect.center(), Align2::CENTER_CENTER, "OUT", Tokens::ui((11.0 * zoom).clamp(8.0, 11.0)), Color32::from_rgb(140, 150, 170));
-    }
-
-    let out_pin = pos2(out_rect.min.x, out_y);
-    painter.circle_filled(out_pin, term_pin_r, Color32::from_rgb(140, 105, 255));
-
-    // Connecting wires
-    let wire_stroke_w = (2.0 * zoom).clamp(1.0, 3.0);
-    let n0_in_pin = pos2(node_rects[0].min.x, node_rects[0].center().y);
-    let n0_enabled = vfx_effects[0].1.enabled;
-    let w0_col = if n0_enabled { Color32::from_rgb(140, 105, 255) } else { Color32::from_rgb(80, 85, 95) };
-    draw_bezier_wire(&painter, in_pin, n0_in_pin, Stroke::new(wire_stroke_w, w0_col));
-
-    for i in 0..(node_count - 1) {
-        let p_out = pos2(node_rects[i].max.x, node_rects[i].center().y);
-        let p_in = pos2(node_rects[i + 1].min.x, node_rects[i + 1].center().y);
-        let enabled = vfx_effects[i + 1].1.enabled;
-        let col = if enabled { Color32::from_rgb(140, 105, 255) } else { Color32::from_rgb(80, 85, 95) };
-        draw_bezier_wire(&painter, p_out, p_in, Stroke::new(wire_stroke_w, col));
-    }
-
-    let last_out_pin = pos2(node_rects[last_idx].max.x, node_rects[last_idx].center().y);
-    let last_enabled = vfx_effects.last().map(|(_, e, _)| e.enabled).unwrap_or(true);
-    let out_wire_color = if last_enabled { Color32::from_rgb(140, 105, 255) } else { Color32::from_rgb(80, 85, 95) };
-    draw_bezier_wire(&painter, last_out_pin, out_pin, Stroke::new(wire_stroke_w, out_wire_color));
-
-    // Render Each VFX Node Card
-    for (i, &(fx_idx, fx_inst, fx_def)) in vfx_effects.iter().enumerate() {
-        paint_vfx_node_card(
-            app,
-            ui,
-            &painter,
-            VfxCardCtx { clip_id: clip.0, i, fx_idx, fx_inst, fx_def, node_rect: node_rects[i], default_rel: default_rels[i], zoom, active_node, node_count },
-        );
-    }
-}
-
-#[derive(Default)]
-struct VfxActions {
-    fit_view: bool,
-    zoom_in_action: bool,
-    zoom_out_action: bool,
-    zoom_reset_action: bool,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_vfx_toolbar(
-    app: &mut FilmcraftApp,
-    ui: &mut egui::Ui,
-    rect: Rect,
-    clip: filmcraft_project::ClipId,
-    it_name: &str,
-    vfx_effects: &[(usize, &EffectInstance, &'static EffectDef)],
-    active_node: usize,
-    flags: (&mut Option<&'static str>, &mut bool, &mut bool, &mut bool, &mut bool, &mut VfxActions),
-) -> Rect {
-    let (add_fx_id, bypass_active, bypass_all, reset_active, delete_active, act) = flags;
-    let t = app.tokens;
-    let node_count = vfx_effects.len();
-    let toolbar_r = Rect::from_min_size(rect.min, vec2(rect.width(), 34.0));
-    ui.painter().rect_filled(toolbar_r, 0.0, Color32::from_rgb(26, 28, 33));
-    ui.painter()
-        .line_segment([pos2(toolbar_r.min.x, toolbar_r.max.y), pos2(toolbar_r.max.x, toolbar_r.max.y)], Stroke::new(1.0, Color32::from_rgb(38, 41, 48)));
-
-    let mut bx = toolbar_r.min.x + 8.0;
-    let by = toolbar_r.min.y + 5.0;
-    let btn_h = 24.0;
-
-    let add_w = 76.0;
-    let add_r = Rect::from_min_size(pos2(bx, by), vec2(add_w, btn_h));
-    let add_resp = ui.interact(add_r, egui::Id::unique("vfx_nodes_add_btn"), Sense::click()).on_hover_text(tl!("Add EffectCraft VFX Node (Alt+S)"));
-    app.auto.add("vfx_nodes.add", add_r, "Add VFX Node");
-    let add_bg = if add_resp.hovered() { t.hover } else { Color32::from_rgb(42, 38, 62) };
-    ui.painter().rect_filled(add_r, 4.0, add_bg);
-    ui.painter().rect_stroke(add_r, 4.0, Stroke::new(1.0, Color32::from_rgb(95, 80, 155)), StrokeKind::Inside);
-    ui.painter().text(pos2(add_r.min.x + 10.0, add_r.center().y), Align2::LEFT_CENTER, tl!("+ VFX"), Tokens::ui(11.0), t.text);
-    crate::icons::paint(
-        ui.painter(),
-        Rect::from_center_size(pos2(add_r.max.x - 12.0, add_r.center().y), vec2(9.0, 9.0)),
-        crate::icons::Icon::ChevronDown,
-        t.text,
-    );
-    let popup_id = egui::Id::unique("vfx_nodes_quick_popup");
-    let mut popup_open = ui.ctx().data(|d| d.get_temp::<bool>(popup_id)).unwrap_or(false);
-    let mut just_opened = false;
-    if add_resp.clicked() {
-        popup_open = !popup_open;
-        just_opened = popup_open;
-        ui.ctx().data_mut(|d| d.insert_temp(popup_id, popup_open));
-    }
-    if popup_open {
-        let area = egui::Area::new(popup_id.with("area")).order(egui::Order::Foreground).fixed_pos(add_r.left_bottom() + vec2(0.0, 2.0)).show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(210.0);
-                ui.label(egui::RichText::new(tl!("EffectCraft VFX")).strong().size(11.0));
-                ui.separator();
-                for &(fx_id, label, cat) in QUICK_VFX_PRESETS {
-                    let row_txt = format!("{}  ({})", crate::i18n::t(label), crate::i18n::t(cat));
-                    if ui.button(row_txt).clicked() {
-                        *add_fx_id = Some(fx_id);
-                    }
-                }
-            });
-        });
-        if add_fx_id.is_some() || (!just_opened && area.response.clicked_elsewhere()) {
-            ui.ctx().data_mut(|d| d.remove::<bool>(popup_id));
-        }
-    }
-    bx += add_w + 5.0;
-
-    if node_count > 0 {
-        let curr_enabled = vfx_effects[active_node].1.enabled;
-        let b_text = if curr_enabled { tl!("Bypass") } else { tl!("Enable") };
-        for (w, gap, id, auto_id, auto_lbl, text, tip, flag) in [
-            (56.0, 5.0, "vfx_nodes_bypass_btn", "vfx_nodes.bypass_node", "Bypass Node", b_text, None, bypass_active as &mut bool),
-            (36.0, 5.0, "vfx_nodes_bypass_all_btn", "vfx_nodes.bypass_all", "Bypass All Nodes", tl!("All"), None, bypass_all as &mut bool),
-            (46.0, 5.0, "vfx_nodes_rst_btn", "vfx_nodes.reset_node", "Reset Node", tl!("Reset"), None, reset_active as &mut bool),
-            (50.0, 5.0, "vfx_nodes_del_btn", "vfx_nodes.delete_node", "Delete Node", tl!("Delete"), None, delete_active as &mut bool),
-            (
-                68.0,
-                5.0,
-                "vfx_nodes_fit_btn",
-                "vfx_nodes.fit",
-                "Ajustar Nodos",
-                tl!("⛶ Ajustar"),
-                Some(tl!("Ajustar nodos a la pantalla (Alt+F / Z)")),
-                &mut act.fit_view,
-            ),
-            (24.0, 2.0, "vfx_nodes_zm_btn", "vfx_nodes.zoom_out", "Zoom Out", "-", Some(tl!("Reducir zoom (Ctrl+-)")), &mut act.zoom_out_action),
-        ] {
-            let r = Rect::from_min_size(pos2(bx, by), vec2(w, btn_h));
-            let mut resp = ui.interact(r, egui::Id::unique(id), Sense::click());
-            if let Some(tip) = tip {
-                resp = resp.on_hover_text(tip);
-            }
-            app.auto.add(auto_id, r, auto_lbl);
-            ui.painter().rect_filled(r, 4.0, if resp.hovered() { t.hover } else { Color32::from_rgb(36, 40, 48) });
-            ui.painter().rect_stroke(r, 4.0, Stroke::new(1.0, Color32::from_rgb(55, 60, 72)), StrokeKind::Inside);
-            ui.painter().text(r.center(), Align2::CENTER_CENTER, text, Tokens::ui(11.0), t.text);
-            if resp.clicked() {
-                *flag = true;
-            }
-            bx += w + gap;
-        }
-        let org_w = 68.0;
-        let org_r = Rect::from_min_size(pos2(bx, by), vec2(org_w, btn_h));
-        let org_resp = ui.interact(org_r, egui::Id::unique("vfx_nodes_org_btn"), Sense::click()).on_hover_text(tl!("Alinear y organizar nodos en serie"));
-        app.auto.add("vfx_nodes.organize", org_r, "Organizar Nodos");
-        ui.painter().rect_filled(org_r, 4.0, if org_resp.hovered() { t.hover } else { Color32::from_rgb(36, 40, 48) });
-        ui.painter().rect_stroke(org_r, 4.0, Stroke::new(1.0, Color32::from_rgb(55, 60, 72)), StrokeKind::Inside);
-        ui.painter().text(org_r.center(), Align2::CENTER_CENTER, tl!("Organizar"), Tokens::ui(11.0), t.text);
-        if org_resp.clicked() {
-            let prefix = format!("{}:", clip.0);
-            app.ui.vfx_node_positions.retain(|k, _| !k.starts_with(&prefix));
-            app.ui.vfx_node_pan = [0.0, 0.0];
-            app.ui.vfx_node_zoom = 1.0;
-            if node_count > 4 {
-                act.fit_view = true;
-            }
-        }
-        bx += org_w + 5.0;
-
-        let zr_w = 44.0;
-        let zr_r = Rect::from_min_size(pos2(bx, by), vec2(zr_w, btn_h));
-        let zr_resp = ui.interact(zr_r, egui::Id::unique("vfx_nodes_zr_btn"), Sense::click()).on_hover_text(tl!("Restablecer zoom al 100% (Ctrl+0)"));
-        app.auto.add("vfx_nodes.zoom_reset", zr_r, "Zoom 100%");
-        ui.painter().rect_filled(zr_r, 4.0, if zr_resp.hovered() { t.hover } else { Color32::from_rgb(36, 40, 48) });
-        ui.painter().rect_stroke(zr_r, 4.0, Stroke::new(1.0, Color32::from_rgb(55, 60, 72)), StrokeKind::Inside);
-        let z_txt = format!("{:.0}%", app.ui.vfx_node_zoom * 100.0);
-        ui.painter().text(zr_r.center(), Align2::CENTER_CENTER, z_txt, Tokens::ui(10.0), t.text);
-        if zr_resp.clicked() {
-            act.zoom_reset_action = true;
-        }
-        bx += zr_w + 2.0;
-
-        let zp_w = 24.0;
-        let zp_r = Rect::from_min_size(pos2(bx, by), vec2(zp_w, btn_h));
-        let zp_resp = ui.interact(zp_r, egui::Id::unique("vfx_nodes_zp_btn"), Sense::click()).on_hover_text(tl!("Aumentar zoom (Ctrl++)"));
-        app.auto.add("vfx_nodes.zoom_in", zp_r, "Zoom In");
-        ui.painter().rect_filled(zp_r, 4.0, if zp_resp.hovered() { t.hover } else { Color32::from_rgb(36, 40, 48) });
-        ui.painter().rect_stroke(zp_r, 4.0, Stroke::new(1.0, Color32::from_rgb(55, 60, 72)), StrokeKind::Inside);
-        ui.painter().text(zp_r.center(), Align2::CENTER_CENTER, "+", Tokens::ui(12.0), t.text);
-        if zp_resp.clicked() {
-            act.zoom_in_action = true;
-        }
-        bx += zp_w + 6.0;
-    }
-
-    let avail_right = (toolbar_r.max.x - bx - 8.0).max(0.0);
-    if avail_right > 110.0 {
-        let info_r = Rect::from_min_max(pos2(toolbar_r.max.x - avail_right.min(240.0), toolbar_r.min.y), pos2(toolbar_r.max.x - 8.0, toolbar_r.max.y));
-        let right_text = if node_count > 0 { format!("FX {}/{} | {it_name}", active_node + 1, node_count) } else { format!("VFX · {it_name}") };
-        ui.painter().text(info_r.right_center(), Align2::RIGHT_CENTER, right_text, Tokens::ui(11.0), t.text_dim);
-    }
-    toolbar_r
-}
-
-#[allow(clippy::too_many_arguments)]
-fn execute_vfx_actions(
-    app: &mut FilmcraftApp,
-    clip: filmcraft_project::ClipId,
-    vfx_effects: &[(usize, &EffectInstance, &'static EffectDef)],
-    active_node: usize,
-    add_fx_id: Option<&'static str>,
-    bypass_active: bool,
-    bypass_all: bool,
-    reset_active: bool,
-    delete_active: bool,
-) -> bool {
-    let node_count = vfx_effects.len();
-    if let Some(fx_id) = add_fx_id {
-        if let Ok(v) = app.session.execute("effects.apply", json!({"clips": [clip.0], "effect": fx_id}))
-            && let Some(fx_idx) = v["applied"].as_array().and_then(|a| a.first()).and_then(|e| e["index"].as_u64())
-        {
-            select_vfx_node(app, clip, node_count, fx_idx as usize);
-        }
-        return true;
-    }
-    if bypass_active && node_count > 0 {
-        let (idx, _, _) = vfx_effects[active_node];
-        let _ = app.session.execute("effects.toggleEnabled", json!({"clip": clip.0, "index": idx}));
-        return true;
-    }
-    if bypass_all && node_count > 0 {
-        let any_enabled = vfx_effects.iter().any(|(_, e, _)| e.enabled);
-        for &(idx, e, _) in vfx_effects {
-            if e.enabled == any_enabled {
-                let _ = app.session.execute("effects.toggleEnabled", json!({"clip": clip.0, "index": idx}));
-            }
-        }
-        return true;
-    }
-    if reset_active && node_count > 0 {
-        let (idx, _, _) = vfx_effects[active_node];
-        let _ = app.session.execute("effects.reset", json!({"clip": clip.0, "index": idx}));
-        return true;
-    }
-    if delete_active && node_count > 0 {
-        let (idx, _, _) = vfx_effects[active_node];
-        let _ = app.session.execute("effects.remove", json!({"clip": clip.0, "index": idx}));
-        if active_node >= node_count - 1 {
-            app.ui.active_vfx_node = active_node.saturating_sub(1);
-        }
-        return true;
+        prev = cur;
     }
     false
 }
 
-fn apply_vfx_zoom(app: &mut FilmcraftApp, canvas_r: Rect, new_zoom: f32) {
-    let old_zoom = app.ui.vfx_node_zoom;
-    let new_zoom = new_zoom.clamp(0.25, 2.5);
-    let center = canvas_r.size() * 0.5;
-    let old_pan = vec2(app.ui.vfx_node_pan[0], app.ui.vfx_node_pan[1]);
-    let new_pan = center - (center - old_pan) * (new_zoom / old_zoom);
-    app.ui.vfx_node_pan = [new_pan.x, new_pan.y];
-    app.ui.vfx_node_zoom = new_zoom;
+fn eval_cubic_bezier(p0: Pos2, p1: Pos2, p2: Pos2, p3: Pos2, t: f32) -> Pos2 {
+    let u = 1.0 - t;
+    let tt = t * t;
+    let uu = u * u;
+    let uuu = uu * u;
+    let ttt = tt * t;
+    Pos2::new(
+        uuu * p0.x + 3.0 * uu * t * p1.x + 3.0 * u * tt * p2.x + ttt * p3.x,
+        uuu * p0.y + 3.0 * uu * t * p1.y + 3.0 * u * tt * p2.y + ttt * p3.y,
+    )
+}
+
+fn point_segment_distance(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let len2 = ab.length_sq();
+    if len2 <= 1e-6 {
+        return p.distance(a);
+    }
+    let t = ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
+    p.distance(a + ab * t)
+}
+
+fn draw_bezier_wire(painter: &egui::Painter, p0: Pos2, p3: Pos2, stroke: Stroke) {
+    let dx = ((p3.x - p0.x).abs() * 0.45).max(32.0);
+    let p1 = Pos2::new(p0.x + dx, p0.y);
+    let p2 = Pos2::new(p3.x - dx, p3.y);
+    let pts: Vec<Pos2> = (0..=18).map(|i| eval_cubic_bezier(p0, p1, p2, p3, i as f32 / 18.0)).collect();
+    painter.add(egui::Shape::line(pts, stroke));
+}
+
+fn draw_dashed_line(painter: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke) {
+    let d = b - a;
+    let len = d.length();
+    if len < 2.0 {
+        return;
+    }
+    let dir = d / len;
+    let mut t = 0.0f32;
+    while t < len {
+        let t1 = (t + 6.0).min(len);
+        painter.line_segment([a + dir * t, a + dir * t1], stroke);
+        t += 11.0;
+    }
+}
+
+pub(crate) fn resolve_target_clip(app: &FilmcraftApp) -> Option<(ClipId, String)> {
+    let seq = app.session.active_sequence()?;
+    if let Some(cid) = app
+        .session
+        .state
+        .selection
+        .iter()
+        .copied()
+        .find(|&c| seq.find_item(c).and_then(|(tid, _)| seq.track(tid)).is_some_and(|t| t.kind == TrackKind::Video))
+    {
+        let (_, it) = seq.find_item(cid)?;
+        let name = app.session.project.item(it.item).map(|p| p.name.clone()).unwrap_or_else(|| format!("Clip {}", cid.0));
+        return Some((cid, name));
+    }
+    let ph = app.session.playhead();
+    for track in seq.video_tracks.iter().rev() {
+        if !track.locked && !track.muted {
+            for item in &track.items {
+                if item.start <= ph && ph < item.end() {
+                    let name = app.session.project.item(item.item).map(|p| p.name.clone()).unwrap_or_else(|| format!("Clip {}", item.id.0));
+                    return Some((item.id, name));
+                }
+            }
+        }
+    }
+    let item = seq.video_tracks.iter().flat_map(|t| &t.items).next()?;
+    let name = app.session.project.item(item.item).map(|p| p.name.clone()).unwrap_or_else(|| format!("Clip {}", item.id.0));
+    Some((item.id, name))
+}
+
+fn endpoint_json(ep: VfxEndpoint) -> serde_json::Value {
+    match ep {
+        VfxEndpoint::MediaIn => json!("in"),
+        VfxEndpoint::MediaOut => json!("out"),
+        VfxEndpoint::Node(id) => json!(id.0),
+    }
+}
+
+fn slot_str(slot: VfxInputSlot) -> &'static str {
+    match slot {
+        VfxInputSlot::Main => "main",
+        VfxInputSlot::Foreground => "fg",
+        VfxInputSlot::EffectMask => "mask",
+    }
+}
+
+fn select_vfx_node(app: &mut FilmcraftApp, clip_id: ClipId, node: &VfxNode, graph: &VfxGraph) {
+    app.ui.vfx_active_node_id = Some(node.id.0);
+    // Synchronize `session.state.selected_effect` if this node maps to a clip effect instance
+    if let Some(seq) = app.session.active_sequence()
+        && let Some((_, it)) = seq.find_item(clip_id)
+        && let Some(resolved) = graph.resolve_effect(node.id)
+    {
+        // Match by effect id + occurrence ordinal in serial_effects
+        let mut ord = 0usize;
+        for id in graph.topo_order().unwrap_or_else(|| graph.nodes.iter().map(|n| n.id).collect()) {
+            if id == node.id {
+                break;
+            }
+            if graph.resolve_effect(id).is_some_and(|e| e.effect == resolved.effect) {
+                ord += 1;
+            }
+        }
+        let mut seen = 0usize;
+        for (idx, e) in it.effects.iter().enumerate() {
+            if e.effect == resolved.effect {
+                if seen == ord {
+                    app.session.state.selected_effect = EffectSel::of(clip_id, &it.effects, idx);
+                    return;
+                }
+                seen += 1;
+            }
+        }
+    }
+}
+
+pub(crate) fn node_display_name(node: &VfxNode, graph: &VfxGraph) -> String {
+    if let Some(lbl) = &node.label
+        && !lbl.is_empty()
+    {
+        return lbl.clone();
+    }
+    match &node.kind {
+        VfxNodeKind::Effect(fx) => fx.def().map(|d| d.name.to_string()).unwrap_or_else(|| fx.effect.clone()),
+        VfxNodeKind::Merge { operator, .. } => format!("Merge ({})", operator.label()),
+        VfxNodeKind::Mask(m) => m.name.clone(),
+        VfxNodeKind::PipeRouter => "Router".to_string(),
+        VfxNodeKind::Instance { source, .. } => {
+            let base = graph.node(*source).map(|n| node_display_name(n, graph)).unwrap_or_else(|| format!("Node {}", source.0));
+            format!("{base} (Inst)")
+        }
+    }
+}
+
+pub(crate) fn node_accent(kind: &VfxNodeKind) -> Color32 {
+    match kind {
+        VfxNodeKind::Effect(fx) => {
+            if fx.effect.starts_with("ec.") {
+                Color32::from_rgb(139, 92, 246)
+            } else {
+                Color32::from_rgb(56, 189, 248)
+            }
+        }
+        VfxNodeKind::Merge { .. } => Color32::from_rgb(34, 197, 94),
+        VfxNodeKind::Mask(_) => Color32::from_rgb(59, 130, 246),
+        VfxNodeKind::PipeRouter => Color32::from_rgb(245, 158, 11),
+        VfxNodeKind::Instance { .. } => Color32::from_rgb(16, 185, 129),
+    }
+}
+
+/// Main entry point for the `VfxNodes` dock panel.
+pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    let t = app.tokens;
+    let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::LEFT)));
+    let ui = &mut ui;
+    let Some((clip_id, clip_name)) = resolve_target_clip(app) else {
+        ui.centered_and_justified(|ui| {
+            ui.label(egui::RichText::new("Selecciona un clip de vídeo para editar sus nodos VFX").color(t.text_dim));
+        });
+        return;
+    };
+
+    let (graph, clip_start, clip_dur, item_in_point, item_speed) = {
+        let Some(seq) = app.session.active_sequence() else { return };
+        let Some((_, it)) = seq.find_item(clip_id) else { return };
+        (it.effective_vfx_graph().into_owned(), it.start, it.duration, it.effect_time_at(it.start), it.speed)
+    };
+
+    // Ensure active node stays valid if the graph has nodes
+    if let Some(active) = app.ui.vfx_active_node_id
+        && graph.node(VfxNodeId(active)).is_none()
+    {
+        app.ui.vfx_active_node_id = graph.nodes.first().map(|n| n.id.0);
+    }
+
+    let popup_id = ui.scope_id().with("vfx_select_tool_popup");
+    let zoom_id = ui.scope_id().with("vfx_nodes_zoom");
+    let pan_id = ui.scope_id().with("vfx_nodes_pan");
+
+    render_toolbar(app, ui, &t, clip_id, &clip_name, &graph, popup_id, zoom_id, pan_id);
+    ui.separator();
+
+    // Split bottom area when Keyframes (1) or Spline (2) drawer is open
+    let drawer_mode = app.ui.vfx_bottom_drawer;
+    let total_h = ui.available_height().max(120.0);
+    let drawer_h = if drawer_mode != 0 { (total_h * 0.36).clamp(110.0, 260.0) } else { 0.0 };
+    let canvas_h = (total_h - drawer_h - if drawer_mode != 0 { 6.0 } else { 0.0 }).max(80.0);
+
+    let canvas_rect = ui.allocate_exact_size(Vec2::new(ui.available_width(), canvas_h), Sense::click_and_drag()).0;
+    render_graph_canvas(app, ui, &t, clip_id, &graph, canvas_rect, popup_id, zoom_id, pan_id);
+
+    if drawer_mode != 0 {
+        ui.separator();
+        let active_node = app.ui.vfx_active_node_id.and_then(|id| graph.node(VfxNodeId(id)));
+        render_bottom_drawer(app, ui, &t, clip_id, &graph, active_node, drawer_mode, drawer_h, clip_start, clip_dur, item_in_point, item_speed);
+    }
+
+    render_select_tool_popup(app, ui, clip_id, popup_id);
 }
 
 #[allow(clippy::too_many_arguments)]
-fn handle_vfx_zoom_pan(
+fn render_toolbar(
     app: &mut FilmcraftApp,
     ui: &mut egui::Ui,
-    canvas_r: Rect,
-    clip_id: u64,
-    node_count: usize,
-    zoom_in: bool,
-    zoom_out: bool,
-    zoom_reset: bool,
+    t: &Tokens,
+    clip_id: ClipId,
+    clip_name: &str,
+    graph: &VfxGraph,
+    popup_id: egui::Id,
+    zoom_id: egui::Id,
+    pan_id: egui::Id,
 ) {
-    if zoom_in {
-        apply_vfx_zoom(app, canvas_r, app.ui.vfx_node_zoom * 1.2);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        ui.label(egui::RichText::new(format!("VFX · {clip_name}")).strong().size(12.0).color(t.text));
+        ui.label(egui::RichText::new(format!("({} nodos)", graph.nodes.len())).size(11.0).color(t.text_dim));
+        ui.separator();
+
+        let add_btn = ui.small_button("+ Efecto").on_hover_text("Shift+Space: Buscar e insertar herramienta VFX");
+        app.auto.add("vfxNodes.addTool", add_btn.rect, "Add VFX Tool");
+        if add_btn.clicked() {
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    popup_id,
+                    SelectToolPopup { open: true, query: String::new(), after_node: app.ui.vfx_active_node_id },
+                );
+            });
+        }
+
+        let after_val = app.ui.vfx_active_node_id;
+        let merge_btn = ui.small_button("+ Merge").on_hover_text("Añadir nodo Merge (BG amarillo + FG verde)");
+        app.auto.add("vfxNodes.addMerge", merge_btn.rect, "Add Merge Node");
+        if merge_btn.clicked() {
+            let mut body = json!({"clip": clip_id.0, "kind": "merge"});
+            if let Some(a) = after_val {
+                body["after"] = json!(a);
+            }
+            if let Ok(res) = app.session.execute("vfxGraph.addNode", body)
+                && let Some(nid) = res["node"].as_u64()
+            {
+                app.ui.vfx_active_node_id = Some(nid);
+            }
+        }
+
+        let mask_btn = ui.small_button("+ Mask").on_hover_text("Añadir nodo Mask reutilizable (puerto azul EffectMask)");
+        app.auto.add("vfxNodes.addMask", mask_btn.rect, "Add Mask Node");
+        if mask_btn.clicked() {
+            let mut body = json!({"clip": clip_id.0, "kind": "mask", "maskKind": "ellipse"});
+            if let Some(a) = after_val {
+                body["after"] = json!(a);
+            }
+            if let Ok(res) = app.session.execute("vfxGraph.addNode", body)
+                && let Some(nid) = res["node"].as_u64()
+            {
+                app.ui.vfx_active_node_id = Some(nid);
+            }
+        }
+
+        let router_btn = ui.small_button("+ Router").on_hover_text("Añadir PipeRouter para organizar cables");
+        app.auto.add("vfxNodes.addRouter", router_btn.rect, "Add PipeRouter");
+        if router_btn.clicked() {
+            let mut body = json!({"clip": clip_id.0, "kind": "pipeRouter"});
+            if let Some(a) = after_val {
+                body["after"] = json!(a);
+            }
+            let _ = app.session.execute("vfxGraph.addNode", body);
+        }
+
+        if let Some(aid) = after_val {
+            let inst_btn = ui.small_button("+ Inst").on_hover_text("Crear nodo Instance vinculado al nodo seleccionado");
+            app.auto.add("vfxNodes.createInstance", inst_btn.rect, "Create Instance");
+            if inst_btn.clicked()
+                && let Ok(res) = app.session.execute("vfxGraph.createInstance", json!({"clip": clip_id.0, "source": aid}))
+                && let Some(nid) = res["node"].as_u64()
+            {
+                app.ui.vfx_active_node_id = Some(nid);
+            }
+        }
+
+        let ul_btn = ui.small_button("+ Grupo").on_hover_text("Añadir Underlay visual para agrupar nodos");
+        app.auto.add("vfxNodes.addUnderlay", ul_btn.rect, "Add Underlay");
+        if ul_btn.clicked() {
+            let _ = app.session.execute(
+                "vfxGraph.addUnderlay",
+                json!({"clip": clip_id.0, "title": "Grupo VFX", "rect": [90.0, 70.0, 380.0, 170.0]}),
+            );
+        }
+
+        ui.separator();
+        let org_btn = ui.small_button("Organizar").on_hover_text("Auto-organizar topológicamente de izquierda a derecha");
+        app.auto.add("vfxNodes.autoLayout", org_btn.rect, "Auto Layout");
+        if org_btn.clicked() {
+            let _ = app.session.execute("vfxGraph.autoLayout", json!({"clip": clip_id.0}));
+        }
+
+        let fit_btn = ui.small_button("Encuadrar");
+        if fit_btn.clicked() {
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(zoom_id, 1.0f32);
+                d.insert_temp(pan_id, Vec2::ZERO);
+            });
+        }
+
+        ui.separator();
+        let kf_on = app.ui.vfx_bottom_drawer == 1;
+        let kf_btn = ui
+            .selectable_label(kf_on, "Keyframes")
+            .on_hover_text("Mostrar solo las pistas de keyframes del nodo seleccionado");
+        app.auto.add("vfxNodes.drawer.keyframes", kf_btn.rect, "Toggle Node Keyframes");
+        if kf_btn.clicked() {
+            app.ui.vfx_bottom_drawer = if kf_on { 0 } else { 1 };
+        }
+
+        let sp_on = app.ui.vfx_bottom_drawer == 2;
+        let sp_btn = ui
+            .selectable_label(sp_on, "Spline")
+            .on_hover_text("Mostrar solo las curvas Spline del nodo seleccionado");
+        app.auto.add("vfxNodes.drawer.spline", sp_btn.rect, "Toggle Node Spline");
+        if sp_btn.clicked() {
+            app.ui.vfx_bottom_drawer = if sp_on { 0 } else { 2 };
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
+fn render_graph_canvas(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    t: &Tokens,
+    clip_id: ClipId,
+    graph: &VfxGraph,
+    rect: Rect,
+    popup_id: egui::Id,
+    zoom_id: egui::Id,
+    pan_id: egui::Id,
+) {
+    let mut zoom = ui.ctx().data(|d| d.get_temp::<f32>(zoom_id)).unwrap_or(1.0).clamp(0.45, 2.2);
+    let mut pan = ui.ctx().data(|d| d.get_temp::<Vec2>(pan_id)).unwrap_or(Vec2::ZERO);
+
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgb(20, 21, 25));
+
+    // Subtle Fusion-style dot grid
+    let step = (24.0 * zoom).max(10.0);
+    let ox = (rect.left() + pan.x).rem_euclid(step);
+    let oy = (rect.top() + pan.y).rem_euclid(step);
+    let dot_col = Color32::from_rgba_unmultiplied(255, 255, 255, 18);
+    let mut gx = rect.left() + ox;
+    while gx < rect.right() {
+        let mut gy = rect.top() + oy;
+        while gy < rect.bottom() {
+            painter.circle_filled(Pos2::new(gx, gy), 1.0, dot_col);
+            gy += step;
+        }
+        gx += step;
     }
-    if zoom_out {
-        apply_vfx_zoom(app, canvas_r, app.ui.vfx_node_zoom / 1.2);
+
+    let canvas_resp = ui.interact(rect, ui.scope_id().with("vfx_canvas_bg"), Sense::click_and_drag());
+
+    // Zoom with scroll wheel & pan with middle-button drag
+    if rect.contains(ui.input(|i| i.pointer.hover_pos()).unwrap_or(Pos2::new(-1.0, -1.0))) {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll.abs() > 0.1 {
+            zoom = (zoom * (1.0 + scroll * 0.0015)).clamp(0.45, 2.2);
+        }
+        if ui.input(|i| i.pointer.middle_down()) {
+            pan += ui.input(|i| i.pointer.delta());
+        }
     }
-    if zoom_reset {
-        apply_vfx_zoom(app, canvas_r, 1.0);
+
+    let to_screen = |gp: [f32; 2]| -> Pos2 { Pos2::new(rect.left() + pan.x + gp[0] * zoom, rect.top() + pan.y + gp[1] * zoom) };
+    let to_graph = |sp: Pos2| -> [f32; 2] { [(sp.x - rect.left() - pan.x) / zoom, (sp.y - rect.top() - pan.y) / zoom] };
+
+    // Compute MediaIn & MediaOut positions relative to graph extents
+    let max_x = graph.nodes.iter().map(|n| n.pos[0]).fold(120.0f32, f32::max);
+    let media_in_rect = Rect::from_min_size(to_screen([12.0, 128.0]), Vec2::new(IO_W * zoom, IO_H * zoom));
+    let media_out_rect = Rect::from_min_size(to_screen([max_x + 220.0, 128.0]), Vec2::new(IO_W * zoom, IO_H * zoom));
+
+    // Draw Underlays first (behind everything)
+    for ul in &graph.underlays {
+        let ur = Rect::from_min_size(to_screen([ul.rect[0], ul.rect[1]]), Vec2::new(ul.rect[2] * zoom, ul.rect[3] * zoom));
+        let fill = Color32::from_rgba_unmultiplied(ul.color[0], ul.color[1], ul.color[2], 38);
+        let stroke = Color32::from_rgba_unmultiplied(ul.color[0], ul.color[1], ul.color[2], 140);
+        painter.rect(ur, CornerRadius::same(6), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
+        painter.text(ur.left_top() + Vec2::new(8.0, 4.0), egui::Align2::LEFT_TOP, &ul.title, egui::FontId::proportional(11.0 * zoom), stroke);
+        let close_r = Rect::from_min_size(Pos2::new(ur.right() - 18.0, ur.top() + 2.0), Vec2::splat(15.0));
+        let cresp = ui.interact(close_r, ui.scope_id().with(("vfx_ul_del", ul.id)), Sense::click());
+        painter.text(close_r.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(11.0), stroke);
+        if cresp.clicked() {
+            let _ = app.session.execute("vfxGraph.removeUnderlay", json!({"clip": clip_id.0, "underlay": ul.id}));
+        }
     }
-    let canvas_resp = ui.interact(canvas_r, egui::Id::unique("vfx_nodes_canvas"), Sense::drag());
-    if !ui.rect_contains_pointer(canvas_r) {
+
+    // Map node rects
+    let mut node_rects: HashMap<VfxNodeId, Rect> = HashMap::with_capacity(graph.nodes.len());
+    for n in &graph.nodes {
+        let r = if matches!(n.kind, VfxNodeKind::PipeRouter) {
+            Rect::from_center_size(to_screen(n.pos), Vec2::splat(ROUTER_R * 2.0 * zoom))
+        } else {
+            Rect::from_min_size(to_screen(n.pos), Vec2::new(NODE_W * zoom, NODE_H * zoom))
+        };
+        node_rects.insert(n.id, r);
+    }
+
+    let port_pos = |ep: VfxEndpoint, slot: Option<VfxInputSlot>| -> Option<Pos2> {
+        match (ep, slot) {
+            (VfxEndpoint::MediaIn, None) => Some(Pos2::new(media_in_rect.right(), media_in_rect.center().y)),
+            (VfxEndpoint::MediaOut, Some(_)) => Some(Pos2::new(media_out_rect.left(), media_out_rect.center().y)),
+            (VfxEndpoint::Node(id), None) => {
+                let r = *node_rects.get(&id)?;
+                Some(Pos2::new(r.right(), r.center().y))
+            }
+            (VfxEndpoint::Node(id), Some(sl)) => {
+                let r = *node_rects.get(&id)?;
+                match sl {
+                    VfxInputSlot::Main => Some(Pos2::new(r.left(), r.center().y)),
+                    VfxInputSlot::Foreground => Some(Pos2::new(r.center().x - 14.0 * zoom, r.top())),
+                    VfxInputSlot::EffectMask => Some(Pos2::new(r.center().x + 14.0 * zoom, r.top())),
+                }
+            }
+            _ => None,
+        }
+    };
+
+    // Draw dashed green Instance link lines
+    for n in &graph.nodes {
+        if let VfxNodeKind::Instance { source, .. } = &n.kind
+            && let (Some(a), Some(b)) = (node_rects.get(source), node_rects.get(&n.id))
+        {
+            draw_dashed_line(&painter, a.center(), b.center(), Stroke::new(1.5, Color32::from_rgba_unmultiplied(16, 185, 129, 175)));
+        }
+    }
+
+    // Track hover wire for Shift+Drag splice preview
+    let ptr = ui.input(|i| i.pointer.hover_pos());
+    let shift_held = ui.input(|i| i.modifiers.shift);
+    let ctrl_held = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+    let hovered_splice_edge: Option<VfxEdge> = ptr.and_then(|p| {
+        if !shift_held || ctrl_held {
+            return None;
+        }
+        let mut best: Option<(f32, VfxEdge)> = None;
+        for &e in &graph.edges {
+            if let (Some(p0), Some(p1)) = (port_pos(e.from, None), port_pos(e.to, Some(e.to_slot))) {
+                let d = bezier_wire_distance(p, p0, p1, 16);
+                if d < 22.0 && best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, e));
+                }
+            }
+        }
+        best.map(|(_, e)| e)
+    });
+
+    // Draw all DAG wires
+    let wire_w = (2.2 * zoom).clamp(1.3, 3.2);
+    for &edge in &graph.edges {
+        if let (Some(p0), Some(p1)) = (port_pos(edge.from, None), port_pos(edge.to, Some(edge.to_slot))) {
+            let enabled = match edge.to {
+                VfxEndpoint::Node(id) => graph.node(id).is_none_or(|n| n.enabled),
+                _ => true,
+            };
+            let is_splice = hovered_splice_edge == Some(edge);
+            let col = if is_splice {
+                Color32::from_rgb(56, 224, 255)
+            } else if !enabled {
+                Color32::from_rgb(90, 95, 108)
+            } else {
+                match edge.to_slot {
+                    VfxInputSlot::Main => COL_MAIN,
+                    VfxInputSlot::Foreground => COL_FG,
+                    VfxInputSlot::EffectMask => COL_MASK,
+                }
+            };
+            draw_bezier_wire(&painter, p0, p1, Stroke::new(if is_splice { wire_w + 1.4 } else { wire_w }, col));
+        }
+    }
+
+    // Draw MediaIn & MediaOut fixed nodes
+    paint_io_card(&painter, media_in_rect, "MediaIn", Color32::from_rgb(59, 130, 246), zoom);
+    paint_io_card(&painter, media_out_rect, "MediaOut", Color32::from_rgb(245, 158, 11), zoom);
+
+    // Draw all VFX Node Cards
+    let rename_id = ui.scope_id().with("vfx_rename_node");
+    let mut renaming: Option<(u64, String)> = ui.ctx().data(|d| d.get_temp(rename_id));
+    for node in &graph.nodes {
+        let Some(&nr) = node_rects.get(&node.id) else { continue };
+        paint_vfx_node_card(app, ui, &painter, t, clip_id, graph, node, nr, zoom, &to_graph, hovered_splice_edge, &mut renaming);
+    }
+    ui.ctx().data_mut(|d| {
+        if let Some(r) = renaming {
+            d.insert_temp(rename_id, r);
+        } else {
+            d.remove::<(u64, String)>(rename_id);
+        }
+    });
+
+    // Interactive ports (connect/disconnect)
+    handle_vfx_ports(app, ui, &painter, clip_id, graph, &port_pos, zoom);
+
+    // Ctrl+Shift+Drag Knife Wire Cutter
+    handle_knife_cut(app, ui, &painter, clip_id, graph, &canvas_resp, &port_pos, ctrl_held && shift_held);
+
+    // Drag-and-drop from Effects panel
+    if let Some(effect_id) = ui.ctx().memory(|m| m.data.get_temp::<String>(egui::Id::unique("filmcraft_drag_effect")))
+        && !ui.input(|i| i.pointer.any_down())
+        && let Some(p) = ptr
+        && rect.contains(p)
+    {
+        let gp = to_graph(p);
+        let _ = app.session.execute("vfxGraph.addNode", json!({"clip": clip_id.0, "kind": "effect", "effect": effect_id, "pos": gp}));
+        ui.ctx().memory_mut(|m| m.data.remove::<String>(egui::Id::unique("filmcraft_drag_effect")));
+    }
+
+    // Keyboard shortcuts when canvas is hovered or focused and no text box is focused
+    let hovered = ptr.is_some_and(|p| rect.contains(p));
+    if hovered && !ui.ctx().egui_wants_keyboard_input() {
+        handle_vfx_shortcuts(app, ui, clip_id, graph, popup_id, rename_id);
+    }
+
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(zoom_id, zoom);
+        d.insert_temp(pan_id, pan);
+    });
+}
+
+fn paint_io_card(painter: &egui::Painter, rect: Rect, label: &str, accent: Color32, zoom: f32) {
+    painter.rect(rect, CornerRadius::same(6), Color32::from_rgb(33, 35, 42), Stroke::new(1.5, accent), StrokeKind::Inside);
+    painter.text(rect.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional((11.5 * zoom).clamp(8.5, 16.0)), Color32::WHITE);
+}
+
+#[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
+fn paint_vfx_node_card(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    t: &Tokens,
+    clip_id: ClipId,
+    graph: &VfxGraph,
+    node: &VfxNode,
+    nr: Rect,
+    zoom: f32,
+    to_graph: &dyn Fn(Pos2) -> [f32; 2],
+    hovered_splice_edge: Option<VfxEdge>,
+    renaming: &mut Option<(u64, String)>,
+) {
+    let is_active = app.ui.vfx_active_node_id == Some(node.id.0);
+    let accent = node_accent(&node.kind);
+    let resp = ui.interact(nr, ui.scope_id().with(("vfx_node_card", clip_id.0, node.id.0)), Sense::click_and_drag());
+    app.auto.add(&format!("vfxNodes.node.{}", node.id.0), nr, "VFX Node");
+
+    if resp.clicked() {
+        select_vfx_node(app, clip_id, node, graph);
+    }
+
+    // Drag node (Shift+Drag onto wire splices; Shift+Drag away extracts; normal drag moves pos)
+    if resp.dragged_by(egui::PointerButton::Primary) {
+        let delta = resp.drag_delta();
+        let next_pos = [node.pos[0] + delta.x / zoom, node.pos[1] + delta.y / zoom];
+        let _ = app.session.execute("vfxGraph.setNodeSetting", json!({"clip": clip_id.0, "node": node.id.0, "pos": next_pos, "merge": true}));
+    }
+    if resp.drag_stopped_by(egui::PointerButton::Primary) && ui.input(|i| i.modifiers.shift) {
+        if let Some(e) = hovered_splice_edge
+            && e.from != VfxEndpoint::Node(node.id)
+            && e.to != VfxEndpoint::Node(node.id)
+        {
+            let _ = app.session.execute(
+                "vfxGraph.insertOnEdge",
+                json!({"clip": clip_id.0, "node": node.id.0, "from": endpoint_json(e.from), "to": endpoint_json(e.to), "slot": slot_str(e.to_slot)}),
+            );
+        } else {
+            let _ = app.session.execute("vfxGraph.extractNode", json!({"clip": clip_id.0, "node": node.id.0}));
+        }
+        let _ = to_graph;
+    }
+
+    if matches!(node.kind, VfxNodeKind::PipeRouter) {
+        let fill = if is_active { accent } else { Color32::from_rgb(56, 58, 68) };
+        painter.circle(nr.center(), nr.width() * 0.45, fill, Stroke::new(1.5, if is_active { Color32::WHITE } else { accent }));
         return;
     }
-    let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
-    if scroll_y != 0.0 {
-        let pointer_pos = ui.input(|i| i.pointer.hover_pos()).unwrap_or(canvas_r.center());
-        let rel_cursor = pointer_pos - canvas_r.min;
-        let old_zoom = app.ui.vfx_node_zoom;
-        let new_zoom = (old_zoom * (scroll_y * 0.003).exp()).clamp(0.25, 2.5);
-        if (new_zoom - old_zoom).abs() > 0.001 {
-            let old_pan = vec2(app.ui.vfx_node_pan[0], app.ui.vfx_node_pan[1]);
-            let new_pan = rel_cursor - (rel_cursor - old_pan) * (new_zoom / old_zoom);
-            app.ui.vfx_node_pan = [new_pan.x, new_pan.y];
-            app.ui.vfx_node_zoom = new_zoom;
+
+    // Card background + accent stripe
+    let bg = if !node.enabled {
+        Color32::from_rgb(30, 31, 36)
+    } else if is_active {
+        Color32::from_rgb(44, 48, 60)
+    } else {
+        Color32::from_rgb(34, 36, 44)
+    };
+    let border = if is_active {
+        Stroke::new(2.0, accent)
+    } else {
+        Stroke::new(1.0, Color32::from_rgb(66, 70, 82))
+    };
+    painter.rect(nr, CornerRadius::same(6), bg, border, StrokeKind::Inside);
+
+    let stripe = Rect::from_min_max(nr.left_top(), Pos2::new(nr.left() + (4.0 * zoom).max(3.0), nr.bottom()));
+    painter.rect_filled(stripe, CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, if node.enabled { accent } else { t.text_dim });
+
+    // Pass-Through LED dot (top-left)
+    let led_center = Pos2::new(nr.left() + 14.0 * zoom, nr.top() + 13.0 * zoom);
+    let led_rect = Rect::from_center_size(led_center, Vec2::splat(11.0 * zoom));
+    let led_resp = ui.interact(led_rect, ui.scope_id().with(("vfx_node_pt", node.id.0)), Sense::click());
+    painter.circle_filled(led_center, 3.8 * zoom, if node.enabled { Color32::from_rgb(52, 211, 153) } else { Color32::from_rgb(95, 100, 112) });
+    if led_resp.clicked() {
+        let _ = app.session.execute("vfxGraph.togglePassThrough", json!({"clip": clip_id.0, "node": node.id.0}));
+    }
+
+    // Node Title (or inline rename input)
+    let title = node_display_name(node, graph);
+    let title_pos = Pos2::new(nr.left() + 23.0 * zoom, nr.top() + 7.0 * zoom);
+    let is_renaming = renaming.as_ref().is_some_and(|(rid, _)| *rid == node.id.0);
+    if is_renaming {
+        if let Some((_, buf)) = renaming.as_mut() {
+            let edit_r = Rect::from_min_size(title_pos, Vec2::new(nr.width() - 32.0 * zoom, 18.0 * zoom));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(edit_r));
+            let te = child.add(egui::TextEdit::singleline(buf).desired_width(edit_r.width()));
+            te.request_focus();
+            if te.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let lbl = buf.clone();
+                let _ = app.session.execute("vfxGraph.setNodeSetting", json!({"clip": clip_id.0, "node": node.id.0, "label": lbl}));
+                *renaming = None;
+            }
         }
-    }
-    let is_node_dragged = (0..node_count).any(|i| ui.ctx().is_being_dragged(egui::Id::unique(("vfx_node_card", clip_id, i))));
-    if !is_node_dragged {
-        let pointer_delta = ui.input(|i| i.pointer.delta());
-        let is_pan_button = ui.input(|i| {
-            i.pointer.button_down(egui::PointerButton::Middle)
-                || i.pointer.button_down(egui::PointerButton::Secondary)
-                || (i.modifiers.alt && i.pointer.button_down(egui::PointerButton::Primary))
-                || (i.key_down(egui::Key::Space) && i.pointer.button_down(egui::PointerButton::Primary))
-        });
-        if (is_pan_button || canvas_resp.dragged_by(egui::PointerButton::Primary)) && pointer_delta != egui::Vec2::ZERO {
-            app.ui.vfx_node_pan[0] += pointer_delta.x;
-            app.ui.vfx_node_pan[1] += pointer_delta.y;
-        }
-    }
-}
-
-struct VfxCardCtx<'a> {
-    clip_id: u64,
-    i: usize,
-    fx_idx: usize,
-    fx_inst: &'a EffectInstance,
-    fx_def: &'static EffectDef,
-    node_rect: Rect,
-    default_rel: [f32; 2],
-    zoom: f32,
-    active_node: usize,
-    node_count: usize,
-}
-
-fn paint_vfx_node_card(app: &mut FilmcraftApp, ui: &mut egui::Ui, painter: &egui::Painter, c: VfxCardCtx<'_>) {
-    let t = app.tokens;
-    let i = c.i;
-    let node_rect = c.node_rect;
-    let zoom = c.zoom;
-    let is_active = i == c.active_node;
-    let is_enabled = c.fx_inst.enabled;
-
-    let card_resp = ui.interact(node_rect, egui::Id::unique(("vfx_node_card", c.clip_id, i)), Sense::click_and_drag());
-    app.auto.add(&format!("vfx_nodes.node.{i}"), node_rect, c.fx_def.name);
-
-    if card_resp.dragged() {
-        let delta = card_resp.drag_delta();
-        let key = format!("{}:{i}", c.clip_id);
-        let pos = app.ui.vfx_node_positions.entry(key).or_insert(c.default_rel);
-        pos[0] += delta.x / zoom;
-        pos[1] += delta.y / zoom;
-    }
-    if card_resp.clicked() {
-        select_vfx_node(app, filmcraft_project::ClipId(c.clip_id), i, c.fx_idx);
-    }
-
-    let card_pin_r = (3.5 * zoom).clamp(2.0, 5.0);
-    let pin_col = if is_enabled { Color32::from_rgb(140, 105, 255) } else { Color32::from_rgb(90, 95, 105) };
-    painter.circle_filled(pos2(node_rect.min.x, node_rect.center().y), card_pin_r, pin_col);
-    painter.circle_filled(pos2(node_rect.max.x, node_rect.center().y), card_pin_r, pin_col);
-
-    let bg_color =
-        if is_enabled { if is_active { Color32::from_rgb(34, 35, 45) } else { Color32::from_rgb(28, 30, 36) } } else { Color32::from_rgb(22, 23, 27) };
-    let card_corner = (6.0 * zoom).clamp(3.0, 6.0);
-    painter.rect_filled(node_rect, card_corner, bg_color);
-
-    let header_h = (22.0 * zoom).clamp(14.0, 22.0);
-    let header_rect = Rect::from_min_size(node_rect.min, vec2(node_rect.width(), header_h));
-    let header_bg = if is_active { Color32::from_rgb(44, 42, 62) } else { Color32::from_rgb(22, 24, 28) };
-    painter.rect_filled(header_rect, card_corner, header_bg);
-    painter.rect_filled(Rect::from_min_max(pos2(header_rect.min.x, header_rect.max.y - 3.0 * zoom), header_rect.max), 0.0, header_bg);
-
-    let num_str = format!("{:02}", i + 1);
-    painter.text(
-        pos2(header_rect.min.x + (8.0 * zoom).max(4.0), header_rect.center().y),
-        Align2::LEFT_CENTER,
-        num_str,
-        Tokens::ui((11.0 * zoom).clamp(8.0, 11.0)),
-        if is_active { Color32::WHITE } else { Color32::from_rgb(180, 185, 195) },
-    );
-
-    let power_box_size = (16.0 * zoom).clamp(10.0, 16.0);
-    let power_center = pos2(header_rect.max.x - (12.0 * zoom).max(8.0), header_rect.center().y);
-    let power_r = Rect::from_center_size(power_center, vec2(power_box_size, power_box_size));
-    let power_resp = ui.interact(power_r, egui::Id::unique(("vfx_node_power", c.clip_id, i)), Sense::click());
-    app.auto.add(&format!("vfx_nodes.node.{i}.power"), power_r, "Toggle VFX Node Bypass");
-
-    let led_color = if is_enabled { Color32::from_rgb(70, 210, 90) } else { Color32::from_rgb(150, 45, 45) };
-    painter.circle_filled(power_center, (4.5 * zoom).clamp(2.5, 5.0), led_color);
-
-    if !is_enabled {
-        let strike_d = (3.5 * zoom).clamp(2.0, 4.0);
-        painter.line_segment(
-            [pos2(power_center.x - strike_d, power_center.y - strike_d), pos2(power_center.x + strike_d, power_center.y + strike_d)],
-            Stroke::new((1.5 * zoom).clamp(1.0, 2.0), Color32::WHITE),
+    } else {
+        painter.text(
+            title_pos,
+            egui::Align2::LEFT_TOP,
+            &title,
+            egui::FontId::proportional((11.5 * zoom).clamp(8.5, 16.0)),
+            if node.enabled { Color32::WHITE } else { t.text_dim },
         );
     }
-    if power_resp.clicked() {
-        let _ = app.session.execute("effects.toggleEnabled", json!({"clip": c.clip_id, "index": c.fx_idx}));
+
+    // Badges row (bottom-left) + Viewer dots `1` & `2` (bottom-right)
+    let mut badges: Vec<(&str, Color32)> = Vec::new();
+    if !node.enabled {
+        badges.push(("PT", Color32::from_rgb(148, 163, 184)));
+    }
+    if let VfxNodeKind::Effect(fx) = &node.kind {
+        if filmcraft_render::gpufx::GPU_EFFECTS.contains(&fx.effect.as_str()) {
+            badges.push(("GPU", Color32::from_rgb(250, 204, 21)));
+        }
+        if fx.params.values().any(Param::is_animated) || node.settings.blend.is_animated() {
+            badges.push(("KF", Color32::from_rgb(96, 165, 250)));
+        }
+    } else if node.settings.blend.is_animated() {
+        badges.push(("KF", Color32::from_rgb(96, 165, 250)));
+    }
+    if matches!(node.kind, VfxNodeKind::Instance { .. }) {
+        badges.push(("INST", Color32::from_rgb(16, 185, 129)));
+    }
+    let mut bx = nr.left() + 10.0 * zoom;
+    let by = nr.bottom() - 15.0 * zoom;
+    for (lbl, col) in badges {
+        let br = Rect::from_min_size(Pos2::new(bx, by), Vec2::new((lbl.len() as f32 * 6.0 + 6.0) * zoom, 12.0 * zoom));
+        painter.rect_filled(br, CornerRadius::same(3), col.gamma_multiply(0.22));
+        painter.text(br.center(), egui::Align2::CENTER_CENTER, lbl, egui::FontId::proportional((8.5 * zoom).max(7.0)), col);
+        bx += br.width() + 3.0 * zoom;
     }
 
-    if zoom >= 0.55 {
-        let raw_name = crate::i18n::t(c.fx_def.name);
-        let display_label = if raw_name.chars().count() > 18 {
-            let s: String = raw_name.chars().take(16).collect();
-            format!("{s}…")
-        } else {
-            raw_name.to_string()
+    // Viewer dots [1] [2] (bottom-right)
+    for v_idx in 0..2 {
+        let vc = Pos2::new(nr.right() - (22.0 - v_idx as f32 * 12.0) * zoom, nr.bottom() - 9.0 * zoom);
+        let vr = Rect::from_center_size(vc, Vec2::splat(10.0 * zoom));
+        let active_v = app.ui.vfx_viewer_nodes[v_idx] == Some((clip_id.0, node.id.0));
+        let vresp = ui.interact(vr, ui.scope_id().with(("vfx_viewer_dot", node.id.0, v_idx)), Sense::click());
+        painter.circle(
+            vc,
+            3.8 * zoom,
+            if active_v { Color32::WHITE } else { Color32::from_rgb(55, 58, 68) },
+            Stroke::new(1.0, Color32::from_rgb(130, 136, 150)),
+        );
+        if vresp.clicked() {
+            app.ui.vfx_viewer_nodes[v_idx] = if active_v { None } else { Some((clip_id.0, node.id.0)) };
+        }
+    }
+
+    // Context menu
+    resp.context_menu(|ui| {
+        if ui.button("Pass-Through (Ctrl+P)").clicked() {
+            let _ = app.session.execute("vfxGraph.togglePassThrough", json!({"clip": clip_id.0, "node": node.id.0}));
+            ui.close();
+        }
+        if matches!(node.kind, VfxNodeKind::Merge { .. }) && ui.button("Intercambiar BG / FG (Ctrl+T)").clicked() {
+            let _ = app.session.execute("vfxGraph.swapInputs", json!({"clip": clip_id.0, "node": node.id.0}));
+            ui.close();
+        }
+        if matches!(node.kind, VfxNodeKind::Effect(_) | VfxNodeKind::Instance { .. }) && ui.button("Crear Instancia vinculada").clicked() {
+            let _ = app.session.execute("vfxGraph.createInstance", json!({"clip": clip_id.0, "source": node.id.0}));
+            ui.close();
+        }
+        if ui.button("Duplicar nodo").clicked() {
+            let _ = app.session.execute("vfxGraph.duplicateNode", json!({"clip": clip_id.0, "node": node.id.0}));
+            ui.close();
+        }
+        if ui.button("Extraer del flujo (Shift+Drag)").clicked() {
+            let _ = app.session.execute("vfxGraph.extractNode", json!({"clip": clip_id.0, "node": node.id.0}));
+            ui.close();
+        }
+        if ui.button("Renombrar (F2)").clicked() {
+            *renaming = Some((node.id.0, title));
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Eliminar nodo").clicked() {
+            let _ = app.session.execute("vfxGraph.removeNode", json!({"clip": clip_id.0, "node": node.id.0}));
+            ui.close();
+        }
+    });
+}
+
+fn handle_vfx_ports(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    clip_id: ClipId,
+    graph: &VfxGraph,
+    port_pos: &dyn Fn(VfxEndpoint, Option<VfxInputSlot>) -> Option<Pos2>,
+    zoom: f32,
+) {
+    let pending_id = egui::Id::unique("vfx_nodes_pending_wire");
+    let mut pending: Option<PendingVfxWire> = ui.ctx().data(|d| d.get_temp(pending_id));
+    let pin_r = (5.5 * zoom).clamp(4.0, 8.0);
+
+    // Output ports: MediaIn + every node
+    let mut outputs: Vec<(VfxEndpoint, VfxPortKind)> = vec![(VfxEndpoint::MediaIn, VfxPortKind::Image)];
+    for n in &graph.nodes {
+        let kind = if matches!(n.kind, VfxNodeKind::Mask(_)) { VfxPortKind::Mask } else { VfxPortKind::Image };
+        outputs.push((VfxEndpoint::Node(n.id), kind));
+    }
+
+    for (ep, kind) in outputs {
+        let Some(p) = port_pos(ep, None) else { continue };
+        let r = Rect::from_center_size(p, Vec2::splat(pin_r * 2.2));
+        let resp = ui.interact(r, ui.scope_id().with(("vfx_out", endpoint_json(ep).to_string())), Sense::click_and_drag());
+        let col = if kind == VfxPortKind::Mask { COL_MASK } else { COL_OUT };
+        painter.rect_filled(Rect::from_center_size(p, Vec2::splat(pin_r * 1.4)), CornerRadius::same(2), col);
+        if resp.drag_started() || resp.clicked() {
+            pending = Some(PendingVfxWire { from: ep, kind, start_pos: p });
+        }
+    }
+
+    // Input ports: MediaOut + every node
+    let mut inputs: Vec<(VfxEndpoint, VfxInputSlot, Color32)> = vec![(VfxEndpoint::MediaOut, VfxInputSlot::Main, COL_MAIN)];
+    for n in &graph.nodes {
+        if !matches!(n.kind, VfxNodeKind::Mask(_)) {
+            inputs.push((VfxEndpoint::Node(n.id), VfxInputSlot::Main, COL_MAIN));
+        }
+        if matches!(n.kind, VfxNodeKind::Merge { .. }) {
+            inputs.push((VfxEndpoint::Node(n.id), VfxInputSlot::Foreground, COL_FG));
+        }
+        if !matches!(n.kind, VfxNodeKind::Mask(_) | VfxNodeKind::PipeRouter) {
+            inputs.push((VfxEndpoint::Node(n.id), VfxInputSlot::EffectMask, COL_MASK));
+        }
+    }
+
+    let ptr = ui.input(|i| i.pointer.hover_pos());
+    let mut drop_target: Option<(VfxEndpoint, VfxInputSlot)> = None;
+
+    for (ep, slot, col) in inputs {
+        let Some(p) = port_pos(ep, Some(slot)) else { continue };
+        let r = Rect::from_center_size(p, Vec2::splat(pin_r * 2.4));
+        let resp = ui.interact(r, ui.scope_id().with(("vfx_in", endpoint_json(ep).to_string(), slot_str(slot))), Sense::click());
+        // Paint Fusion-style directional triangle
+        let tri = match slot {
+            VfxInputSlot::Main => vec![Pos2::new(p.x - pin_r, p.y - pin_r * 0.8), Pos2::new(p.x + pin_r, p.y), Pos2::new(p.x - pin_r, p.y + pin_r * 0.8)],
+            _ => vec![Pos2::new(p.x - pin_r * 0.8, p.y - pin_r), Pos2::new(p.x + pin_r * 0.8, p.y - pin_r), Pos2::new(p.x, p.y + pin_r)],
         };
-        let label_pos = pos2(node_rect.min.x + (8.0 * zoom).max(4.0), header_rect.max.y + (5.0 * zoom).max(2.0));
-        painter.text(label_pos, Align2::LEFT_TOP, display_label, Tokens::ui((11.0 * zoom).clamp(8.0, 11.0)), if is_enabled { t.text } else { t.text_faint });
-    }
+        painter.add(egui::Shape::convex_polygon(tri, col, Stroke::NONE));
 
-    if zoom >= 0.65 {
-        let badges = detect_vfx_badges(c.fx_inst, c.fx_def);
-        let badge_w = (28.0 * zoom).clamp(18.0, 28.0);
-        let badge_h = (13.0 * zoom).clamp(9.0, 13.0);
-        let mut bx = node_rect.min.x + (8.0 * zoom).max(4.0);
-        let by = node_rect.max.y - (18.0 * zoom).max(12.0);
-        for (badge_text, badge_tip) in badges {
-            let br = Rect::from_min_size(pos2(bx, by), vec2(badge_w, badge_h));
-            let b_bg = if is_enabled { Color32::from_rgb(20, 22, 28) } else { Color32::from_rgb(18, 19, 22) };
-            painter.rect_filled(br, 2.0, b_bg);
-            painter.rect_stroke(
-                br,
-                2.0,
-                Stroke::new(1.0, if is_active { Color32::from_rgb(80, 75, 110) } else { Color32::from_rgb(45, 48, 56) }),
-                StrokeKind::Inside,
+        if ptr.is_some_and(|hp| hp.distance(p) <= pin_r * 2.2) {
+            drop_target = Some((ep, slot));
+        }
+        if (resp.clicked() && ui.input(|i| i.modifiers.alt)) || resp.secondary_clicked() {
+            let _ = app.session.execute("vfxGraph.disconnect", json!({"clip": clip_id.0, "to": endpoint_json(ep), "slot": slot_str(slot)}));
+        } else if resp.clicked()
+            && let Some(pw) = pending.take()
+        {
+            let _ = app.session.execute(
+                "vfxGraph.connect",
+                json!({"clip": clip_id.0, "from": endpoint_json(pw.from), "to": endpoint_json(ep), "slot": slot_str(slot), "kind": if pw.kind == VfxPortKind::Mask { "mask" } else { "image" }}),
             );
-            let txt_col = match badge_text {
-                "EC" => Color32::from_rgb(175, 130, 255),
-                "GPU" => Color32::from_rgb(240, 190, 60),
-                "32f" => Color32::from_rgb(80, 200, 240),
-                "KF" => Color32::from_rgb(90, 220, 140),
-                "MSK" => Color32::from_rgb(240, 120, 160),
-                "STYL" | "GEN" => Color32::from_rgb(235, 160, 70),
-                "BLUR" | "DIST" => Color32::from_rgb(100, 185, 245),
-                _ => Color32::from_rgb(155, 165, 185),
-            };
-            painter.text(br.center(), Align2::CENTER_CENTER, badge_text, Tokens::ui((8.5 * zoom).clamp(7.0, 8.5)), txt_col);
-            ui.interact(br, egui::Id::unique(("vfx_badge", c.clip_id, i, badge_text)), Sense::hover()).on_hover_text(badge_tip);
-            bx += badge_w + 4.0 * zoom;
-            if bx + badge_w > node_rect.max.x - 6.0 * zoom {
-                break;
-            }
         }
     }
 
-    let stroke = if is_active {
-        Stroke::new((2.0 * zoom).clamp(1.5, 2.5), Color32::from_rgb(230, 175, 45))
-    } else if card_resp.hovered() {
-        Stroke::new(1.0, Color32::from_rgb(110, 100, 150))
-    } else {
-        Stroke::new(1.0, Color32::from_rgb(48, 52, 62))
-    };
-    painter.rect_stroke(node_rect, card_corner, stroke, StrokeKind::Inside);
-
-    card_resp.context_menu(|ui| {
-        let toggle_label = if is_enabled { tl!("Bypass Node (Ctrl+D)") } else { tl!("Enable Node (Ctrl+D)") };
-        if ui.button(toggle_label).clicked() {
-            let _ = app.session.execute("effects.toggleEnabled", json!({"clip": c.clip_id, "index": c.fx_idx}));
-            ui.close();
+    if let Some(pw) = pending {
+        if let Some(hp) = ptr {
+            let col = if pw.kind == VfxPortKind::Mask { COL_MASK } else { COL_MAIN };
+            draw_bezier_wire(painter, pw.start_pos, hp, Stroke::new(2.0, col.gamma_multiply(0.85)));
         }
-        if ui.button(tl!("Reset Node")).clicked() {
-            let _ = app.session.execute("effects.reset", json!({"clip": c.clip_id, "index": c.fx_idx}));
-            ui.close();
-        }
-        if ui.button(tl!("Save Preset…")).clicked() {
-            crate::panels::presets::open_save(app, c.clip_id, vec![c.fx_idx], c.fx_def.name);
-            ui.close();
-        }
-        if ui.button(tl!("Delete Node")).clicked() {
-            let _ = app.session.execute("effects.remove", json!({"clip": c.clip_id, "index": c.fx_idx}));
-            if c.active_node >= c.node_count - 1 {
-                app.ui.active_vfx_node = c.active_node.saturating_sub(1);
+        if ui.input(|i| i.pointer.primary_released()) {
+            if let Some((to_ep, slot)) = drop_target {
+                let _ = app.session.execute(
+                    "vfxGraph.connect",
+                    json!({"clip": clip_id.0, "from": endpoint_json(pw.from), "to": endpoint_json(to_ep), "slot": slot_str(slot), "kind": if pw.kind == VfxPortKind::Mask { "mask" } else { "image" }}),
+                );
             }
-            ui.close();
+            pending = None;
+        }
+    }
+
+    ui.ctx().data_mut(|d| {
+        if let Some(pw) = pending {
+            d.insert_temp(pending_id, pw);
+        } else {
+            d.remove::<PendingVfxWire>(pending_id);
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_knife_cut(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    clip_id: ClipId,
+    graph: &VfxGraph,
+    canvas_resp: &egui::Response,
+    port_pos: &dyn Fn(VfxEndpoint, Option<VfxInputSlot>) -> Option<Pos2>,
+    knife_mod: bool,
+) {
+    let knife_id = egui::Id::unique("vfx_nodes_knife_cut");
+    let mut knife: Option<KnifeCut> = ui.ctx().data(|d| d.get_temp(knife_id));
+    if knife_mod && canvas_resp.drag_started_by(egui::PointerButton::Primary)
+        && let Some(p) = ui.input(|i| i.pointer.interact_pos())
+    {
+        knife = Some(KnifeCut { start: p, current: p });
+    }
+    if let Some(k) = knife.as_mut() {
+        if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
+            k.current = p;
+        }
+        draw_dashed_line(painter, k.start, k.current, Stroke::new(2.0, Color32::from_rgb(248, 113, 113)));
+        if ui.input(|i| i.pointer.primary_released()) {
+            let (s0, s1) = (k.start, k.current);
+            for &e in &graph.edges {
+                if let (Some(p0), Some(p1)) = (port_pos(e.from, None), port_pos(e.to, Some(e.to_slot)))
+                    && bezier_intersects_segment(p0, p1, s0, s1, 16)
+                {
+                    let _ = app.session.execute("vfxGraph.disconnect", json!({"clip": clip_id.0, "to": endpoint_json(e.to), "slot": slot_str(e.to_slot)}));
+                }
+            }
+            knife = None;
+        }
+    }
+    ui.ctx().data_mut(|d| {
+        if let Some(k) = knife {
+            d.insert_temp(knife_id, k);
+        } else {
+            d.remove::<KnifeCut>(knife_id);
+        }
+    });
+}
+
+fn handle_vfx_shortcuts(app: &mut FilmcraftApp, ui: &mut egui::Ui, clip_id: ClipId, graph: &VfxGraph, popup_id: egui::Id, rename_id: egui::Id) {
+    let shift_space = ui.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::Space));
+    if shift_space {
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(
+                popup_id,
+                SelectToolPopup { open: true, query: String::new(), after_node: app.ui.vfx_active_node_id },
+            );
+        });
+        return;
+    }
+    let Some(aid) = app.ui.vfx_active_node_id else { return };
+    if ui.input(|i| (i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(egui::Key::P)) {
+        let _ = app.session.execute("vfxGraph.togglePassThrough", json!({"clip": clip_id.0, "node": aid}));
+    } else if ui.input(|i| (i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(egui::Key::T)) {
+        let _ = app.session.execute("vfxGraph.swapInputs", json!({"clip": clip_id.0, "node": aid}));
+    } else if ui.input(|i| i.key_pressed(egui::Key::F2)) {
+        if let Some(n) = graph.node(VfxNodeId(aid)) {
+            let cur = node_display_name(n, graph);
+            ui.ctx().data_mut(|d| d.insert_temp(rename_id, (aid, cur)));
+        }
+    } else if ui.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::Num1)) {
+        let cur = app.ui.vfx_viewer_nodes[0] == Some((clip_id.0, aid));
+        app.ui.vfx_viewer_nodes[0] = if cur { None } else { Some((clip_id.0, aid)) };
+    } else if ui.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::Num2)) {
+        let cur = app.ui.vfx_viewer_nodes[1] == Some((clip_id.0, aid));
+        app.ui.vfx_viewer_nodes[1] = if cur { None } else { Some((clip_id.0, aid)) };
+    } else if ui.input(|i| !i.modifiers.any() && (i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))) {
+        let _ = app.session.execute("vfxGraph.removeNode", json!({"clip": clip_id.0, "node": aid}));
+    }
+}
+
+fn render_select_tool_popup(app: &mut FilmcraftApp, ui: &mut egui::Ui, clip_id: ClipId, popup_id: egui::Id) {
+    let Some(mut st) = ui.ctx().data(|d| d.get_temp::<SelectToolPopup>(popup_id)) else { return };
+    if !st.open {
+        return;
+    }
+    let mut close = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    egui::Window::new("Select Tool (Shift+Space)")
+        .id(popup_id.with("win"))
+        .collapsible(false)
+        .resizable(false)
+        .default_width(300.0)
+        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ui.ctx(), |ui| {
+            let te = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text("Buscar efecto, Merge, Mask, Router…").desired_width(280.0));
+            te.request_focus();
+            let q = st.query.trim().to_ascii_lowercase();
+            let mut choices: Vec<(&'static str, String, &'static str)> = vec![
+                ("merge", "Merge (Composición BG + FG)".to_string(), "merge"),
+                ("mask", "Mask (Máscara Elipse)".to_string(), "mask"),
+                ("pipeRouter", "PipeRouter (Enrutador)".to_string(), "pipeRouter"),
+            ];
+            for def in filmcraft_project::effect_defs() {
+                if !def.intrinsic && def.kind == EffectKind::Video && def.id != "lumetri" && !filmcraft_project::graphic::is_layer_id(def.id) {
+                    choices.push(("effect", def.name.to_string(), def.id));
+                }
+            }
+            let filtered: Vec<_> = choices
+                .into_iter()
+                .filter(|(_, label, id)| q.is_empty() || label.to_ascii_lowercase().contains(&q) || id.to_ascii_lowercase().contains(&q))
+                .take(18)
+                .collect();
+
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                for (i, (kind, label, id)) in filtered.iter().enumerate() {
+                    let clicked = ui.selectable_label(i == 0, label).clicked() || (enter && i == 0);
+                    if clicked {
+                        let mut body = json!({"clip": clip_id.0, "kind": kind});
+                        if *kind == "effect" {
+                            body["effect"] = json!(id);
+                        }
+                        if let Some(a) = st.after_node {
+                            body["after"] = json!(a);
+                        }
+                        if let Ok(res) = app.session.execute("vfxGraph.addNode", body)
+                            && let Some(nid) = res["node"].as_u64()
+                        {
+                            app.ui.vfx_active_node_id = Some(nid);
+                        }
+                        close = true;
+                    }
+                }
+            });
+        });
+
+    if close {
+        ui.ctx().data_mut(|d| d.remove::<SelectToolPopup>(popup_id));
+    } else {
+        ui.ctx().data_mut(|d| d.insert_temp(popup_id, st));
+    }
+}
+
+/// Collect ONLY the animatable parameters belonging to the single active [`VfxNode`].
+pub(crate) fn active_node_params<'a>(node: &'a VfxNode, graph: &'a VfxGraph) -> Vec<(String, String, Param)> {
+    let mut out: Vec<(String, String, Param)> = Vec::new();
+    match &node.kind {
+        VfxNodeKind::Effect(_) | VfxNodeKind::Instance { .. } => {
+            if let Some(fx) = graph.resolve_effect(node.id) {
+                if let Some(def) = fx.def() {
+                    for pd in &def.params {
+                        if pd.animatable
+                            && let Some(p) = fx.param(pd.id)
+                        {
+                            out.push((pd.id.to_string(), pd.label.to_string(), p.clone()));
+                        }
+                    }
+                } else {
+                    for (k, p) in &fx.params {
+                        out.push((k.clone(), k.clone(), p.clone()));
+                    }
+                }
+            }
+        }
+        VfxNodeKind::Merge { center, size, angle, .. } => {
+            out.push(("center".into(), "Center".into(), center.clone()));
+            out.push(("size".into(), "Size".into(), size.clone()));
+            out.push(("angle".into(), "Angle".into(), angle.clone()));
+        }
+        VfxNodeKind::Mask(m) => {
+            out.push(("feather".into(), "Feather".into(), m.feather.clone()));
+            out.push(("opacity".into(), "Opacity".into(), m.opacity.clone()));
+            out.push(("expansion".into(), "Expansion".into(), m.expansion.clone()));
+        }
+        VfxNodeKind::PipeRouter => {}
+    }
+    out.push(("__settings.blend".into(), "Settings ▸ Blend".into(), node.settings.blend.clone()));
+    out
+}
+
+#[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
+fn render_bottom_drawer(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    t: &Tokens,
+    clip_id: ClipId,
+    graph: &VfxGraph,
+    active_node: Option<&VfxNode>,
+    mode: u8,
+    height: f32,
+    clip_start: Tick,
+    clip_dur: Tick,
+    in_point: Tick,
+    speed: f64,
+) {
+    let Some(node) = active_node else {
+        ui.allocate_ui(Vec2::new(ui.available_width(), height), |ui| {
+            ui.centered_and_justified(|ui| {
+                ui.label(egui::RichText::new("Selecciona un nodo para ver exclusivamente sus keyframes y curvas").color(t.text_dim));
+            });
+        });
+        return;
+    };
+
+    let title = node_display_name(node, graph);
+    let params = active_node_params(node, graph);
+    let ph = app.session.playhead();
+    let dur_ticks = clip_dur.0.max(1) as f64;
+    let ph_frac = ((ph.0 - clip_start.0) as f64 / dur_ticks).clamp(0.0, 1.0) as f32;
+    let spd = if speed.abs() > 1e-6 { speed } else { 1.0 };
+
+    ui.allocate_ui(Vec2::new(ui.available_width(), height), |ui| {
+        ui.horizontal(|ui| {
+            let tag = if mode == 1 { "Keyframes del nodo:" } else { "Spline del nodo:" };
+            ui.label(egui::RichText::new(format!("{tag} {title}")).strong().size(11.5).color(t.accent));
+            ui.label(egui::RichText::new(format!("({} parámetros aislados)", params.len())).size(10.5).color(t.text_dim));
+        });
+
+        let avail = ui.available_rect_before_wrap();
+        if mode == 1 {
+            // Isolated per-node Keyframes dope-sheet
+            let label_w = (avail.width() * 0.30).clamp(130.0, 220.0);
+            egui::ScrollArea::vertical().id_salt("vfx_node_kf_drawer").show(ui, |ui| {
+                for (pid, pname, prm) in &params {
+                    let row_h = 22.0;
+                    let (row_r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), Sense::hover());
+                    let left_r = Rect::from_min_max(row_r.left_top(), Pos2::new(row_r.left() + label_w, row_r.bottom()));
+                    let lane_r = Rect::from_min_max(Pos2::new(left_r.right() + 4.0, row_r.top()), row_r.right_bottom());
+
+                    let p = ui.painter();
+                    p.rect_filled(lane_r, CornerRadius::same(2), Color32::from_rgb(24, 26, 32));
+                    let kf_btn_r = Rect::from_center_size(Pos2::new(left_r.left() + 10.0, left_r.center().y), Vec2::splat(14.0));
+                    let kf_resp = ui.interact(kf_btn_r, ui.scope_id().with(("vfx_kf_tog", node.id.0, pid)), Sense::click());
+                    let anim_col = if prm.is_animated() { Color32::from_rgb(96, 165, 250) } else { t.text_dim };
+                    p.text(kf_btn_r.center(), egui::Align2::CENTER_CENTER, "◆", egui::FontId::proportional(10.0), anim_col);
+                    p.text(Pos2::new(left_r.left() + 22.0, left_r.center().y), egui::Align2::LEFT_CENTER, pname, egui::FontId::proportional(11.0), t.text);
+
+                    if kf_resp.clicked() {
+                        if pid == "__settings.blend" {
+                            let _ = app.session.execute("vfxGraph.setNodeSetting", json!({"clip": clip_id.0, "node": node.id.0, "blendToggleAnimation": true}));
+                        } else {
+                            let _ = app.session.execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node.id.0, "param": pid, "toggleAnimation": true}));
+                        }
+                    }
+
+                    // Draw keyframes for this parameter only
+                    for kf in &prm.keyframes {
+                        let tl_ticks = ((kf.time.0 - in_point.0) as f64 / spd) as i64;
+                        let frac = (tl_ticks as f64 / dur_ticks).clamp(0.0, 1.0) as f32;
+                        let kx = lane_r.left() + frac * lane_r.width();
+                        let ky = lane_r.center().y;
+                        let d = 4.5f32;
+                        let pts = vec![Pos2::new(kx, ky - d), Pos2::new(kx + d, ky), Pos2::new(kx, ky + d), Pos2::new(kx - d, ky)];
+                        p.add(egui::Shape::convex_polygon(pts, Color32::from_rgb(96, 165, 250), Stroke::new(1.0, Color32::WHITE)));
+                    }
+
+                    // Playhead line + click to seek
+                    let ph_x = lane_r.left() + ph_frac * lane_r.width();
+                    p.line_segment([Pos2::new(ph_x, lane_r.top()), Pos2::new(ph_x, lane_r.bottom())], Stroke::new(1.2, Color32::from_rgb(239, 68, 68)));
+                    let lane_resp = ui.interact(lane_r, ui.scope_id().with(("vfx_kf_lane", node.id.0, pid)), Sense::click_and_drag());
+                    if (lane_resp.clicked() || lane_resp.dragged())
+                        && let Some(hp) = ui.input(|i| i.pointer.interact_pos())
+                    {
+                        let f = ((hp.x - lane_r.left()) / lane_r.width().max(1.0)).clamp(0.0, 1.0) as f64;
+                        let target_t = Tick(clip_start.0 + (f * dur_ticks) as i64);
+                        let _ = app.session.execute("transport.seek", json!({"time": target_t.0}));
+                    }
+                }
+            });
+        } else {
+            // Mode 2: Isolated per-node Spline Curve Viewer
+            let graph_r = Rect::from_min_size(avail.left_top(), Vec2::new(avail.width(), (avail.height() - 4.0).max(60.0)));
+            let gresp = ui.interact(graph_r, ui.scope_id().with("vfx_node_spline_canvas"), Sense::click_and_drag());
+            let p = ui.painter_at(graph_r);
+            p.rect_filled(graph_r, CornerRadius::same(4), Color32::from_rgb(22, 24, 30));
+            for i in 1..4 {
+                let y = graph_r.top() + graph_r.height() * (i as f32 / 4.0);
+                p.line_segment([Pos2::new(graph_r.left(), y), Pos2::new(graph_r.right(), y)], Stroke::new(0.8, Color32::from_rgba_unmultiplied(255, 255, 255, 18)));
+            }
+            let palette = [
+                Color32::from_rgb(96, 165, 250),
+                Color32::from_rgb(52, 211, 153),
+                Color32::from_rgb(250, 204, 21),
+                Color32::from_rgb(244, 114, 182),
+            ];
+            let mut curve_idx = 0usize;
+            for (_, pname, prm) in &params {
+                if !prm.is_animated() || !matches!(prm.value, ParamValue::Float(_)) {
+                    continue;
+                }
+                let col = palette[curve_idx % palette.len()];
+                curve_idx += 1;
+                let mut vmin = f64::MAX;
+                let mut vmax = f64::MIN;
+                for kf in &prm.keyframes {
+                    if let Some(v) = kf.value.as_f64() {
+                        vmin = vmin.min(v);
+                        vmax = vmax.max(v);
+                    }
+                }
+                if (vmax - vmin).abs() < 1e-4 {
+                    vmin -= 1.0;
+                    vmax += 1.0;
+                }
+                let span = (vmax - vmin).max(1e-4);
+                let mut pts = Vec::with_capacity(48);
+                for s in 0..=48 {
+                    let frac = s as f32 / 48.0;
+                    let mt = Tick(in_point.0 + (frac as f64 * dur_ticks * spd) as i64);
+                    let v = prm.f64_at(mt);
+                    let ny = 1.0 - ((v - vmin) / span).clamp(0.0, 1.0) as f32;
+                    pts.push(Pos2::new(graph_r.left() + frac * graph_r.width(), graph_r.top() + 8.0 + ny * (graph_r.height() - 16.0)));
+                }
+                p.add(egui::Shape::line(pts, Stroke::new(1.8, col)));
+                p.text(Pos2::new(graph_r.left() + 8.0, graph_r.top() + 6.0 + (curve_idx - 1) as f32 * 13.0), egui::Align2::LEFT_TOP, pname, egui::FontId::proportional(10.0), col);
+            }
+            if curve_idx == 0 {
+                p.text(graph_r.center(), egui::Align2::CENTER_CENTER, "Activa keyframes (◆) en un parámetro del nodo para editar su curva Spline", egui::FontId::proportional(11.0), t.text_dim);
+            }
+            let ph_x = graph_r.left() + ph_frac * graph_r.width();
+            p.line_segment([Pos2::new(ph_x, graph_r.top()), Pos2::new(ph_x, graph_r.bottom())], Stroke::new(1.4, Color32::from_rgb(239, 68, 68)));
+            if (gresp.clicked() || gresp.dragged())
+                && let Some(hp) = ui.input(|i| i.pointer.interact_pos())
+            {
+                let f = ((hp.x - graph_r.left()) / graph_r.width().max(1.0)).clamp(0.0, 1.0) as f64;
+                let target_t = Tick(clip_start.0 + (f * dur_ticks) as i64);
+                let _ = app.session.execute("transport.seek", json!({"time": target_t.0}));
+            }
         }
     });
 }
@@ -871,9 +1256,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quick_vfx_presets_resolve_in_effect_catalogue() {
-        for &(id, _label, _cat) in QUICK_VFX_PRESETS {
-            assert!(filmcraft_project::find_effect(id).is_some(), "QUICK_VFX_PRESETS entry {id} not found in filmcraft_project::find_effect");
-        }
+    fn shared_bezier_and_knife_intersection_geometry_works() {
+        let p0 = Pos2::new(0.0, 50.0);
+        let p3 = Pos2::new(200.0, 50.0);
+        assert!(bezier_wire_distance(Pos2::new(100.0, 52.0), p0, p3, 16) < 3.0);
+        assert!(bezier_wire_distance(Pos2::new(100.0, 120.0), p0, p3, 16) > 50.0);
+        assert!(bezier_intersects_segment(p0, p3, Pos2::new(100.0, 0.0), Pos2::new(100.0, 100.0), 16));
+        assert!(!bezier_intersects_segment(p0, p3, Pos2::new(100.0, 0.0), Pos2::new(100.0, 20.0), 16));
+    }
+
+    #[test]
+    fn active_node_params_isolates_only_selected_node() {
+        let mut g = VfxGraph::from_serial_effects(&[
+            filmcraft_project::find_effect("invert").unwrap().instance(),
+            filmcraft_project::find_effect("gaussian_blur").unwrap().instance(),
+        ]);
+        let n1 = g.node(VfxNodeId(1)).unwrap();
+        let p1 = active_node_params(n1, &g);
+        assert!(p1.iter().any(|(id, _, _)| id == "__settings.blend"));
+        assert!(!p1.iter().any(|(id, _, _)| id == "blurriness"));
+
+        let n2 = g.node(VfxNodeId(2)).unwrap();
+        let p2 = active_node_params(n2, &g);
+        assert!(p2.iter().any(|(id, _, _)| id == "blurriness"));
+        assert!(p2.iter().any(|(id, _, _)| id == "__settings.blend"));
+        let _ = &mut g;
     }
 }

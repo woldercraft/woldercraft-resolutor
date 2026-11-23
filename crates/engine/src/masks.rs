@@ -216,6 +216,7 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
     let r = w.min(h) * 0.2;
     let size = p.get("size").and_then(pt).unwrap_or(Vec2::new(r * 2.0, r * 2.0));
     let mut is_gradient = shape == "gradient";
+    let mut initial_corner_radius = 0.0_f64;
     let path = match p.get("path") {
         Some(v) => {
             let parsed = path_from_json(v).ok_or_else(|| bad("masks.add", "bad `path`"))?;
@@ -233,7 +234,10 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
                 let (x0, y0, x1, y1) = (center.x - size.x / 2.0, center.y - size.y / 2.0, center.x + size.x / 2.0, center.y + size.y / 2.0);
                 match f64_p(p, "cornerRadius") {
                     Some(r) if !r.is_finite() || r < 0.0 => return Err(bad("masks.add", "`cornerRadius` is pixels ≥ 0")),
-                    Some(r) => MaskPath::rounded_rect(x0, y0, x1, y1, r),
+                    Some(r) => {
+                        initial_corner_radius = r;
+                        MaskPath::rect(x0, y0, x1, y1)
+                    }
                     None => MaskPath::rect(x0, y0, x1, y1),
                 }
             }
@@ -267,13 +271,16 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
         }
         let n = e.masks.iter().filter_map(|m| m.name.strip_prefix("Mask (")?.strip_suffix(')')?.parse::<usize>().ok()).max().unwrap_or(0) + 1;
         let name = format!("Mask ({n})");
-        let new_mask = if is_gradient {
+        let mut new_mask = if is_gradient {
             let p0 = path.vertices.first().map_or(center, |v| v.p);
             let p1 = path.vertices.get(1).map_or(center + Vec2::new(0.0, (size.y * 0.6).max(20.0)), |v| v.p);
             Mask::gradient(name.clone(), p0, p1, (p1 - p0).length().max(20.0))
         } else {
             Mask::new(name.clone(), path)
         };
+        if initial_corner_radius > 0.0 {
+            new_mask.corner_radius = filmcraft_project::Param::new(ParamValue::Float(initial_corner_radius));
+        }
         e.masks.push(new_mask);
         let mi = e.masks.len() - 1;
         it.sync_color_graph_from_lumetri_effects();
@@ -538,7 +545,7 @@ fn toggle_smooth(s: &mut Session, p: &Value) -> Result<Value> {
 /// keyframe so an animated path keeps interpolating. Returns how many corners were rounded.
 fn round_corners(s: &mut Session, p: &Value) -> Result<Value> {
     const ID: &str = "masks.roundCorners";
-    let radius = f64_p(p, "radius").filter(|r| r.is_finite() && *r > 0.0).ok_or_else(|| bad(ID, "need `radius` (pixels, > 0)"))?;
+    let radius = f64_p(p, "radius").filter(|r| r.is_finite() && *r >= 0.0).ok_or_else(|| bad(ID, "need `radius` (pixels, ≥ 0)"))?;
     let only: Option<Vec<usize>> = match p.get("vertices") {
         None | Some(Value::Null) => None,
         Some(v) => {
@@ -552,15 +559,23 @@ fn round_corners(s: &mut Session, p: &Value) -> Result<Value> {
             Some(out)
         }
     };
+    if only.is_some() && radius <= 0.0 {
+        return Err(bad(ID, "need `radius` (pixels, > 0)"));
+    }
     let rounded = edit_mask(s, p, "Round Mask Corners", move |m, t| {
         let mut corners = m.path_at(t).roundable_corners();
         if let Some(only) = &only {
             corners.retain(|i| only.binary_search(i).is_ok());
+            if corners.is_empty() {
+                return Err(bad(ID, "no sharp corner between straight edges to round"));
+            }
+            drop_all(m, t, |path| *path = path.with_rounded_corners(radius, &corners));
+            return Ok(corners.len());
         }
         if corners.is_empty() {
             return Err(bad(ID, "no sharp corner between straight edges to round"));
         }
-        drop_all(m, t, |path| *path = path.with_rounded_corners(radius, &corners));
+        m.corner_radius.set_at(t, ParamValue::Float(radius));
         Ok(corners.len())
     })?;
     Ok(json!({"corners": rounded}))
@@ -610,7 +625,8 @@ fn list(s: &mut Session, p: &Value) -> Result<Value> {
                         "feather": m.feather.f64_at(mt),
                         "opacity": m.opacity.f64_at(mt),
                         "expansion": m.expansion.f64_at(mt),
-                        "path": path_to_json(&m.path_at(mt)),
+                        "cornerRadius": m.corner_radius.f64_at(mt),
+                        "path": path_to_json(&m.effective_path_at(mt)),
                         "pathKeyframes": m.path.keyframes.iter().map(|k| k.time.0).collect::<Vec<_>>(),
                         "selected": s.state.selected_mask == Some(MaskSel { clip: it.id, effect: ei, mask: mi }),
                     }));

@@ -253,7 +253,7 @@ fn simple_transition(id: &str) -> bool {
 /// active effects, or `None` if the clip must fall back to CPU rendering.
 fn gpu_chain_status(project: &Project, seq: &Sequence, item: &TrackItem, opts: RenderOptions) -> Option<bool> {
     let is_media = project.item(item.item).is_some_and(|p| matches!(p.kind, ItemKind::Media(_) | ItemKind::Subclip { .. }));
-    if !is_media || item.has_opacity_masks() {
+    if !is_media || item.has_opacity_masks() || item.vfx_graph.as_ref().is_some_and(|vg| vg.requires_dag_eval()) {
         return None;
     }
     if !opts.effects {

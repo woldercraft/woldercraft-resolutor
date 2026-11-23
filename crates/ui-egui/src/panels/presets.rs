@@ -7,15 +7,27 @@
 
 use std::collections::BTreeMap;
 
-use egui::{Align2, Rect, Sense, pos2, vec2};
+use egui::{pos2, vec2, Align2, Rect, Sense};
 use serde_json::json;
 
-use crate::FilmcraftApp;
 use crate::icons::{self, Icon};
 use crate::native_dialogs::FileDialog;
 use crate::state::SavePresetDraft;
 use crate::theme::Tokens;
+use crate::FilmcraftApp;
 use filmcraft_engine::presets::EffectPreset;
+
+/// Metadata for a hovered user/built-in preset, shown in the Effects panel info footer.
+#[derive(Clone, Debug)]
+pub struct HoveredPreset {
+    pub name: String,
+    pub description: String,
+    pub builtin: bool,
+}
+
+pub(crate) fn preset_fav_key(name: &str) -> String {
+    format!("preset:{name}")
+}
 
 /// One node of the Presets bin: sub-folders and preset indices, built from the `" ▸ "` separator
 /// in preset names (Premiere bin paths arrive that way from `.prfpset` files).
@@ -38,7 +50,7 @@ impl PresetNode {
 fn preset_tree(presets: &[EffectPreset], filter: &str) -> PresetNode {
     let mut root = PresetNode::default();
     for (i, p) in presets.iter().enumerate() {
-        if !crate::i18n::matches_query(&p.name, filter) {
+        if !crate::panels::effects::matches_tokens(&p.name, filter) {
             continue;
         }
         let parts: Vec<&str> = p.name.split(" ▸ ").map(str::trim).filter(|s| !s.is_empty()).collect();
@@ -61,18 +73,22 @@ fn action_row(app: &mut FilmcraftApp, ui: &mut egui::Ui, id: &str, icon: Icon, l
     resp.clicked()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn preset_folder_row(
     app: &mut FilmcraftApp,
     ui: &mut egui::Ui,
     key: &str,
     label: &str,
     depth: usize,
+    parent: Option<&str>,
     filter: &str,
     action: &mut Option<(String, String)>,
+    visible_nodes: &mut Vec<crate::panels::effects::VisibleNode>,
 ) -> bool {
     let t = app.tokens;
-    let open = !filter.is_empty() || app.ui.expanded_fx.iter().any(|k| k == key);
+    let open = crate::panels::effects::is_folder_open(app, ui, key, filter);
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::click());
+    visible_nodes.push(crate::panels::effects::VisibleNode::Folder { key: key.to_string(), open, parent: parent.map(str::to_string), rect: r });
     if resp.hovered() {
         ui.painter().rect_filled(r, 0.0, t.hover);
     }
@@ -103,25 +119,66 @@ fn preset_folder_row(
     });
 
     if resp.clicked() {
-        if open {
-            app.ui.expanded_fx.retain(|k| k != key);
-        } else {
-            app.ui.expanded_fx.push(key.to_string());
-        }
+        crate::panels::effects::toggle_folder_open(app, ui, key, filter, open);
     }
     open
 }
 
-fn preset_row(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: &EffectPreset, depth: usize, action: &mut Option<(String, String)>) {
+#[allow(clippy::too_many_arguments)]
+fn preset_row(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    p: &EffectPreset,
+    depth: usize,
+    parent: Option<&str>,
+    action: &mut Option<(String, String)>,
+    hovered: &mut Option<HoveredPreset>,
+    toggle_fav: &mut Option<String>,
+    visible_nodes: &mut Vec<crate::panels::effects::VisibleNode>,
+) {
     let t = app.tokens;
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::click_and_drag());
-    if resp.hovered() {
+    visible_nodes.push(crate::panels::effects::VisibleNode::Preset { name: p.name.clone(), parent: parent.map(str::to_string), rect: r });
+    let row_hovered = resp.hovered() || ui.rect_contains_pointer(r);
+    if row_hovered {
+        *hovered = Some(HoveredPreset { name: p.name.clone(), description: p.description.clone(), builtin: p.builtin });
+    }
+    let fav_key = preset_fav_key(&p.name);
+    let is_fav = app.ui.favorite_effects.iter().any(|f| f == &fav_key);
+    let mut right_x = r.max.x - 8.0;
+    let show_star = is_fav || row_hovered;
+    let star_r = Rect::from_min_size(pos2(right_x - 16.0, r.min.y + 2.0), vec2(16.0, 16.0));
+    if show_star {
+        let star_resp = ui.interact(star_r, ui.scope_id().with(("preset-fav", &p.name)), Sense::click());
+        let star_fg = if is_fav {
+            t.accent
+        } else if star_resp.hovered() {
+            t.text
+        } else {
+            t.text_dim
+        };
+        if ui.is_rect_visible(r) {
+            icons::paint(ui.painter(), star_r.shrink(2.5), Icon::Star, star_fg);
+        }
+        app.auto.add(&format!("effects.preset.fav.{}", p.name), star_r, &p.name);
+        if star_resp.clicked() {
+            *toggle_fav = Some(fav_key.clone());
+        }
+        right_x -= 18.0;
+    }
+    if row_hovered {
         ui.painter().rect_filled(r, 0.0, t.hover);
     }
     // inside the Presets folder (or sub-folder): icon and label one level deeper than it (#2329)
     let x = r.min.x + crate::panels::effects::tree_x(depth + 1) + 18.0;
-    icons::paint(ui.painter(), Rect::from_center_size(pos2(x, r.center().y), vec2(13.0, 13.0)), Icon::Sparkle, if p.builtin { t.text_dim } else { t.accent });
-    ui.painter().text(pos2(x + 12.0, r.center().y), Align2::LEFT_CENTER, crate::i18n::t(&p.name), Tokens::ui(12.0), t.text);
+    icons::paint(
+        ui.painter(),
+        Rect::from_center_size(pos2(x, r.center().y), vec2(13.0, 13.0)),
+        Icon::Sparkle,
+        if p.builtin { t.text_dim } else { t.accent },
+    );
+    let label_clip = Rect::from_min_max(pos2(x + 12.0, r.min.y), pos2((right_x - 4.0).max(x + 12.0), r.max.y));
+    ui.painter().with_clip_rect(label_clip).text(pos2(x + 12.0, r.center().y), Align2::LEFT_CENTER, crate::i18n::t(&p.name), Tokens::ui(12.0), t.text);
     app.auto.add(&format!("effects.preset.{}", p.name), r, &p.name);
     let tip = crate::i18n::t(if p.description.is_empty() { &p.name } else { &p.description }).to_string();
     let resp = resp.on_hover_text(tip);
@@ -135,6 +192,10 @@ fn preset_row(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: &EffectPreset, depth
     resp.context_menu(|ui| {
         if ui.button(tl!("Apply to Selected Clips")).clicked() {
             *action = Some(("presets.apply".to_string(), p.name.clone()));
+            ui.close();
+        }
+        if ui.button(tl!("Copy Preset Name")).clicked() {
+            ui.ctx().copy_text(p.name.clone());
             ui.close();
         }
         if let Some(path) = &source {
@@ -164,33 +225,46 @@ fn preset_row(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: &EffectPreset, depth
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_presets(
     app: &mut FilmcraftApp,
     ui: &mut egui::Ui,
     node: &PresetNode,
     presets: &[EffectPreset],
     (prefix, depth): (&str, usize),
+    parent: Option<&str>,
     filter: &str,
     action: &mut Option<(String, String)>,
+    hovered: &mut Option<HoveredPreset>,
+    toggle_fav: &mut Option<String>,
+    visible_nodes: &mut Vec<crate::panels::effects::VisibleNode>,
 ) {
     for (name, child) in &node.folders {
         let path = if prefix.is_empty() { name.clone() } else { format!("{prefix} ▸ {name}") };
         let key = format!("Presets/{path}");
-        if preset_folder_row(app, ui, &key, name, depth, filter, action) {
-            render_presets(app, ui, child, presets, (&path, depth + 1), filter, action);
+        if preset_folder_row(app, ui, &key, name, depth, parent, filter, action, visible_nodes) {
+            render_presets(app, ui, child, presets, (&path, depth + 1), Some(&key), filter, action, hovered, toggle_fav, visible_nodes);
         }
     }
     for &i in &node.presets {
         if let Some(p) = presets.get(i) {
-            preset_row(app, ui, p, depth, action);
+            preset_row(app, ui, p, depth, parent, action, hovered, toggle_fav, visible_nodes);
         }
     }
 }
 
 /// The rows of the Presets folder (inside the Effects panel's scroll area). Presets whose names
 /// carry a `" ▸ "` bin path are shown as a nested folder tree, as in Premiere's Effects panel.
-pub fn folder_rows(app: &mut FilmcraftApp, ui: &mut egui::Ui, filter: &str) -> Option<(String, String)> {
+/// Returns `(action, hovered_preset, toggle_favorite_key)`.
+pub(crate) fn folder_rows(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    filter: &str,
+    visible_nodes: &mut Vec<crate::panels::effects::VisibleNode>,
+) -> (Option<(String, String)>, Option<HoveredPreset>, Option<String>) {
     let mut action = None;
+    let mut hovered = None;
+    let mut toggle_fav = None;
     if filter.is_empty() {
         let import = action_row(app, ui, "effects.presets.import", Icon::Import, tl!("Import Presets…"));
         if import {
@@ -203,8 +277,8 @@ pub fn folder_rows(app: &mut FilmcraftApp, ui: &mut egui::Ui, filter: &str) -> O
     }
     let presets = app.session.presets.all();
     let tree = preset_tree(&presets, filter);
-    render_presets(app, ui, &tree, &presets, ("", 0), filter, &mut action);
-    action
+    render_presets(app, ui, &tree, &presets, ("", 0), Some("Presets"), filter, &mut action, &mut hovered, &mut toggle_fav, visible_nodes);
+    (action, hovered, toggle_fav)
 }
 
 /// Run a Presets-bin action.
@@ -257,7 +331,11 @@ pub fn run(app: &mut FilmcraftApp, ctx: &egui::Context, cmd: &str, name: &str) {
                     app.ui.expanded_fx.push("Presets".to_string());
                 }
                 app.ui.status = if let Some(e) = errors.first() {
-                    if imported > 0 { tlf!("Imported {n} preset(s); not imported: {error}", n = imported, error = e) } else { e.clone() }
+                    if imported > 0 {
+                        tlf!("Imported {n} preset(s); not imported: {error}", n = imported, error = e)
+                    } else {
+                        e.clone()
+                    }
                 } else if skipped > 0 && warnings > 0 {
                     tlf!(
                         "Imported {n} preset(s); {skipped} skipped, {warnings} with unsupported parameters",

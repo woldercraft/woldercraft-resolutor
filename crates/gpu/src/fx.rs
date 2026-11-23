@@ -87,6 +87,22 @@ const OP_NODE_SIZING: u32 = 61;
 
 type Target = (wgpu::Texture, wgpu::TextureView);
 
+struct CachedTex<T> {
+    _keep: Arc<T>,
+    _tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    last_used: u64,
+}
+
+fn evict_lru_tex<T>(cache: &mut HashMap<usize, CachedTex<T>>, limit: usize) {
+    while cache.len() >= limit {
+        let Some(&oldest_key) = cache.iter().min_by_key(|(_, v)| v.last_used).map(|(k, _)| k) else {
+            break;
+        };
+        cache.remove(&oldest_key);
+    }
+}
+
 pub(crate) struct FxStage {
     px: wgpu::ComputePipeline,
     run: wgpu::ComputePipeline,
@@ -95,9 +111,10 @@ pub(crate) struct FxStage {
     source: wgpu::RenderPipeline,
     pool: HashMap<(u32, u32), Vec<Target>>,
     used: HashSet<(u32, u32)>,
-    lut_cache: HashMap<usize, (Arc<filmcraft_color::Lut3d>, wgpu::Texture, wgpu::TextureView)>,
-    curve_cache: HashMap<usize, (Arc<Vec<[f32; 4]>>, wgpu::Texture, wgpu::TextureView)>,
-    mask_cache: HashMap<usize, (Arc<Vec<f32>>, wgpu::Texture, wgpu::TextureView)>,
+    lut_cache: HashMap<usize, CachedTex<filmcraft_color::Lut3d>>,
+    curve_cache: HashMap<usize, CachedTex<Vec<[f32; 4]>>>,
+    mask_cache: HashMap<usize, CachedTex<Vec<f32>>>,
+    cache_tick: u64,
     uniform_buffers: Vec<wgpu::Buffer>,
     uniform_buffer_idx: usize,
     /// Open [`begin_frame`](Self::begin_frame)s.
@@ -129,7 +146,7 @@ struct Step {
     run: bool,
     code: u32,
     i1: [u32; 4],
-    p: [f32; 24],
+    p: [f32; 28],
     /// Combine with the preserved original in `orig` (Unsharp Mask or HSL Secondary apply).
     combine: bool,
     /// Keeps `orig` untouched across intermediate passes (Unsharp blur or HSL key/denoise/blur).
@@ -160,7 +177,7 @@ struct Step {
 }
 
 fn step(code: u32, i1: [u32; 4], p: &[f32]) -> Step {
-    let mut q = [0.0; 24];
+    let mut q = [0.0; 28];
     for (d, s) in q.iter_mut().zip(p) {
         *d = *s;
     }
@@ -414,6 +431,8 @@ fn push_lumetri_steps(op: &filmcraft_render::gpufx::LumetriOp, dag_unmasked: boo
         key_gain,
         show_mask,
         node_mask,
+        grade_space,
+        hdr_specular,
         ..
     } = op;
 
@@ -458,6 +477,11 @@ fn push_lumetri_steps(op: &filmcraft_render::gpufx::LumetriOp, dag_unmasked: boo
     let st_k = [(st[0] - 0.5) * 0.3, (st[1] - 0.5) * 0.3, (st[2] - 0.5) * 0.3];
     let ht_k = [(ht[0] - 0.5) * 0.3, (ht[1] - 0.5) * 0.3, (ht[2] - 0.5) * 0.3];
 
+    let (hdr_mode, hdr_a, hdr_b) = match grade_space {
+        filmcraft_color::GradeSpace::Sdr => (0u32, 0.0f32, 0.0f32),
+        filmcraft_color::GradeSpace::Pq { norm, .. } => (1u32, *norm, 0.0f32),
+        filmcraft_color::GradeSpace::Hlg { white, gamma } => (2u32, *white, *gamma),
+    };
     let p = [
         ge[0],
         ge[1],
@@ -483,8 +507,12 @@ fn push_lumetri_steps(op: &filmcraft_render::gpufx::LumetriOp, dag_unmasked: boo
         ht_k[1],
         ht_k[2],
         *primary_hue,
+        hdr_a,
+        hdr_b,
+        *hdr_specular,
+        0.0,
     ];
-    out.push(step(OP_LUMETRI, [*creative_on as u32, *vignette_on as u32, 0, 0], &p));
+    out.push(step(OP_LUMETRI, [*creative_on as u32, *vignette_on as u32, hdr_mode, 0], &p));
 
     if let Some(lut) = look_lut {
         if look_k.abs() > 1e-5 {
@@ -990,6 +1018,7 @@ impl FxStage {
             lut_cache: HashMap::new(),
             curve_cache: HashMap::new(),
             mask_cache: HashMap::new(),
+            cache_tick: 0,
             uniform_buffers: Vec::new(),
             uniform_buffer_idx: 0,
             frames: 0,
@@ -1005,14 +1034,19 @@ impl FxStage {
         self.pool.clear();
     }
 
+    fn next_cache_tick(&mut self) -> u64 {
+        self.cache_tick = self.cache_tick.wrapping_add(1);
+        self.cache_tick
+    }
+
     fn lut_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, lut: &Arc<filmcraft_color::Lut3d>) -> wgpu::TextureView {
         let key = Arc::as_ptr(lut) as usize;
-        if let Some((_, _, view)) = self.lut_cache.get(&key) {
-            return view.clone();
+        let tick = self.next_cache_tick();
+        if let Some(entry) = self.lut_cache.get_mut(&key) {
+            entry.last_used = tick;
+            return entry.view.clone();
         }
-        if self.lut_cache.len() >= 32 {
-            self.lut_cache.clear();
-        }
+        evict_lru_tex(&mut self.lut_cache, 32);
         let size = lut.size as u32;
         let width = size * size;
         let height = size;
@@ -1051,7 +1085,7 @@ impl FxStage {
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
         let view = texture.create_view(&Default::default());
-        self.lut_cache.insert(key, (lut.clone(), texture, view.clone()));
+        self.lut_cache.insert(key, CachedTex { _keep: lut.clone(), _tex: texture, view: view.clone(), last_used: tick });
         view
     }
 
@@ -1065,12 +1099,12 @@ impl FxStage {
         label: &'static str,
     ) -> wgpu::TextureView {
         let key = Arc::as_ptr(texels) as usize;
-        if let Some((_, _, view)) = self.curve_cache.get(&key) {
-            return view.clone();
+        let tick = self.next_cache_tick();
+        if let Some(entry) = self.curve_cache.get_mut(&key) {
+            entry.last_used = tick;
+            return entry.view.clone();
         }
-        if self.curve_cache.len() >= 64 {
-            self.curve_cache.clear();
-        }
+        evict_lru_tex(&mut self.curve_cache, 64);
         let w = width as usize;
         let row_bytes = width * 16;
         let aligned_row_bytes = row_bytes.div_ceil(256) * 256;
@@ -1107,7 +1141,7 @@ impl FxStage {
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
         let view = texture.create_view(&Default::default());
-        self.curve_cache.insert(key, (texels.clone(), texture, view.clone()));
+        self.curve_cache.insert(key, CachedTex { _keep: texels.clone(), _tex: texture, view: view.clone(), last_used: tick });
         view
     }
 
@@ -1126,12 +1160,12 @@ impl FxStage {
 
     fn mask_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, mask: &MaskCoverage) -> wgpu::TextureView {
         let key = Arc::as_ptr(&mask.cov) as usize;
-        if let Some((_, _, view)) = self.mask_cache.get(&key) {
-            return view.clone();
+        let tick = self.next_cache_tick();
+        if let Some(entry) = self.mask_cache.get_mut(&key) {
+            entry.last_used = tick;
+            return entry.view.clone();
         }
-        if self.mask_cache.len() >= 32 {
-            self.mask_cache.clear();
-        }
+        evict_lru_tex(&mut self.mask_cache, 32);
         let (width, height) = (mask.w.max(1), mask.h.max(1));
         let row_bytes = width * 4;
         let aligned_row_bytes = row_bytes.div_ceil(256) * 256;
@@ -1165,7 +1199,7 @@ impl FxStage {
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
         let view = texture.create_view(&Default::default());
-        self.mask_cache.insert(key, (mask.cov.clone(), texture, view.clone()));
+        self.mask_cache.insert(key, CachedTex { _keep: mask.cov.clone(), _tex: texture, view: view.clone(), last_used: tick });
         view
     }
 
@@ -1368,7 +1402,7 @@ impl FxStage {
                 }
             };
             let mask_view = mask_tex_view.as_ref().unwrap_or(dummy);
-            let mut bytes = Vec::with_capacity(128);
+            let mut bytes = Vec::with_capacity(144);
             for v in [s.code, w, h, 0].iter().chain(&s.i1) {
                 bytes.extend_from_slice(&v.to_le_bytes());
             }

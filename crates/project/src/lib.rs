@@ -28,6 +28,7 @@ pub mod mixer;
 pub mod multicam;
 pub mod narration;
 pub mod transcript;
+pub mod vfx_graph;
 pub mod vtransition;
 
 use std::collections::BTreeMap;
@@ -44,7 +45,8 @@ pub use color_graph::{
 };
 pub use color_still::{ColorStill, MAX_COLOR_STILLS, MAX_STILL_THUMB_SIDE};
 pub use effect::{
-    EFFECTCRAFT_TOP_FOLDER, EffectDef, EffectInstance, EffectKind, ParamDef, ParamKind, effect_defs, find_effect, interchange_name, search_aliases,
+    EFFECTCRAFT_TOP_FOLDER, EffectDef, EffectInstance, EffectKind, ParamDef, ParamKind, effect_defs, find_effect, find_effect_by_name, interchange_name,
+    search_aliases,
 };
 pub use essential::{AudioType, EssentialSound};
 pub use find::{FindOp, FindQuery, FindRow, SearchBin};
@@ -55,6 +57,10 @@ pub use mixer::{AutomationMode, InputMap, MixerStrip, TrackSend};
 pub use multicam::{Camera, MergedClip, MulticamAudio, MulticamSel, MulticamSource};
 pub use narration::{Narration, VocalPitch};
 pub use transcript::{Speaker, Transcript, Word};
+pub use vfx_graph::{
+    MAX_VFX_EDGES, MAX_VFX_NODES, MergeOperator, VfxEdge, VfxEndpoint, VfxGraph, VfxInputSlot, VfxNode, VfxNodeId, VfxNodeKind, VfxNodeSettings,
+    VfxPortKind, VfxUnderlay,
+};
 
 macro_rules! id_type {
     ($name:ident) => {
@@ -516,6 +522,7 @@ impl Project {
             audio_stream: 0,
             graphic: source_graphic.and_then(|sg| sg.meta.map(Box::new)),
             color_graph: None,
+            vfx_graph: None,
         })
     }
 

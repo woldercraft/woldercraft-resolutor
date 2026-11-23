@@ -377,7 +377,8 @@ fn handle_canvas_zoom_pan(app: &mut FilmcraftApp, ui: &mut egui::Ui, canvas_r: R
 
     let is_node_dragged = (0..node_count).any(|i| ui.ctx().is_being_dragged(egui::Id::unique(("color_node_card", scope_key, i))));
     let is_pin_dragged = ui.ctx().data(|d| d.get_temp::<PendingWire>(egui::Id::unique("color_nodes_pending_wire"))).is_some();
-    if !is_node_dragged && !is_pin_dragged {
+    let is_knife = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl) && i.modifiers.shift);
+    if !is_node_dragged && !is_pin_dragged && !is_knife {
         let pointer_delta = ui.input(|i| i.pointer.delta());
         let is_pan_button = ui.input(|i| {
             i.pointer.button_down(egui::PointerButton::Middle)
@@ -722,6 +723,51 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     // Interactive port pins (drag or click to connect, Alt-click / right-click input to disconnect)
     handle_interactive_pins(app, ui, &painter, scope, clip_id, group_id, &graph, &port_pos, in_pin, out_pin, zoom);
+
+    // Shared Ctrl+Shift+Drag knife wire cutter (shared geometry with VfxNodes)
+    let knife_mod = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl) && i.modifiers.shift);
+    let knife_id = egui::Id::unique("color_nodes_knife_cut");
+    let mut knife: Option<(Pos2, Pos2)> = ui.ctx().data(|d| d.get_temp(knife_id));
+    if knife_mod
+        && ui.input(|i| i.pointer.primary_pressed())
+        && let Some(p) = ui.input(|i| i.pointer.interact_pos())
+        && canvas_r.contains(p)
+    {
+        knife = Some((p, p));
+    }
+    if let Some((s0, s1)) = knife.as_mut() {
+        if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
+            *s1 = p;
+        }
+        painter.line_segment([*s0, *s1], Stroke::new(2.0, Color32::from_rgb(248, 113, 113)));
+        if ui.input(|i| i.pointer.primary_released()) {
+            let (a0, a1) = (*s0, *s1);
+            for edge in &graph.edges {
+                if let (Some(p0), Some(p1)) = (port_pos(edge.from, edge.kind, edge.from_port, false), port_pos(edge.to, edge.kind, edge.to_port, true))
+                    && super::vfx_nodes::bezier_intersects_segment(p0, p1, a0, a1, 16)
+                {
+                    let k_str = if edge.kind == ColorPortKind::Key { "key" } else { "rgb" };
+                    let to_val = match edge.to {
+                        ColorEndpoint::Source => json!("source"),
+                        ColorEndpoint::Output => json!("output"),
+                        ColorEndpoint::Node(id) => json!(id.0),
+                    };
+                    let _ = app.session.execute(
+                        "color.graph.disconnect",
+                        scope_params(scope, clip_id, group_id, json!({"kind": k_str, "to": to_val, "toPort": edge.to_port})),
+                    );
+                }
+            }
+            knife = None;
+        }
+    }
+    ui.ctx().data_mut(|d| {
+        if let Some(k) = knife {
+            d.insert_temp(knife_id, k);
+        } else {
+            d.remove::<(Pos2, Pos2)>(knife_id);
+        }
+    });
 }
 
 fn scope_params(scope: ColorScopeKind, clip: ClipId, group: Option<ColorGroupId>, mut extra: Value) -> Value {

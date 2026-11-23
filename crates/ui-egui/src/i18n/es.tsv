@@ -3804,6 +3804,9 @@
 # EffectCraft VFX & VFX Nodes panel.
 	EffectCraft VFX	Efectos VFX (EffectCraft)
 	VFX Nodes	Nodos VFX
+	VFX Inspector	Inspector VFX
+	VFX Keyframes	Keyframes VFX
+	Effects (Premiere)	Efectos (Premiere)
 	+ VFX ▾	+ VFX ▾
 	Add EffectCraft VFX Node (Alt+S)	Añadir nodo de efecto VFX (Alt+S)
 	+ Add EffectCraft Glow	+ Añadir resplandor VFX

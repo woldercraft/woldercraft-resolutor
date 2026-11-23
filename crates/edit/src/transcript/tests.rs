@@ -62,6 +62,7 @@ fn clip(id: u64, start: f64, dur: f64, src_in: f64) -> TrackItem {
         audio_stream: 0,
         graphic: None,
         color_graph: None,
+        vfx_graph: None,
     }
 }
 

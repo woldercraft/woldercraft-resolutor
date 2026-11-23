@@ -90,10 +90,10 @@ enum Tok<'a> {
 /// The tokens of `text`, or `None` when it can't be read for sure.
 fn tokens(text: &str) -> Option<Vec<Tok<'_>>> {
     let b = text.as_bytes();
-    let mut out: Vec<Tok<'_>> = Vec::new();
+    let mut out: Vec<Tok<'_>> = Vec::with_capacity(b.len() / 2);
     // Per open `(`: whether a control keyword is before it; whether the last `)` closed one
     // (only looked at right after a `)`).
-    let mut parens: Vec<bool> = Vec::new();
+    let mut parens: Vec<bool> = Vec::with_capacity(8);
     let mut control_close = false;
     let mut i = 0;
     while let Some(&c) = b.get(i) {

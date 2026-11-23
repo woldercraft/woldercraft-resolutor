@@ -419,8 +419,8 @@ pub fn specs() -> Vec<EffectSpec> {
 #[cfg(test)]
 mod generator_tests {
     use super::*;
-    use crate::{EffectEnv, run_fx};
     use crate::effectcraft_raster::Image;
+    use crate::{EffectEnv, run_fx};
 
     fn red() -> Image {
         Image::filled(32, 32, [1.0, 0.0, 0.0, 1.0])

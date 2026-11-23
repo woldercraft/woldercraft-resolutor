@@ -321,8 +321,8 @@ pub fn specs() -> Vec<EffectSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Params, apply, find};
     use crate::effectcraft_raster::Image;
+    use crate::{Params, apply, find};
 
     fn square() -> Image {
         let mut img = Image::new(24, 24);

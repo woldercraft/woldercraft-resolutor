@@ -476,8 +476,8 @@ fn turbulent_noise(ctx: &EffectCtx, b: Buf) -> Buf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EffectEnv, run_fx};
     use crate::effectcraft_raster::Image;
+    use crate::{EffectEnv, run_fx};
 
     fn run(id: &str, vals: &[(&str, Value)]) -> Image {
         run_fx(id, vals, Image::filled(40, 24, [0.2, 0.4, 0.6, 1.0]), 0.0, EffectEnv::default()).img

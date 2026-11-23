@@ -867,16 +867,16 @@ fn middle_closing_an_inactive_project_tab_keeps_the_inspector_target() {
 /// and Color Grading presets.
 #[test]
 fn effects_are_indented_under_their_folders() {
-    fn text_x(d: &mut Driver, text: &str) -> f32 {
-        fn find(shapes: &[egui::Shape], text: &str) -> Option<f32> {
+    fn text_x(d: &mut Driver, text: &str, min_y: f32) -> f32 {
+        fn find(shapes: &[egui::Shape], text: &str, min_y: f32) -> Option<f32> {
             shapes.iter().find_map(|s| match s {
-                egui::Shape::Text(t) if t.galley.text() == text => Some(t.pos.x),
-                egui::Shape::Vec(v) => find(v, text),
+                egui::Shape::Text(t) if t.pos.y >= min_y && t.galley.text() == text => Some(t.pos.x),
+                egui::Shape::Vec(v) => find(v, text, min_y),
                 _ => None,
             })
         }
         let shapes: Vec<egui::Shape> = d.harness.output().shapes.iter().map(|c| c.shape.clone()).collect();
-        find(&shapes, text).unwrap_or_else(|| panic!("`{text}` is not drawn"))
+        find(&shapes, text, min_y).unwrap_or_else(|| panic!("`{text}` is not drawn below y={min_y}"))
     }
     let mut d = Driver::demo();
     d.ok("ui.panel.show", json!({"panel": "Effects"}));
@@ -889,6 +889,8 @@ fn effects_are_indented_under_their_folders() {
     d.frames(2);
     let preset = d.app().session.presets.all()[0].name.clone();
     let lumetri = filmcraft_render::lumetri_presets::presets().into_iter().find(|p| p.folder == "Monochrome").unwrap().name;
+    let pill = d.app().auto.find("effects.kind.presets").expect("presets pill").rect;
+    let min_y = pill[1] + pill[3];
     for (outer, inner) in [
         ("Video Effects", "Blur & Sharpen"),
         ("Blur & Sharpen", "Gaussian Blur"),
@@ -896,7 +898,7 @@ fn effects_are_indented_under_their_folders() {
         ("Color Grading Presets", "Monochrome"),
         ("Monochrome", lumetri),
     ] {
-        let (a, b) = (text_x(&mut d, outer), text_x(&mut d, inner));
+        let (a, b) = (text_x(&mut d, outer, min_y), text_x(&mut d, inner, min_y));
         assert!(b >= a + 12.0, "`{inner}` ({b}) is not indented under `{outer}` ({a})");
     }
 }

@@ -807,12 +807,12 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
-#[derive(Hash, PartialEq, Eq)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 struct WarperCacheKey([Option<Vec<[u32; 2]>>; 2]);
 
-fn warper_table_cache() -> &'static Mutex<HashMap<WarperCacheKey, Arc<Vec<[f32; 4]>>>> {
-    static CACHE: OnceLock<Mutex<HashMap<WarperCacheKey, Arc<Vec<[f32; 4]>>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn warper_table_cache() -> &'static Mutex<(HashMap<WarperCacheKey, (Arc<Vec<[f32; 4]>>, u64)>, u64)> {
+    static CACHE: OnceLock<Mutex<(HashMap<WarperCacheKey, (Arc<Vec<[f32; 4]>>, u64)>, u64)>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new((HashMap::new(), 0)))
 }
 
 pub fn build_warper_table(e: &EffectInstance) -> Option<ColorWarperTable> {
@@ -830,8 +830,12 @@ pub fn build_warper_table(e: &EffectInstance) -> Option<ColorWarperTable> {
         cl_pts.as_ref().map(|v| v.iter().map(|p| [p[0].to_bits(), p[1].to_bits()]).collect()),
     ]);
     {
-        let cache = warper_table_cache().lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(texels) = cache.get(&key) {
+        let mut guard = warper_table_cache().lock().unwrap_or_else(PoisonError::into_inner);
+        let (cache, tick) = &mut *guard;
+        *tick = tick.wrapping_add(1);
+        let now = *tick;
+        if let Some((texels, last_used)) = cache.get_mut(&key) {
+            *last_used = now;
             return Some(ColorWarperTable { texels: texels.clone(), active_mask });
         }
     }
@@ -904,11 +908,17 @@ pub fn build_warper_table(e: &EffectInstance) -> Option<ColorWarperTable> {
         }
     }
     let arc = Arc::new(texels);
-    let mut cache = warper_table_cache().lock().unwrap_or_else(PoisonError::into_inner);
-    if cache.len() >= 32 {
-        cache.clear();
+    let mut guard = warper_table_cache().lock().unwrap_or_else(PoisonError::into_inner);
+    let (cache, tick) = &mut *guard;
+    *tick = tick.wrapping_add(1);
+    let now = *tick;
+    while cache.len() >= 32 {
+        let Some(oldest) = cache.iter().min_by_key(|(_, (_, t))| *t).map(|(k, _)| k.clone()) else {
+            break;
+        };
+        cache.remove(&oldest);
     }
-    cache.insert(key, arc.clone());
+    cache.insert(key, (arc.clone(), now));
     Some(ColorWarperTable { texels: arc, active_mask })
 }
 

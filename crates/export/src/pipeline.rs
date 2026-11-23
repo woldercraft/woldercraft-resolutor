@@ -309,9 +309,7 @@ impl Pipeline {
 
     /// Whether the export needs no CPU post-processing and no geometry resampling/padding.
     fn can_direct_rgba8(&self) -> bool {
-        self.can_direct_rgba8_base()
-            && self.geom.offset == (0, 0)
-            && self.geom.content.is_none_or(|(cw, ch)| (cw, ch) == (self.w as usize, self.h as usize))
+        self.can_direct_rgba8_base() && self.geom.offset == (0, 0) && self.geom.content.is_none_or(|(cw, ch)| (cw, ch) == (self.w as usize, self.h as usize))
     }
 
     /// Whether `self.geom` covers the full output `(self.w, self.h)` without letterbox/pillarbox
@@ -338,7 +336,10 @@ impl Pipeline {
         if *width == 0 || *height == 0 {
             return None;
         }
-        if (*width, *height) == (self.w as usize, self.h as usize) && self.geom.offset == (0, 0) && self.geom.content.is_none_or(|(cw, ch)| (cw, ch) == (self.w as usize, self.h as usize)) {
+        if (*width, *height) == (self.w as usize, self.h as usize)
+            && self.geom.offset == (0, 0)
+            && self.geom.content.is_none_or(|(cw, ch)| (cw, ch) == (self.w as usize, self.h as usize))
+        {
             return None;
         }
         let (cw, ch) = self.geom.content.unwrap_or((*width, *height));
@@ -353,11 +354,7 @@ impl Pipeline {
                 l
             })
             .collect();
-        Some(filmcraft_render::plan::FramePlan::Layers {
-            width: self.w as usize,
-            height: self.h as usize,
-            layers: baked_layers,
-        })
+        Some(filmcraft_render::plan::FramePlan::Layers { width: self.w as usize, height: self.h as usize, layers: baked_layers })
     }
 
     /// Plan and decode media for frame `f` when supported by the registered GPU renderer.
@@ -366,20 +363,11 @@ impl Pipeline {
     pub fn plan_frame(&self, f: i64, sources: &dyn SourceProvider) -> Option<filmcraft_render::plan::FramePlan> {
         let t = self.rate.tick_of(f);
         let pool = self.renderer.as_ref().filter(|pool| !filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t, self.opts, pool.caps))?;
-        if pool.supports_plan {
-            Some(filmcraft_render::plan::plan_frame(&self.project, self.seq, t, self.opts, pool.caps, sources))
-        } else {
-            None
-        }
+        if pool.supports_plan { Some(filmcraft_render::plan::plan_frame(&self.project, self.seq, t, self.opts, pool.caps, sources)) } else { None }
     }
 
     /// Render frame `f` using a pre-planned frame (if available) or by planning on demand.
-    pub fn render_plan_or_frame(
-        &self,
-        f: i64,
-        pre_plan: Option<filmcraft_render::plan::FramePlan>,
-        sources: &dyn SourceProvider,
-    ) -> (Vec<u8>, Vec<f32>) {
+    pub fn render_plan_or_frame(&self, f: i64, pre_plan: Option<filmcraft_render::plan::FramePlan>, sources: &dyn SourceProvider) -> (Vec<u8>, Vec<f32>) {
         let t = self.rate.tick_of(f);
         let lim = &self.effects.video_limiter;
         // The registered GPU renderer goes first; `None` (no adapter, a plan the GPU cannot
@@ -508,11 +496,7 @@ impl Pipeline {
 
     /// Render a slice of `(frame_index, pre_plan)` items using pipelined GPU submission/readback
     /// across the renderer pool, falling back to CPU for any frame the GPU declines.
-    pub fn render_plans_batch(
-        &self,
-        items: &[(i64, Option<filmcraft_render::plan::FramePlan>)],
-        sources: &dyn SourceProvider,
-    ) -> Vec<(Vec<u8>, Vec<f32>)> {
+    pub fn render_plans_batch(&self, items: &[(i64, Option<filmcraft_render::plan::FramePlan>)], sources: &dyn SourceProvider) -> Vec<(Vec<u8>, Vec<f32>)> {
         use crate::{PlanRenderMode, PlanRenderOutput};
         let Some(pool) = self.renderer.as_ref().filter(|p| p.supports_plan) else {
             return items.par_iter().map(|(fi, _)| self.render_plan_or_frame(*fi, None, sources)).collect();
@@ -521,10 +505,8 @@ impl Pipeline {
         let direct_ok = self.can_direct_rgba8();
         let use_nv12 = self.nv12.load(std::sync::atomic::Ordering::Relaxed) && !lim.enabled;
 
-        let baked_plans: Vec<Option<filmcraft_render::plan::FramePlan>> = items
-            .iter()
-            .map(|(_, plan)| plan.as_ref().and_then(|p| self.bake_geom_into_plan(p)))
-            .collect();
+        let baked_plans: Vec<Option<filmcraft_render::plan::FramePlan>> =
+            items.iter().map(|(_, plan)| plan.as_ref().and_then(|p| self.bake_geom_into_plan(p))).collect();
 
         // Collect GPU-eligible items (index into `items`, &FramePlan, mode).
         let mut gpu_indices: Vec<usize> = Vec::with_capacity(items.len());
@@ -538,10 +520,12 @@ impl Pipeline {
                 (baked, if use_nv12 { PlanRenderMode::Nv12 } else { PlanRenderMode::Rgba8 })
             } else {
                 let mode = match plan {
-                    filmcraft_render::plan::FramePlan::Layers { width, height, .. }
-                        if direct_ok && (*width, *height) == (self.w as usize, self.h as usize) =>
-                    {
-                        if use_nv12 { PlanRenderMode::Nv12 } else { PlanRenderMode::Rgba8 }
+                    filmcraft_render::plan::FramePlan::Layers { width, height, .. } if direct_ok && (*width, *height) == (self.w as usize, self.h as usize) => {
+                        if use_nv12 {
+                            PlanRenderMode::Nv12
+                        } else {
+                            PlanRenderMode::Rgba8
+                        }
                     }
                     _ => PlanRenderMode::RgbaF32,
                 };

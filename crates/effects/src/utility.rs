@@ -517,7 +517,8 @@ mod tests {
             }
             let vals = [("conversionType", Value::Enum(1)), ("gamma", num(gamma * 1.7)), ("highlightRolloff", num(rolloff))];
             let out = run("ec.utility.cineon", &vals, img);
-            let settings = crate::effectcraft_project::CineonSettings { log_conversion: true, gamma: gamma as f32, rolloff: rolloff as f32, ..Default::default() };
+            let settings =
+                crate::effectcraft_project::CineonSettings { log_conversion: true, gamma: gamma as f32, rolloff: rolloff as f32, ..Default::default() };
             for (x, code) in codes.iter().enumerate() {
                 let footage = settings.convert(code / 1023.0);
                 let effect = out.img.data[x][0];

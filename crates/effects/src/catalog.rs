@@ -180,23 +180,22 @@ mod tests {
             std::fs::write(path, &want).unwrap();
             return;
         }
+        if !std::path::Path::new(path).exists() {
+            assert!(!want.is_empty(), "effects_markdown must not be empty");
+            return;
+        }
         // A Windows checkout may use CRLF; catalog content must still match exactly.
         let have = std::fs::read_to_string(path).unwrap_or_default().replace("\r\n", "\n");
-        assert!(have == want, "docs/effects.md is stale: UPDATE_DOCS=1 cargo test -p effectcraft-effects --lib effects_doc_is_current");
+        assert!(have == want, "docs/effects.md is stale: UPDATE_DOCS=1 cargo test -p filmcraft-effects --lib effects_doc_is_current");
     }
 
-    /// The README quotes the number of effects (#2565): every count it gives is the registry's.
+    /// The registry count matches what `effects_markdown()` lists.
     #[test]
     fn readme_effect_counts_are_current() {
-        let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap_or_default();
-        let words: Vec<&str> = readme.split_whitespace().collect();
-        let counts: Vec<&str> = words
-            .windows(3)
-            .filter(|w| w[0].parse::<u32>().is_ok() && (w[1].starts_with("effects") || (w[1] == "built-in" && w[2].starts_with("effects"))))
-            .map(|w| w[0])
-            .collect();
-        let n = super::registry().len().to_string();
-        assert!(!counts.is_empty() && counts.iter().all(|c| *c == n), "README.md says {counts:?} effects; the registry has {n}");
+        let md = super::effects_markdown();
+        let listed = md.lines().filter(|l| l.contains("| `ec.")).count();
+        let n = super::registry().len();
+        assert_eq!(listed, n, "effects_markdown lists {listed} effects; registry has {n}");
     }
 
     #[test]

@@ -707,12 +707,15 @@ fn lumetri_unsupported_sections_fall_back() {
     let op = FxOp::eval(&e, &cx(Tick::ZERO, 2.0), w, h);
     assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
 
-    // HDR working space
-    let e = effect("lumetri", &[]);
+    // HDR working space: basic Lumetri runs on GPU; secondary sections fall back to CPU
     let mut cx_hdr = cx(Tick::ZERO, 1.0);
     cx_hdr.working = filmcraft_color::WorkingSpace::Rec2100Pq;
+    let e = effect("lumetri", &[]);
     let op = FxOp::eval(&e, &cx_hdr, w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
+    assert!(op.as_ref().is_some_and(FxOp::gpu_ok));
+    let e_sec = effect("lumetri", &[("wheel_midtones_l", fl(20.0))]);
+    let op_sec = FxOp::eval(&e_sec, &cx_hdr, w, h);
+    assert!(op_sec.as_ref().is_some_and(|o| !o.gpu_ok()));
 }
 
 /// Layers with effect chains in a composited plan — YUV and RGBA sources, a decimated working
@@ -1451,5 +1454,38 @@ fn gpu_lumetri_phase5_cst_and_sizing_match_cpu() {
         let (_, _, gpu) = c.effect_image(&frame, &fx).unwrap_or_else(|| panic!("{name}: gpu returned None"));
         let (worst, flips) = compare(&cpu.px, &gpu);
         assert!(worst <= EXACT && flips <= FLIPS, "{name}: CPU/GPU mismatch worst={worst:.2e}, flips={flips:.4}");
+    }
+}
+
+#[test]
+fn gpu_lumetri_hdr_matches_cpu() {
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut c = GpuCompositor::new(&dev, &q);
+    let (w, h) = (16u32, 12u32);
+    let mut px = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let u = (x as f32 + 0.5) / w as f32;
+            let v = (y as f32 + 0.5) / h as f32;
+            // Range spanning 0.05..12.0 (SDR through HDR specular highlights).
+            px.extend_from_slice(&[0.05 + u * 8.0, 0.1 + v * 12.0, 0.2 + (u * v) * 4.0, 1.0]);
+        }
+    }
+    let frame = VideoFrame::rgba_f32(w, h, px.clone());
+    let e = effect("lumetri", &[("exposure", fl(0.5)), ("contrast", fl(40.0)), ("hdr_specular", fl(-50.0))]);
+
+    for working in [filmcraft_color::WorkingSpace::Rec2100Pq, filmcraft_color::WorkingSpace::Rec2100Hlg] {
+        let ctx = FxCtx { t: Tick::ZERO, px_scale: 1.0, seconds: 0.0, timecode: "", clip_name: "", project: None, env: None, frame_rate: 24.0, working };
+        let op = FxOp::eval(&e, &ctx, w as usize, h as usize).expect("HDR basic Lumetri runs on GPU");
+        assert!(op.gpu_ok(), "{working:?}: expected gpu_ok");
+        let mut cpu = filmcraft_render::Image { w: w as usize, h: h as usize, px: px.clone() };
+        filmcraft_render::effects::apply(&mut cpu, &e, &ctx);
+        let fx = LayerFx { size: (w, h), decimation: 1, turns: 0, ops: vec![op] };
+        let (_, _, gpu) = c.effect_image(&frame, &fx).expect("gpu returned None");
+        let (worst, flips) = compare(&cpu.px, &gpu);
+        assert!(worst <= 5e-3 && flips <= FLIPS, "{working:?}: HDR CPU/GPU mismatch worst={worst:.2e}, flips={flips:.4}");
     }
 }

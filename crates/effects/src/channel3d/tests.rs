@@ -1,6 +1,6 @@
 use super::*;
-use crate::{EffectEnv, EffectHost, LayerPixels, run_fx};
 use crate::effectcraft_raster::channels3d::crypto_float;
+use crate::{EffectEnv, EffectHost, LayerPixels, run_fx};
 
 /// A 20×10 layer: left half object 1 at depth 100, right half object 2 at depth 500; the
 /// top-right corner is background. Cryptomatte: "left" / "right".
@@ -215,11 +215,14 @@ fn crypto_aux_image_is_bit_exact_on_edge_values() {
     assert_eq!(a.crypto_rank_planes("CryptoObject").len(), 3, "00.R/G, 00.B/A, 01.R/G; not 03 after the gap");
     let img = crypto_aux_image(&a, "CryptoObject", &sel);
     let without_gap_rank = crypto_aux_image(&edge_aux(false), "CryptoObject", &sel);
+    let bits_match = |a: f32, b: f32| (a.is_nan() && b.is_nan()) || a.to_bits() == b.to_bits();
     for i in 0..12 {
         let (c, m) = reduce_by_name(&a, "CryptoObject", &sel, i);
         let want = [c[0], c[1], c[2], m];
-        assert_eq!(img.data[i].map(f32::to_bits), want.map(f32::to_bits), "pixel {i}");
-        assert_eq!(img.data[i].map(f32::to_bits), without_gap_rank.data[i].map(f32::to_bits), "pixel {i}: the rank after the gap was used");
+        for k in 0..4 {
+            assert!(bits_match(img.data[i][k], want[k]), "pixel {i} channel {k}: {:?} vs {:?}", img.data[i][k].to_bits(), want[k].to_bits());
+            assert!(bits_match(img.data[i][k], without_gap_rank.data[i][k]), "pixel {i} channel {k}: the rank after the gap was used");
+        }
     }
 }
 

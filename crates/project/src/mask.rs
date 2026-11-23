@@ -403,6 +403,10 @@ fn default_feather_balance() -> Param {
     Param::new(ParamValue::Float(0.0))
 }
 
+fn default_corner_radius() -> Param {
+    Param::new(ParamValue::Float(0.0))
+}
+
 /// A mask on an effect instance.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Mask {
@@ -420,6 +424,9 @@ pub struct Mask {
     pub opacity: Param,
     /// Clip pixels (negative shrinks).
     pub expansion: Param,
+    /// Non-destructive corner fillet radius in clip pixels (≥ 0).
+    #[serde(default = "default_corner_radius")]
+    pub corner_radius: Param,
     #[serde(default)]
     pub inverted: bool,
     #[serde(default)]
@@ -441,6 +448,7 @@ impl Mask {
             feather_balance: default_feather_balance(),
             opacity: Param::new(ParamValue::Float(100.0)),
             expansion: Param::new(ParamValue::Float(0.0)),
+            corner_radius: default_corner_radius(),
             inverted: false,
             mode: MaskMode::Add,
             track_method: TrackMethod::default(),
@@ -459,6 +467,7 @@ impl Mask {
             "feather_balance" => Some(&self.feather_balance),
             "opacity" => Some(&self.opacity),
             "expansion" => Some(&self.expansion),
+            "corner_radius" => Some(&self.corner_radius),
             _ => None,
         }
     }
@@ -469,6 +478,7 @@ impl Mask {
             "feather_balance" => Some(&mut self.feather_balance),
             "opacity" => Some(&mut self.opacity),
             "expansion" => Some(&mut self.expansion),
+            "corner_radius" => Some(&mut self.corner_radius),
             _ => None,
         }
     }
@@ -478,8 +488,20 @@ impl Mask {
             _ => MaskPath::default(),
         }
     }
+    /// Path at `t` with the non-destructive `corner_radius` fillet applied to sharp corners.
+    pub fn effective_path_at(&self, t: filmcraft_time::Tick) -> MaskPath {
+        let path = self.path_at(t);
+        let r = self.corner_radius.f64_at(t);
+        if r.is_finite() && r > 0.0 {
+            let corners = path.roundable_corners();
+            if !corners.is_empty() {
+                return path.with_rounded_corners(r, &corners);
+            }
+        }
+        path
+    }
     pub fn is_animated(&self) -> bool {
-        MASK_PARAMS.iter().any(|p| self.param(p).is_some_and(Param::is_animated))
+        MASK_PARAMS.iter().any(|p| self.param(p).is_some_and(Param::is_animated)) || self.corner_radius.is_animated()
     }
     /// Keyframe times of every mask parameter (for the keyframe lane / presets).
     pub fn params_mut(&mut self) -> [&mut Param; 4] {

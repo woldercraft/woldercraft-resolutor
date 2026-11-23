@@ -61,11 +61,13 @@ pub enum PanelKind {
     ColorSizing,
     ColorGallery,
     VfxNodes,
+    VfxInspector,
+    VfxKeyframes,
     Custom(u8),
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 48] = [
+    pub const ALL: [PanelKind; 50] = [
         PanelKind::Project,
         PanelKind::MediaBrowser,
         PanelKind::Libraries,
@@ -114,6 +116,8 @@ impl PanelKind {
         PanelKind::ColorSizing,
         PanelKind::ColorGallery,
         PanelKind::VfxNodes,
+        PanelKind::VfxInspector,
+        PanelKind::VfxKeyframes,
     ];
     pub fn title(self) -> &'static str {
         match self {
@@ -165,6 +169,8 @@ impl PanelKind {
             PanelKind::ColorSizing => "Sizing",
             PanelKind::ColorGallery => "Gallery",
             PanelKind::VfxNodes => "VFX Nodes",
+            PanelKind::VfxInspector => "VFX Inspector",
+            PanelKind::VfxKeyframes => "VFX Keyframes",
             PanelKind::Custom(_) => "Custom Panel",
         }
     }
@@ -221,8 +227,19 @@ fn vsplit(size: SplitSize, a: Node<PanelKind>, b: Node<PanelKind>) -> Node<Panel
     Node::Split { axis: SplitAxis::Vertical, size, first: Box::new(a), second: Box::new(b) }
 }
 
-pub const WORKSPACES: [&str; 10] =
-    ["Editing", "Assembly", "Color", "Effects", "Audio", "Captions and Graphics", "Vertical", "Learning", "Review", "All Panels"];
+pub const WORKSPACES: [&str; 11] = [
+    "Editing",
+    "Assembly",
+    "Color",
+    "Effects",
+    "Effects (Premiere)",
+    "Audio",
+    "Captions and Graphics",
+    "Vertical",
+    "Learning",
+    "Review",
+    "All Panels",
+];
 
 /// The user's workspaces file, beside `preferences.json` in the data directory.
 pub const WORKSPACES_FILE: &str = "workspaces.json";
@@ -581,14 +598,23 @@ fn workspace_root(name: &str) -> Node<PanelKind> {
             vsplit(Ratio(0.32), top_row, vsplit(SplitSize::FixedFirst(92.0), tabs(&[ColorClips, Timeline, ColorGroups], 0), bottom_row))
         }
         "Effects" => {
-            let top_row = hsplit(
-                SplitSize::FixedFirst(290.0),
-                tabs(&[Effects, Project, MediaBrowser], 0),
-                hsplit(Ratio(0.55), tabs(&[Program, Source, ReferenceMonitor], 0), tabs(&[VfxNodes, EssentialGraphics], 0)),
+            let center = vsplit(
+                Ratio(0.56),
+                tabs(&[Program, Source, ReferenceMonitor], 0),
+                vsplit(SplitSize::FixedFirst(76.0), tabs(&[ColorClips, Timeline, MacroTimeline], 0), tabs(&[VfxNodes, EssentialGraphics], 0)),
             );
-            let bottom_row = hsplit(Ratio(0.72), tabs(&[EffectControls], 0), tabs(&[LumetriScopes, Info, History], 0));
-            vsplit(Ratio(0.36), top_row, vsplit(SplitSize::FixedFirst(76.0), tabs(&[ColorClips, Timeline, MacroTimeline], 0), bottom_row))
+            let right_inspector = vsplit(Ratio(0.46), tabs(&[VfxInspector], 0), tabs(&[EffectControls, VfxKeyframes, LumetriScopes, Info, History], 0));
+            hsplit(SplitSize::FixedFirst(290.0), tabs(&[Effects, Project, MediaBrowser], 0), hsplit(Ratio(0.68), center, right_inspector))
         }
+        "Effects (Premiere)" => vsplit(
+            Ratio(0.56),
+            hsplit(
+                Ratio(0.5),
+                tabs(&[EffectControls, Source, AudioClipMixer], 0),
+                tabs(&[Program, ReferenceMonitor], 0),
+            ),
+            hsplit(SplitSize::FixedFirst(290.0), tabs(&[Effects, Project, MediaBrowser, Markers, History], 0), bottom_editing()),
+        ),
         "Audio" => hsplit(
             Ratio(0.8),
             vsplit(

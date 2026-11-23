@@ -3,7 +3,6 @@
 //! [`Image`] stores premultiplied RGBA in `f32` (values may exceed 1.0 in 32 bpc projects). Every
 //! heavy operation is row-parallel with rayon.
 
-
 pub mod blur;
 pub mod channels3d;
 pub mod cuts;

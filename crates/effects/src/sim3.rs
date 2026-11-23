@@ -767,6 +767,7 @@ pub fn playground_plan(ctx: &EffectCtx, b: &Buf) -> PgPlan {
     let init = || {
         let mut st = PgState::default();
         if grid_on && across > 0 && down > 0 {
+            st.parts.reserve((across as usize).saturating_mul(down as usize).min(65_536));
             let mut k = 0usize;
             for j in 0..down {
                 for i in 0..across {

@@ -543,8 +543,7 @@ fn merged(mut ranges: Vec<TimeRange>) -> Vec<TimeRange> {
 /// tracks covers all of their time): that would be a plain delete.
 pub fn ripple_delete_items(seq: &mut Sequence, items: &[ClipId]) -> Result<Vec<TimeRange>> {
     // Collect the tracks that lose an item; the gaps close right-to-left.
-    let item_tracks: HashMap<ClipId, TrackId> =
-        seq.all_tracks().flat_map(|t| t.items.iter().map(move |i| (i.id, t.id))).collect();
+    let item_tracks: HashMap<ClipId, TrackId> = seq.all_tracks().flat_map(|t| t.items.iter().map(move |i| (i.id, t.id))).collect();
     let mut affected: Vec<TrackId> = Vec::with_capacity(items.len());
     for c in items {
         let tid = *item_tracks.get(c).ok_or(EditError::NoItem(*c))?;
@@ -623,8 +622,7 @@ pub fn move_items(seq: &mut Sequence, moves: &[(ClipId, TrackId, Tick)], insert_
         }
     }
     let mut work = seq.clone();
-    let item_map: HashMap<ClipId, (TrackId, TrackItem)> =
-        work.all_tracks().flat_map(|t| t.items.iter().map(move |i| (i.id, (t.id, i.clone())))).collect();
+    let item_map: HashMap<ClipId, (TrackId, TrackItem)> = work.all_tracks().flat_map(|t| t.items.iter().map(move |i| (i.id, (t.id, i.clone())))).collect();
     let mut placed = Vec::with_capacity(moves.len());
     for (c, dest, start) in moves {
         let (src, it) = item_map.get(c).ok_or(EditError::NoItem(*c))?;
@@ -664,8 +662,7 @@ pub fn move_items(seq: &mut Sequence, moves: &[(ClipId, TrackId, Tick)], insert_
 /// the order of `moves`.
 pub fn copy_items(seq: &mut Sequence, moves: &[(ClipId, TrackId, Tick)], insert_mode: bool, ctx: &mut EditCtx) -> Result<Vec<ClipId>> {
     let mut work = seq.clone();
-    let item_map: HashMap<ClipId, TrackItem> =
-        work.all_tracks().flat_map(|t| t.items.iter().map(|i| (i.id, i.clone()))).collect();
+    let item_map: HashMap<ClipId, TrackItem> = work.all_tracks().flat_map(|t| t.items.iter().map(|i| (i.id, i.clone()))).collect();
     let mut placed = Vec::with_capacity(moves.len());
     for (c, dest, start) in moves {
         let it = item_map.get(c).ok_or(EditError::NoItem(*c))?;

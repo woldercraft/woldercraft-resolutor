@@ -63,6 +63,8 @@ pub mod transform_handles;
 pub mod transition_controls;
 pub mod trim_monitor;
 pub mod tts;
+pub mod vfx_inspector;
+pub mod vfx_keyframes;
 pub mod vfx_nodes;
 pub mod voiceover;
 pub mod workspaces;
@@ -195,6 +197,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect)
         PanelKind::MacroTimeline => macro_timeline::show(app, ui, rect),
         PanelKind::ColorNodes => color_nodes::show(app, ui, rect),
         PanelKind::VfxNodes => vfx_nodes::show(app, ui, rect),
+        PanelKind::VfxInspector => vfx_inspector::show(app, ui, rect),
+        PanelKind::VfxKeyframes => vfx_keyframes::show(app, ui, rect),
         PanelKind::ColorClips => color_clips::show(app, ui, rect),
         PanelKind::ColorGroups => color_groups::show(app, ui, rect),
         PanelKind::Custom(id) => custom_panels::show_custom_panel(app, ui, rect, id),

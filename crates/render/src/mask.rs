@@ -52,7 +52,7 @@ pub fn prepare(masks: &[Mask], t: Tick, px_scale: f32) -> Vec<FlatMask> {
         .iter()
         .filter(|m| m.mode != MaskMode::None)
         .map(|m| {
-            let path = m.path_at(t);
+            let path = m.effective_path_at(t);
             let pts = match m.kind {
                 MaskKind::Gradient => path.vertices.iter().take(2).map(|v| [(v.p.x * s) as f32, (v.p.y * s) as f32]).collect(),
                 MaskKind::Path => path.flatten(FLATTEN_TOLERANCE / s.max(1e-6)).into_iter().map(|p| [(p.x * s) as f32, (p.y * s) as f32]).collect(),

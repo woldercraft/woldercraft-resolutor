@@ -17,7 +17,10 @@ use filmcraft_render::plan::{DeviceCaps, FramePlan, plan_frame};
 use filmcraft_render::{Image, RenderOptions, SourceProvider};
 use filmcraft_time::Tick;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 /// Where export rendering spends its time (process-wide totals, for the bench).
 pub mod timing {
@@ -117,11 +120,8 @@ fn shared_state() -> Option<&'static SharedExportState> {
             let adapter = crate::adapter::pick(&adapters, None, power_preference).ok()?;
             log::info!("export rendering on {} ({:?})", adapter.get_info().name, adapter.get_info().backend);
             let features = adapter.features() & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
-            let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                required_features: features,
-                ..Default::default()
-            }))
-            .ok()?;
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features: features, ..Default::default() })).ok()?;
             device.on_uncaptured_error(Arc::new(|e: wgpu::Error| mark_device_failed(&format!("GPU error: {e}"))));
             device.set_device_lost_callback(|reason, msg| mark_device_failed(&format!("GPU device lost ({reason:?}): {msg}")));
             Some(SharedExportState {
@@ -181,12 +181,7 @@ impl ExportRenderer {
             .and_then(|mut idle| idle.pop())
             .unwrap_or_else(|| GpuCompositor::new(&st.device, &st.queue).with_shared_uploads(st.uploads.clone()))
             .with_export_limits();
-        Some(Self {
-            _instance: st.instance.clone(),
-            device: st.device.clone(),
-            queue: st.queue.clone(),
-            compositor: Some(compositor),
-        })
+        Some(Self { _instance: st.instance.clone(), device: st.device.clone(), queue: st.queue.clone(), compositor: Some(compositor) })
     }
 
     /// Free cached textures and uploads held by this renderer's compositor.
@@ -297,9 +292,7 @@ impl ExportRenderer {
             }
             if let FramePlan::Image(img) = *plan {
                 let out = match mode {
-                    crate::ExportReadbackMode::RgbaF32 => {
-                        crate::ExportOutput::RgbaF32(img.w as u32, img.h as u32, img.px.clone())
-                    }
+                    crate::ExportReadbackMode::RgbaF32 => crate::ExportOutput::RgbaF32(img.w as u32, img.h as u32, img.px.clone()),
                     crate::ExportReadbackMode::Rgba8 | crate::ExportReadbackMode::Nv12 => {
                         crate::ExportOutput::Rgba8(img.w as u32, img.h as u32, img.over_black_rgba8())
                     }
@@ -489,7 +482,11 @@ mod tests {
         // asked anyway, it hands back the CPU renderer's picture, planned as one image
         let img = r.render(&p, seq, t, opts, &m).expect("the CPU image the frame was planned as");
         assert_eq!(img.px, cpu.px);
-        assert_eq!((r.compositor.as_ref().unwrap().gpu_adjustments, r.compositor.as_ref().unwrap().cpu_adjustments), counts, "no adjustment step reached the compositor");
+        assert_eq!(
+            (r.compositor.as_ref().unwrap().gpu_adjustments, r.compositor.as_ref().unwrap().cpu_adjustments),
+            counts,
+            "no adjustment step reached the compositor"
+        );
     }
 
     /// `g` as a media item of `p`, its source in `m`.
@@ -605,9 +602,17 @@ mod tests {
                 for f in [20, 24, 27] {
                     let (t, what) = (rate.tick_of(f), format!("Push + adjustment, reverse {reverse}, scale {scale}, frame {f}"));
                     assert!(!filmcraft_render::plan::is_cpu_frame(&p, seq, t, opts, r.caps()), "{what}: takes a GPU renderer");
-                    let before = (r.compositor.as_ref().unwrap().gpu_transitions, r.compositor.as_ref().unwrap().gpu_adjustments, r.compositor.as_ref().unwrap().cpu_adjustments);
+                    let before = (
+                        r.compositor.as_ref().unwrap().gpu_transitions,
+                        r.compositor.as_ref().unwrap().gpu_adjustments,
+                        r.compositor.as_ref().unwrap().cpu_adjustments,
+                    );
                     let gpu = r.render(&p, seq, t, opts, &m).expect("GPU frame");
-                    let after = (r.compositor.as_ref().unwrap().gpu_transitions, r.compositor.as_ref().unwrap().gpu_adjustments, r.compositor.as_ref().unwrap().cpu_adjustments);
+                    let after = (
+                        r.compositor.as_ref().unwrap().gpu_transitions,
+                        r.compositor.as_ref().unwrap().gpu_adjustments,
+                        r.compositor.as_ref().unwrap().cpu_adjustments,
+                    );
                     assert_eq!(after, (before.0 + 1, before.1 + 1, before.2), "{what}: the Push and the adjustment layer drawn on the GPU");
                     let cpu = filmcraft_render::render_sequence(&p, seq, t, opts, &m);
                     assert_parity(&cpu, &gpu, &what);
@@ -698,7 +703,11 @@ mod tests {
                 assert!(!filmcraft_render::plan::is_cpu_frame(p, *seq, t, opts, r.caps()), "{what}: takes a GPU renderer");
                 let before = (r.compositor.as_ref().unwrap().gpu_adjustments, r.compositor.as_ref().unwrap().cpu_adjustments);
                 let gpu = r.render(p, *seq, t, opts, m).expect("GPU frame");
-                assert_eq!((r.compositor.as_ref().unwrap().gpu_adjustments, r.compositor.as_ref().unwrap().cpu_adjustments), (before.0 + steps, before.1), "{what}: adjustment steps on the GPU");
+                assert_eq!(
+                    (r.compositor.as_ref().unwrap().gpu_adjustments, r.compositor.as_ref().unwrap().cpu_adjustments),
+                    (before.0 + steps, before.1),
+                    "{what}: adjustment steps on the GPU"
+                );
                 let cpu = filmcraft_render::render_sequence(p, *seq, t, opts, m);
                 assert_parity(&cpu, &gpu, &what);
                 assert_alpha_parity(&cpu, &gpu, &what);
@@ -864,11 +873,9 @@ mod tests {
             return;
         };
         let (p, seq, m) = project(false);
-        let plans: Vec<FramePlan> = (0..6)
-            .map(|i| plan_frame(&p, seq, Tick::from_seconds_f64(i as f64 / 30.0), RenderOptions::default(), r.caps(), &m))
-            .collect();
-        let reqs_rgba8: Vec<(&FramePlan, crate::ExportReadbackMode)> =
-            plans.iter().map(|pl| (pl, crate::ExportReadbackMode::Rgba8)).collect();
+        let plans: Vec<FramePlan> =
+            (0..6).map(|i| plan_frame(&p, seq, Tick::from_seconds_f64(i as f64 / 30.0), RenderOptions::default(), r.caps(), &m)).collect();
+        let reqs_rgba8: Vec<(&FramePlan, crate::ExportReadbackMode)> = plans.iter().map(|pl| (pl, crate::ExportReadbackMode::Rgba8)).collect();
         let pipelined_rgba8 = r.render_plans_pipelined(&reqs_rgba8);
         assert_eq!(pipelined_rgba8.len(), plans.len());
         for (i, (pl, got)) in plans.iter().zip(pipelined_rgba8).enumerate() {
@@ -878,8 +885,7 @@ mod tests {
                 _ => panic!("expected Rgba8"),
             }
         }
-        let reqs_f32: Vec<(&FramePlan, crate::ExportReadbackMode)> =
-            plans.iter().map(|pl| (pl, crate::ExportReadbackMode::RgbaF32)).collect();
+        let reqs_f32: Vec<(&FramePlan, crate::ExportReadbackMode)> = plans.iter().map(|pl| (pl, crate::ExportReadbackMode::RgbaF32)).collect();
         let pipelined_f32 = r.render_plans_pipelined(&reqs_f32);
         assert_eq!(pipelined_f32.len(), plans.len());
         for (i, (pl, got)) in plans.iter().zip(pipelined_f32).enumerate() {
@@ -922,13 +928,11 @@ mod tests {
 
         // Warmup both paths so shader/buffer allocation doesn't skew either measurement
         let _ = r.render_plan_nv12(&plans[0]);
-        let warm_reqs: Vec<(&FramePlan, crate::ExportReadbackMode)> =
-            plans[..4].iter().map(|pl| (pl, crate::ExportReadbackMode::Nv12)).collect();
+        let warm_reqs: Vec<(&FramePlan, crate::ExportReadbackMode)> = plans[..4].iter().map(|pl| (pl, crate::ExportReadbackMode::Nv12)).collect();
         let _ = r.render_plans_pipelined(&warm_reqs);
 
         let t0_pipe = timing::get();
-        let reqs: Vec<(&FramePlan, crate::ExportReadbackMode)> =
-            plans.iter().map(|pl| (pl, crate::ExportReadbackMode::Nv12)).collect();
+        let reqs: Vec<(&FramePlan, crate::ExportReadbackMode)> = plans.iter().map(|pl| (pl, crate::ExportReadbackMode::Nv12)).collect();
         let t_pipe = std::time::Instant::now();
         let outs = r.render_plans_pipelined(&reqs);
         let d_pipe = t_pipe.elapsed();

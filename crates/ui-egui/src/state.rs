@@ -525,7 +525,11 @@ impl MonitorView {
     /// The resolution frames are rendered at: Playback Resolution while playing (or the higher
     /// of it and Paused Resolution with High Quality Playback), Paused Resolution when stopped.
     pub fn effective_res(&self, playing: bool) -> PlaybackRes {
-        if !playing || (self.high_quality && self.paused_res.scale() > self.res.scale()) { self.paused_res } else { self.res }
+        if !playing || (self.high_quality && self.paused_res.scale() > self.res.scale()) {
+            self.paused_res
+        } else {
+            self.res
+        }
     }
     /// The display mode in effect (None = Multi-Camera).
     pub fn display_mode(&self) -> Option<DisplayMode> {
@@ -630,6 +634,27 @@ pub struct UiState {
     pub source: MonitorView,
     pub project_search: String,
     pub effects_search: String,
+    /// Effects panel: filter to GPU-accelerated effects only (`⚡`).
+    #[serde(default)]
+    pub effects_filter_gpu: bool,
+    /// Effects panel: filter to 32-bit float effects only (`32`).
+    #[serde(default)]
+    pub effects_filter_32bit: bool,
+    /// Effects panel: filter to favorite effects only (`★`).
+    #[serde(default)]
+    pub effects_filter_favorites: bool,
+    /// Effects panel: category/kind quick filter pill.
+    #[serde(default)]
+    pub effects_kind_filter: EffectsKindFilter,
+    /// Effects panel: currently selected effect ID (for keyboard navigation & info footer).
+    #[serde(default)]
+    pub selected_effect: Option<String>,
+    /// Effects panel: starred effect IDs.
+    #[serde(default)]
+    pub favorite_effects: Vec<String>,
+    /// Effects panel: most recently applied/dragged effect IDs (capped at 10).
+    #[serde(default)]
+    pub recent_effects: Vec<String>,
     /// Expanded bins in the project list view.
     pub expanded_bins: Vec<u64>,
     /// Expanded folders in the Effects panel.
@@ -637,12 +662,45 @@ pub struct UiState {
     /// Effects panel: the Color Grading Presets folder shown as a thumbnail grid (wide panel).
     #[serde(default)]
     pub lumetri_grid_folder: Option<String>,
+    /// Effects panel: width of the tree pane when the Color Grading Presets grid is open.
+    #[serde(default = "default_effects_tree_width")]
+    pub effects_tree_width: f32,
+    /// Effects panel: thumbnail scale for the Color Grading Presets grid (`0` = S, `1` = M, `2` = L).
+    #[serde(default = "default_effects_preset_thumb_scale")]
+    pub effects_preset_thumb_scale: u8,
+    /// Effects panel: whether the right-hand Effect Inspector pane is open on wide panels.
+    #[serde(default)]
+    pub effects_inspector_open: bool,
     /// Collapsed effect sections in Effect Controls ("clip:index").
     pub collapsed_fx: Vec<String>,
     /// Width of Effect Controls' effect list, left of the keyframe area (points; 0 = the default
     /// share of the panel). Dragging the divider sets it (#643).
     #[serde(default)]
     pub effect_controls_split: f32,
+    /// Effect Controls: scope override (`None` = `VfxOnly` in `"Effects"` workspace, `All` elsewhere).
+    #[serde(default)]
+    pub effect_controls_scope: Option<EffectControlsScope>,
+    /// Effect Controls: keyframe lane visibility override (`None` = hidden in `"Effects"` workspace, shown elsewhere).
+    #[serde(default)]
+    pub effect_controls_show_lane: Option<bool>,
+    /// Effect Controls: parameter search query.
+    #[serde(default)]
+    pub effect_controls_search: String,
+    /// Effect Controls: filter to animated/keyframed parameters only.
+    #[serde(default)]
+    pub effect_controls_animated_only: bool,
+    /// Active node ID in the clip's [`filmcraft_project::VfxGraph`] (`VfxNodes` + `EffectControls`).
+    #[serde(default)]
+    pub vfx_active_node_id: Option<u64>,
+    /// Nodes assigned to Viewer 1 (`[0]`) and Viewer 2 (`[1]`) as `(clip_id, node_id)`.
+    #[serde(default)]
+    pub vfx_viewer_nodes: [Option<(u64, u64)>; 2],
+    /// Active VFX Node Inspector tab (`0` = Controls, `1` = Settings).
+    #[serde(default)]
+    pub vfx_inspector_tab: u8,
+    /// Integrated bottom drawer inside `VfxNodes` (`0` = Closed, `1` = Keyframes, `2` = Spline).
+    #[serde(default)]
+    pub vfx_bottom_drawer: u8,
     pub show_menu_bar: bool,
     /// The header bar (Home, Import, Edit, Export, workspaces). An app that embeds FilmCraft can hide it.
     #[serde(default = "shown")]
@@ -923,6 +981,27 @@ pub struct ClipDialogDraft {
     pub info: serde_json::Value,
     #[serde(default)]
     pub error: String,
+}
+
+/// Effect Controls panel: which effects of the selected clip are shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EffectControlsScope {
+    #[default]
+    All,
+    VfxOnly,
+    ActiveNode,
+}
+
+/// Effects panel: category/kind quick filter pill.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EffectsKindFilter {
+    #[default]
+    All,
+    Video,
+    Audio,
+    Transitions,
+    Presets,
 }
 
 /// A pen mask in progress: vertices placed so far, in clip pixels (`[x, y, tangent x, tangent y]`).
@@ -1325,6 +1404,14 @@ fn default_concurrency() -> usize {
     2
 }
 
+fn default_effects_tree_width() -> f32 {
+    300.0
+}
+
+fn default_effects_preset_thumb_scale() -> u8 {
+    1
+}
+
 impl Default for UiState {
     fn default() -> Self {
         Self {
@@ -1344,11 +1431,29 @@ impl Default for UiState {
             source: MonitorView::default(),
             project_search: String::new(),
             effects_search: String::new(),
+            effects_filter_gpu: false,
+            effects_filter_32bit: false,
+            effects_filter_favorites: false,
+            effects_kind_filter: EffectsKindFilter::All,
+            selected_effect: None,
+            favorite_effects: vec![],
+            recent_effects: vec![],
             expanded_bins: vec![],
             expanded_fx: vec!["Video Transitions".into(), "Video Transitions/Dissolve".into()],
             lumetri_grid_folder: None,
+            effects_tree_width: default_effects_tree_width(),
+            effects_preset_thumb_scale: default_effects_preset_thumb_scale(),
+            effects_inspector_open: false,
             collapsed_fx: vec![],
             effect_controls_split: 0.0,
+            effect_controls_scope: None,
+            effect_controls_show_lane: None,
+            effect_controls_search: String::new(),
+            effect_controls_animated_only: false,
+            vfx_active_node_id: None,
+            vfx_viewer_nodes: [None, None],
+            vfx_inspector_tab: 0,
+            vfx_bottom_drawer: 0,
             show_menu_bar: true,
             show_header: true,
             show_status_bar: true,

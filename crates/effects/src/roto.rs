@@ -134,20 +134,33 @@ fn fnv(h: &mut u64, bytes: &[u8]) {
 
 /// The instance's strokes (parsed once per content).
 pub fn data(params: &Params) -> Arc<RotoData> {
-    static C: OnceLock<Mutex<HashMap<u64, Arc<RotoData>>>> = OnceLock::new();
+    static C: OnceLock<Mutex<(HashMap<u64, (Arc<RotoData>, u64)>, u64)>> = OnceLock::new();
     let j = s(params, STROKES);
     let mut h = 0xcbf2_9ce4_8422_2325;
     fnv(&mut h, j.as_bytes());
     let c = C.get_or_init(Default::default);
-    if let Some(d) = c.lock().unwrap_or_else(|e| e.into_inner()).get(&h) {
-        return d.clone();
+    {
+        let mut guard = c.lock().unwrap_or_else(|e| e.into_inner());
+        let (map, tick) = &mut *guard;
+        *tick = tick.wrapping_add(1);
+        let now = *tick;
+        if let Some((d, last_used)) = map.get_mut(&h) {
+            *last_used = now;
+            return d.clone();
+        }
     }
     let d = Arc::new(RotoData::from_json(j));
-    let mut m = c.lock().unwrap_or_else(|e| e.into_inner());
-    if m.len() > 64 {
-        m.clear();
+    let mut guard = c.lock().unwrap_or_else(|e| e.into_inner());
+    let (map, tick) = &mut *guard;
+    *tick = tick.wrapping_add(1);
+    let now = *tick;
+    while map.len() >= 64 {
+        let Some(&oldest) = map.iter().min_by_key(|(_, (_, t))| *t).map(|(k, _)| k) else {
+            break;
+        };
+        map.remove(&oldest);
     }
-    m.insert(h, d.clone());
+    map.insert(h, (d.clone(), now));
     d
 }
 
@@ -1537,7 +1550,11 @@ mod tests {
                             f32::from(inside)
                         })
                         .collect();
-                    out(o, g, crate::effectcraft_segment::TrackedFrame { prob, w: img.w, h: img.h, confidence: if o == 0 { 0.9 } else { 0.4 }, occluded: false });
+                    out(
+                        o,
+                        g,
+                        crate::effectcraft_segment::TrackedFrame { prob, w: img.w, h: img.h, confidence: if o == 0 { 0.9 } else { 0.4 }, occluded: false },
+                    );
                 }
             }
             Ok(())
@@ -1582,7 +1599,11 @@ mod tests {
                     }
                     let img = frames(g).ok_or("no frame")?;
                     self.emitted.fetch_add(1, Relaxed);
-                    out(o, g, crate::effectcraft_segment::TrackedFrame { prob: vec![0.5; img.w * img.h], w: img.w, h: img.h, confidence: 0.9, occluded: false });
+                    out(
+                        o,
+                        g,
+                        crate::effectcraft_segment::TrackedFrame { prob: vec![0.5; img.w * img.h], w: img.w, h: img.h, confidence: 0.9, occluded: false },
+                    );
                 }
             }
             Ok(())

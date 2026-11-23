@@ -425,17 +425,25 @@ fn resolve_effect_name(s: &Session, p: &Value, name: &str) -> Option<&'static fi
     {
         return Some(d);
     }
-    let n = name.to_ascii_lowercase();
+    let n = name.trim().to_ascii_lowercase();
     let cands: Vec<_> = filmcraft_project::effect_defs().iter().filter(|e| e.name.to_ascii_lowercase() == n).collect();
     if cands.len() <= 1 {
-        return cands.first().copied().or_else(|| filmcraft_project::find_effect(&n));
+        return cands.first().copied().or_else(|| filmcraft_project::find_effect(&n)).or_else(|| filmcraft_project::find_effect_by_name(&n));
     }
     let on_audio = s.active_sequence().is_some_and(|q| {
         let clips = clips_p(s, p);
         !clips.is_empty() && clips.iter().all(|c| q.find_item(*c).and_then(|(t, _)| q.track(t)).is_some_and(|t| t.kind == TrackKind::Audio))
     });
     let want = if on_audio { filmcraft_project::EffectKind::Audio } else { filmcraft_project::EffectKind::Video };
-    cands.iter().find(|d| !d.intrinsic && d.kind == want).or_else(|| cands.iter().find(|d| !d.intrinsic)).or(cands.first()).copied()
+    cands
+        .iter()
+        .find(|d| !d.intrinsic && d.kind == want && d.accelerated && !d.id.starts_with("ec."))
+        .or_else(|| cands.iter().find(|d| !d.intrinsic && d.kind == want && !d.id.starts_with("ec.")))
+        .or_else(|| cands.iter().find(|d| !d.intrinsic && d.kind == want && d.accelerated))
+        .or_else(|| cands.iter().find(|d| !d.intrinsic && d.kind == want))
+        .or_else(|| cands.iter().find(|d| !d.intrinsic))
+        .or(cands.first())
+        .copied()
 }
 
 pub(crate) fn clips_p(s: &Session, p: &Value) -> Vec<ClipId> {
@@ -3800,6 +3808,7 @@ fn build() -> Vec<CommandSpec> {
                             let _ = cg.add_serial_node(None, inst.clone());
                         }
                         i.effects.push(inst);
+                        i.sync_vfx_graph_from_effects();
                         let pos = i.effects.len() - 1;
                         applied.push(json!({"clip": i.id.0, "index": pos, "effect": def.id}));
                     }
@@ -3832,6 +3841,7 @@ fn build() -> Vec<CommandSpec> {
                 }
                 if idx < it.effects.len() {
                     it.effects.remove(idx);
+                    it.sync_vfx_graph_from_effects();
                 }
                 Ok(())
             })?;
@@ -3839,6 +3849,52 @@ fn build() -> Vec<CommandSpec> {
                 s.state.selected_effect = after;
             }
             Ok(Value::Null)
+        }),
+        cmd!("effects.reorder", "Reorder Effect", [], None, r#"{"clip":id,"from":n,"to":n}"#, has_seq, |s, p| {
+            let c = clip_p(p, "clip").ok_or_else(|| bad("effects.reorder", "need `clip`"))?;
+            let from = u64_p(p, "from").ok_or_else(|| bad("effects.reorder", "need `from`"))? as usize;
+            let to = u64_p(p, "to").ok_or_else(|| bad("effects.reorder", "need `to`"))? as usize;
+            s.edit_sequence("Reorder Effect", |q, _, _| {
+                let (_, it) = q.find_item_mut(c).ok_or(filmcraft_edit::EditError::NoItem(c))?;
+                if from >= it.effects.len() || to >= it.effects.len() {
+                    return Err(bad("effects.reorder", "effect index out of range"));
+                }
+                if it.effects.get(from).and_then(|e| e.def()).is_some_and(|d| d.intrinsic)
+                    || it.effects.get(to).and_then(|e| e.def()).is_some_and(|d| d.intrinsic)
+                {
+                    return Err(EngineError::Other("intrinsic effects cannot be reordered".into()));
+                }
+                if from != to {
+                    let item = it.effects.remove(from);
+                    it.effects.insert(to, item);
+                    it.sync_vfx_graph_from_effects();
+                }
+                Ok(())
+            })?;
+            let effects = s.active_sequence().and_then(|q| q.find_item(c)).map(|(_, it)| it.effects.clone()).unwrap_or_default();
+            s.state.selected_effect = crate::EffectSel::of(c, &effects, to);
+            Ok(json!({"index": to}))
+        }),
+        cmd!("effects.duplicate", "Duplicate Effect", [], None, r#"{"clip":id,"index":n}"#, has_seq, |s, p| {
+            let c = clip_p(p, "clip").ok_or_else(|| bad("effects.duplicate", "need `clip`"))?;
+            let idx = u64_p(p, "index").ok_or_else(|| bad("effects.duplicate", "need `index`"))? as usize;
+            let mut new_idx = 0usize;
+            s.edit_sequence("Duplicate Effect", |q, _, _| {
+                let (_, it) = q.find_item_mut(c).ok_or(filmcraft_edit::EditError::NoItem(c))?;
+                let Some(src) = it.effects.get(idx).cloned() else {
+                    return Err(bad("effects.duplicate", "effect index out of range"));
+                };
+                if src.def().is_some_and(|d| d.intrinsic) {
+                    return Err(EngineError::Other("intrinsic effects cannot be duplicated".into()));
+                }
+                new_idx = idx + 1;
+                it.effects.insert(new_idx, src);
+                it.sync_vfx_graph_from_effects();
+                Ok(())
+            })?;
+            let effects = s.active_sequence().and_then(|q| q.find_item(c)).map(|(_, it)| it.effects.clone()).unwrap_or_default();
+            s.state.selected_effect = crate::EffectSel::of(c, &effects, new_idx);
+            Ok(json!({"index": new_idx}))
         }),
         CommandSpec {
             id: "effects.select",
@@ -3949,6 +4005,7 @@ fn build() -> Vec<CommandSpec> {
                         }
                     }
                     it.sync_color_graph_from_lumetri_effects();
+                    it.sync_vfx_graph_from_effects();
                     Ok((keyframes, accepted_value))
                 })?;
                 // 0 keyframes: the value is static (`time` was not used)
@@ -3978,6 +4035,7 @@ fn build() -> Vec<CommandSpec> {
                     e.params.insert(pid.clone(), filmcraft_project::Param::new(d.default.clone()));
                 }
                 crate::masks::target_param(e, p, &pid).ok_or_else(|| bad("effects.toggleAnimation", "no such param"))?.toggle_animation(mt);
+                it.sync_vfx_graph_from_effects();
                 Ok(())
             })?;
             Ok(Value::Null)
@@ -3991,6 +4049,7 @@ fn build() -> Vec<CommandSpec> {
                     e.enabled = !e.enabled;
                 }
                 it.sync_color_graph_from_lumetri_effects();
+                it.sync_vfx_graph_from_effects();
                 Ok(())
             })?;
             Ok(Value::Null)
@@ -4006,6 +4065,7 @@ fn build() -> Vec<CommandSpec> {
                     e.label = next.clone();
                 }
                 it.sync_color_graph_from_lumetri_effects();
+                it.sync_vfx_graph_from_effects();
                 Ok(())
             })?;
             Ok(Value::Null)
@@ -4023,6 +4083,7 @@ fn build() -> Vec<CommandSpec> {
                     reset_params(e, None, frame, source, mt);
                 }
                 it.sync_color_graph_from_lumetri_effects();
+                it.sync_vfx_graph_from_effects();
                 Ok(())
             })?;
             Ok(Value::Null)
@@ -4046,6 +4107,7 @@ fn build() -> Vec<CommandSpec> {
                 if !reset_params(e, Some(&pid), frame, source, mt) {
                     return Err(bad("effects.resetParam", format!("no param `{pid}`")));
                 }
+                it.sync_vfx_graph_from_effects();
                 Ok(())
             })?;
             Ok(Value::Null)
@@ -4290,6 +4352,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::multicam::commands());
     v.extend(crate::essential_sound::commands());
     v.extend(crate::color::commands());
+    v.extend(crate::vfx_graph::commands());
     v.extend(crate::graphics::commands());
     v.extend(crate::graphic_templates::commands());
     v.extend(crate::shortcuts::commands());
@@ -4439,6 +4502,7 @@ fn keyframe_op(s: &mut Session, p: &Value, op: &str) -> Result<Value> {
                 k.interp = interp;
             }
         }
+        it.sync_vfx_graph_from_effects();
         Ok(reply)
     })
 }

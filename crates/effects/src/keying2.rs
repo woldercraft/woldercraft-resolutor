@@ -483,8 +483,8 @@ pub fn specs() -> Vec<EffectSpec> {
 mod tests {
     use super::*;
     use crate::channel2::tests::{FakeHost, sample};
-    use crate::{EffectEnv, MaskShape, run_fx};
     use crate::effectcraft_raster::Image;
+    use crate::{EffectEnv, MaskShape, run_fx};
 
     #[test]
     fn difference_matte_self_is_transparent_and_other_keeps() {

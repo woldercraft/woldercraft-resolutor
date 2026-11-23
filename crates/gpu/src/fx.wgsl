@@ -12,6 +12,7 @@ struct U {
     p3: vec4<f32>,
     p4: vec4<f32>,
     p5: vec4<f32>,
+    p6: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -596,15 +597,111 @@ fn apply_contrast_pivot_wgsl(v: vec3<f32>, contrast: f32, pivot: f32) -> vec3<f3
     return q + (s - q) * (k - 1.0);
 }
 
+fn pq_eotf(e: f32) -> f32 {
+    let m1 = 0.15930176;
+    let m2 = 78.84375;
+    let c1 = 0.8359375;
+    let c2 = 18.851563;
+    let c3 = 18.6875;
+    let p = powf(max(e, 0.0), 1.0 / m2);
+    return powf(max(p - c1, 0.0) / (c2 - c3 * p), 1.0 / m1);
+}
+
+fn pq_inverse_eotf(y: f32) -> f32 {
+    let m1 = 0.15930176;
+    let m2 = 78.84375;
+    let c1 = 0.8359375;
+    let c2 = 18.851563;
+    let c3 = 18.6875;
+    let p = powf(max(y, 0.0), m1);
+    return powf((c1 + c2 * p) / (1.0 + c3 * p), m2);
+}
+
+fn hlg_oetf(l: f32) -> f32 {
+    let a = 0.17883277;
+    let b = 0.28466892;
+    let c = 0.5599107;
+    if l <= 1.0 / 12.0 {
+        return sqrt(3.0 * max(l, 0.0));
+    }
+    return a * log(12.0 * l - b) + c;
+}
+
+fn hlg_inverse_oetf(e: f32) -> f32 {
+    let a = 0.17883277;
+    let b = 0.28466892;
+    let c = 0.5599107;
+    if e <= 0.5 {
+        return e * e / 3.0;
+    }
+    return (exp((e - c) / a) + b) / 12.0;
+}
+
+fn gs_encode(c: vec3<f32>, hdr_mode: u32, pa: f32, pb: f32) -> vec3<f32> {
+    if hdr_mode == 1u {
+        let norm = max(pa, 1e-6);
+        let k = 203.0 / 10000.0;
+        return vec3(
+            pq_inverse_eotf(min(max(c.x, 0.0) * k, 1.0)) / norm,
+            pq_inverse_eotf(min(max(c.y, 0.0) * k, 1.0)) / norm,
+            pq_inverse_eotf(min(max(c.z, 0.0) * k, 1.0)) / norm,
+        );
+    }
+    if hdr_mode == 2u {
+        let white = max(pa, 100.0);
+        let gamma = pb;
+        let fd = max(c, vec3(0.0)) * (203.0 / white);
+        let yd = 0.2627 * fd.x + 0.6780 * fd.y + 0.0593 * fd.z;
+        if yd <= 0.0 {
+            return vec3(0.0);
+        }
+        let k = powf(yd, (1.0 - gamma) / gamma);
+        return vec3(hlg_oetf(fd.x * k), hlg_oetf(fd.y * k), hlg_oetf(fd.z * k));
+    }
+    return enc(c);
+}
+
+fn gs_decode(v: vec3<f32>, hdr_mode: u32, pa: f32, pb: f32) -> vec3<f32> {
+    if hdr_mode == 1u {
+        let norm = pa;
+        let k = 10000.0 / 203.0;
+        return vec3(
+            pq_eotf(clamp(v.x * norm, 0.0, 1.0)) * k,
+            pq_eotf(clamp(v.y * norm, 0.0, 1.0)) * k,
+            pq_eotf(clamp(v.z * norm, 0.0, 1.0)) * k,
+        );
+    }
+    if hdr_mode == 2u {
+        let white = max(pa, 100.0);
+        let gamma = pb;
+        let es = vec3(
+            hlg_inverse_oetf(clamp(v.x, 0.0, 1.5)),
+            hlg_inverse_oetf(clamp(v.y, 0.0, 1.5)),
+            hlg_inverse_oetf(clamp(v.z, 0.0, 1.5)),
+        );
+        let ys = 0.2627 * es.x + 0.6780 * es.y + 0.0593 * es.z;
+        if ys <= 0.0 {
+            return vec3(0.0);
+        }
+        let k = powf(ys, gamma - 1.0);
+        return es * (k * white / 203.0);
+    }
+    return dec(v);
+}
+
 fn lumetri_op(c: vec3<f32>, p: vec2<i32>) -> vec3<f32> {
     let s = size();
     let creative_on = u.i1.x != 0u;
     let vignette_on = u.i1.y != 0u;
+    let hdr_mode = u.i1.z;
+    let hdr_a = u.p6.x;
+    let hdr_b = u.p6.y;
+    let hdr_specular = u.p6.z;
 
     // white balance + exposure in linear light
     let ge = u.p0.xyz;
     let lin = c * ge;
-    var v = enc(lin);
+    var v = gs_encode(lin, hdr_mode, hdr_a, hdr_b);
 
     // whites / blacks: endpoints
     let b0 = u.p0.w;
@@ -634,7 +731,24 @@ fn lumetri_op(c: vec3<f32>, p: vec2<i32>) -> vec3<f32> {
     let contrast = u.p1.w;
     let pivot = u.p3.w;
     if abs(contrast) > 1e-4 {
-        v = apply_contrast_pivot_wgsl(v, contrast, pivot);
+        let vc = apply_contrast_pivot_wgsl(v, contrast, pivot);
+        if hdr_mode != 0u {
+            v = vec3(
+                select(vc.x, v.x, v.x > 1.0),
+                select(vc.y, v.y, v.y > 1.0),
+                select(vc.z, v.z, v.z > 1.0),
+            );
+        } else {
+            v = vc;
+        }
+    }
+    if hdr_mode != 0u && abs(hdr_specular) > 1e-4 {
+        let sp = max(1.0 + hdr_specular, 0.0);
+        v = vec3(
+            select(v.x, 1.0 + (v.x - 1.0) * sp, v.x > 1.0),
+            select(v.y, 1.0 + (v.y - 1.0) * sp, v.y > 1.0),
+            select(v.z, 1.0 + (v.z - 1.0) * sp, v.z > 1.0),
+        );
     }
 
     // faded film: lift blacks and compress
@@ -690,7 +804,7 @@ fn lumetri_op(c: vec3<f32>, p: vec2<i32>) -> vec3<f32> {
         }
     }
 
-    return dec(v);
+    return gs_decode(v, hdr_mode, hdr_a, hdr_b);
 }
 
 fn wheel_smoothstep_wgsl(a: f32, b: f32, x: f32) -> f32 {

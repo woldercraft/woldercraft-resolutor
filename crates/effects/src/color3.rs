@@ -867,8 +867,8 @@ pub fn specs() -> Vec<EffectSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EffectEnv, run_fx};
     use crate::effectcraft_raster::Image;
+    use crate::{EffectEnv, run_fx};
 
     fn ramp() -> Image {
         let mut img = Image::new(16, 8);

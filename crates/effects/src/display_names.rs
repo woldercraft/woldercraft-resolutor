@@ -1,6 +1,6 @@
 //! Display naming must not change file, command or script identities.
-use crate::{find, instantiate, lookup, name_matches};
 use crate::effectcraft_project::build::Ids;
+use crate::{find, instantiate, lookup, name_matches};
 
 const RENAMED: &[(&str, &str, &str)] = &[
     ("ec.sim.ccballaction", "CC Ball Action", "Ball Grid"),

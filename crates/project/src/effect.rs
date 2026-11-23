@@ -1107,23 +1107,29 @@ pub fn find_effect(id: &str) -> Option<&'static EffectDef> {
     effect_defs().iter().find(|e| e.id == id)
 }
 
-/// Case-insensitive lookup by id or display name.
+/// Case-insensitive lookup by id, display name, or search/legacy alias.
 pub fn find_effect_by_name(name: &str) -> Option<&'static EffectDef> {
-    let n = name.to_ascii_lowercase();
+    let n = name.trim().to_ascii_lowercase();
     // Old human-readable names are import/automation aliases, never display labels.
     let legacy_id = match n.as_str() {
         "lumetri" | "lumetri color" | "color grade" => Some("lumetri"),
         _ => None,
     };
-    legacy_id.and_then(find_effect).or_else(|| effect_defs().iter().find(|e| e.id == n || e.name.to_ascii_lowercase() == n))
+    legacy_id
+        .and_then(find_effect)
+        .or_else(|| effect_defs().iter().find(|e| e.id == n || (!e.id.starts_with("ec.") && e.name.to_ascii_lowercase() == n)))
+        .or_else(|| effect_defs().iter().find(|e| e.name.to_ascii_lowercase() == n))
+        .or_else(|| effect_defs().iter().find(|e| search_aliases(e).iter().any(|a| a.eq_ignore_ascii_case(&n))))
+        .or_else(|| filmcraft_effects::lookup(&n).and_then(|s| find_effect(s.id)))
 }
 
 /// Names a user may still type into the Effects panel search for an effect whose display label
-/// changed (`"Lumetri"` → Color Grading). Search terms only: never display labels, never written
-/// to a project or an interchange file.
+/// changed (`"Lumetri"` → Color Grading, or EffectCraft `"CC *"` / `"Keylight"` aliases).
+/// Search terms only: never display labels, never written to a project or an interchange file.
 pub fn search_aliases(def: &EffectDef) -> &'static [&'static str] {
     match def.id {
         "lumetri" => &["Lumetri", "Lumetri Color", "Color Grade"],
+        id if id.starts_with("ec.") => filmcraft_effects::aliases(id),
         _ => &[],
     }
 }
@@ -1198,5 +1204,13 @@ mod tests {
         }
         // and a file naming the old label still imports as the same effect
         assert_eq!(find_effect_by_name(interchange_name(lumetri)).unwrap().id, "lumetri");
+    }
+
+    #[test]
+    fn effectcraft_aliases_are_searchable_and_resolvable() {
+        let particle_world = find_effect("ec.sim.ccparticleworld").unwrap();
+        assert!(search_aliases(particle_world).contains(&"CC Particle World"));
+        assert_eq!(find_effect_by_name("CC Particle World").unwrap().id, "ec.sim.ccparticleworld");
+        assert_eq!(find_effect_by_name("CC Kaleida").unwrap().id, "ec.stylize.cckaleida");
     }
 }

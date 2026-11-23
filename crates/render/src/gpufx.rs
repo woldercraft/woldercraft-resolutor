@@ -40,12 +40,12 @@ pub struct LumetriCurveTable {
     pub active_mask: u32,
 }
 
-#[derive(Hash, PartialEq, Eq)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 struct CurveCacheKey([Option<Vec<[u32; 2]>>; 10]);
 
-fn curve_table_cache() -> &'static Mutex<HashMap<CurveCacheKey, Arc<Vec<[f32; 4]>>>> {
-    static CACHE: OnceLock<Mutex<HashMap<CurveCacheKey, Arc<Vec<[f32; 4]>>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn curve_table_cache() -> &'static Mutex<(HashMap<CurveCacheKey, (Arc<Vec<[f32; 4]>>, u64)>, u64)> {
+    static CACHE: OnceLock<Mutex<(HashMap<CurveCacheKey, (Arc<Vec<[f32; 4]>>, u64)>, u64)>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new((HashMap::new(), 0)))
 }
 
 fn build_curve_table(e: &EffectInstance) -> Option<LumetriCurveTable> {
@@ -72,8 +72,12 @@ fn build_curve_table(e: &EffectInstance) -> Option<LumetriCurveTable> {
 
     let key = CurveCacheKey(raw.each_ref().map(|opt| opt.as_ref().map(|v| v.iter().map(|p| [p[0].to_bits(), p[1].to_bits()]).collect())));
     {
-        let cache = curve_table_cache().lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(texels) = cache.get(&key) {
+        let mut guard = curve_table_cache().lock().unwrap_or_else(PoisonError::into_inner);
+        let (cache, tick) = &mut *guard;
+        *tick = tick.wrapping_add(1);
+        let now = *tick;
+        if let Some((texels, last_used)) = cache.get_mut(&key) {
+            *last_used = now;
             return Some(LumetriCurveTable { texels: texels.clone(), active_mask });
         }
     }
@@ -131,11 +135,17 @@ fn build_curve_table(e: &EffectInstance) -> Option<LumetriCurveTable> {
     }
 
     let arc = Arc::new(texels);
-    let mut cache = curve_table_cache().lock().unwrap_or_else(PoisonError::into_inner);
-    if cache.len() >= 32 {
-        cache.clear();
+    let mut guard = curve_table_cache().lock().unwrap_or_else(PoisonError::into_inner);
+    let (cache, tick) = &mut *guard;
+    *tick = tick.wrapping_add(1);
+    let now = *tick;
+    while cache.len() >= 32 {
+        let Some(oldest) = cache.iter().min_by_key(|(_, (_, t))| *t).map(|(k, _)| k.clone()) else {
+            break;
+        };
+        cache.remove(&oldest);
     }
-    cache.insert(key, arc.clone());
+    cache.insert(key, (arc.clone(), now));
     Some(LumetriCurveTable { texels: arc, active_mask })
 }
 
@@ -433,6 +443,8 @@ pub struct LumetriOp {
     pub key_gain: f32,
     pub show_mask: u32,
     pub node_mask: Option<MaskCoverage>,
+    pub grade_space: filmcraft_color::GradeSpace,
+    pub hdr_specular: f32,
     pub gpu_capable: bool,
 }
 
@@ -474,6 +486,15 @@ pub const GPU_EFFECTS: &[&str] = &[
     "vignette",
     "video_limiter",
     "lumetri",
+    "ec.blur.gaussian",
+    "ec.blur.directional",
+    "ec.blur.sharpen",
+    "ec.blur.unsharp",
+    "ec.color.tint",
+    "ec.color.levels",
+    "ec.stylize.posterize",
+    "ec.distort.mirror",
+    "ec.distort.offset",
 ];
 
 #[allow(clippy::too_many_arguments)]
@@ -524,6 +545,23 @@ fn minifies(m: &Affine, w: usize, h: usize) -> bool {
     // (a non-finite factor: keep such maps off the GPU; `apply` still hands them to the CPU's
     // `Image::transformed`, which decides as before)
     !minify.is_finite() || minify >= 2.0 && w >= 4 && h >= 4
+}
+
+/// Whether `ec.color.levels` per-channel controls (R/G/B/A) are all at identity defaults.
+fn ec_levels_channels_identity(e: &EffectInstance, cx: &FxCtx) -> bool {
+    const PREFIXES: [&str; 4] = ["red", "green", "blue", "alpha"];
+    const DEFAULTS: [(&str, f32); 5] = [("InBlack", 0.0), ("InWhite", 1.0), ("Gamma", 1.0), ("OutBlack", 0.0), ("OutWhite", 1.0)];
+    for pre in PREFIXES {
+        for (suffix, def) in DEFAULTS {
+            let key = format!("{pre}{suffix}");
+            if let Some(p) = e.param(&key)
+                && (p.f64_at(cx.t) as f32 - def).abs() > 1e-6
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 impl FxOp {
@@ -889,7 +927,6 @@ impl FxOp {
                 let look_lut_3d = if has_look_lut { crate::luts::resolve_baked_cube(cx.project, text(e, "look_lut"), 33) } else { None };
 
                 let hsl_ok = hsl.as_ref().is_none_or(|h| h.denoise_r <= 3 && h.in_out_r <= 3);
-                let gpu_capable = !is_hdr && (!has_input_lut || input_lut_3d.is_some()) && (!has_look_lut || look_lut_3d.is_some()) && look <= 8 && hsl_ok;
 
                 let bf = |id: &str| if basic_on { f(e, id, cx) } else { 0.0 };
                 let temp = bf("temperature") / 100.0;
@@ -910,6 +947,7 @@ impl FxOp {
                 let sh = bf("shadows") / 100.0;
                 let wh = bf("whites") / 100.0;
                 let bl = bf("blacks") / 100.0;
+                let hdr_specular = if is_hdr { bf("hdr_specular") / 100.0 } else { 0.0 };
                 let sat = if basic_on { f(e, "saturation", cx) / 100.0 } else { 1.0 } * if creative_on { f(e, "creative_sat", cx) / 100.0 } else { 1.0 };
                 let vib = if creative_on { f(e, "vibrance", cx) / 100.0 } else { 0.0 };
                 let faded = if creative_on { f(e, "faded_film", cx) / 100.0 } else { 0.0 };
@@ -921,6 +959,33 @@ impl FxOp {
                 let vfeather = f(e, "vignette_feather", cx) / 100.0;
                 let gains = [1.0 + 0.35 * temp, 1.0 - 0.3 * tint, 1.0 - 0.35 * temp];
                 let aspect = if h > 0 { (w as f32 / h as f32).max(1e-4) } else { 1.0 };
+
+                let wheels_active = wheels_on
+                    && (ws.iter().chain(&wm).chain(&wh_rgb).chain(&wo).any(|v| v.abs() > 1e-5)
+                        || ls.abs() > 1e-5
+                        || lm.abs() > 1e-5
+                        || lh.abs() > 1e-5
+                        || lo.abs() > 1e-5);
+                let is_basic_hdr_only = !has_input_lut
+                    && !has_look_lut
+                    && look == 0
+                    && !wheels_active
+                    && curves.is_none()
+                    && color_slice.is_none()
+                    && warper.is_none()
+                    && hsl.is_none()
+                    && log_wheels.is_none()
+                    && hdr_wheels.is_none()
+                    && rgb_mixer.is_none()
+                    && cst.is_none()
+                    && sizing.is_none()
+                    && sharpen == 0.0
+                    && midtone_detail.abs() <= 1e-3;
+                let gpu_capable = (!is_hdr || is_basic_hdr_only)
+                    && (!has_input_lut || input_lut_3d.is_some())
+                    && (!has_look_lut || look_lut_3d.is_some())
+                    && look <= 8
+                    && hsl_ok;
 
                 FxOp::Lumetri(Box::new(LumetriOp {
                     input_lut: input_lut_3d,
@@ -979,8 +1044,64 @@ impl FxOp {
                     key_gain,
                     show_mask,
                     node_mask: None,
+                    grade_space: gs,
+                    hdr_specular,
                     gpu_capable,
                 }))
+            }
+            "ec.blur.gaussian" => {
+                let r = f(e, "blurriness", cx) * cx.px_scale * 0.5;
+                let dims = choice(e, "dimensions");
+                let (rx, ry) = gaussian_boxes(w, h, if dims == 2 { 0.0 } else { r }, if dims == 1 { 0.0 } else { r });
+                FxOp::Gaussian { rx, ry, repeat: b(e, "repeatEdge") }
+            }
+            "ec.blur.directional" => {
+                let len = f(e, "length", cx) * cx.px_scale;
+                let dir = (f(e, "direction", cx) as f64).to_radians();
+                if !len.is_finite() || len < 0.5 {
+                    FxOp::DirectionalBlur { dx: 0.0, dy: 0.0, steps: 0 }
+                } else {
+                    let steps = (len.ceil() as usize).clamp(2, 64) as u32;
+                    FxOp::DirectionalBlur { dx: (dir.sin() as f32) * len, dy: (-dir.cos() as f32) * len, steps }
+                }
+            }
+            "ec.blur.sharpen" => {
+                let r = cx.px_scale.max(0.6);
+                let (rx, ry) = gaussian_boxes(w, h, r, r);
+                FxOp::Unsharp { rx, ry, amount: f(e, "amount", cx) / 50.0, threshold: 0.0 }
+            }
+            "ec.blur.unsharp" => {
+                let r = (f(e, "radius", cx) * cx.px_scale).max(0.1);
+                let (rx, ry) = gaussian_boxes(w, h, r, r);
+                FxOp::Unsharp { rx, ry, amount: f(e, "amount", cx) / 100.0, threshold: f(e, "threshold", cx) / 255.0 }
+            }
+            "ec.color.tint" => {
+                let (bl, wh) = (color(e, "black", cx), color(e, "white", cx));
+                FxOp::Tint { black: [bl[0], bl[1], bl[2]], white: [wh[0], wh[1], wh[2]], amount: f(e, "amount", cx) / 100.0 }
+            }
+            "ec.color.levels" => {
+                if b(e, "noClip") || choice(e, "clipToOutputBlack") == 0 || choice(e, "clipToOutputWhite") == 0 || !ec_levels_channels_identity(e, cx) {
+                    return None;
+                }
+                let ib = f(e, "inBlack", cx);
+                let iw = f(e, "inWhite", cx);
+                if !ib.is_finite() || !iw.is_finite() || iw <= ib + 1e-4 {
+                    return None;
+                }
+                FxOp::Levels { ib, iw, ob: f(e, "outBlack", cx), ow: f(e, "outWhite", cx), g: 1.0 / f(e, "gamma", cx).max(0.01) }
+            }
+            "ec.stylize.posterize" => FxOp::Posterize { n: f(e, "level", cx).round().clamp(2.0, 255.0) - 1.0 },
+            "ec.distort.mirror" => {
+                let img = Image { w, h, px: Vec::new() };
+                let c = point(e, "center", cx, &img);
+                let ang = (f(e, "angle", cx) as f64).to_radians();
+                FxOp::Mirror { cx: c.x as f32, cy: c.y as f32, nx: ang.cos() as f32, ny: ang.sin() as f32 }
+            }
+            "ec.distort.offset" => {
+                let img = Image { w, h, px: Vec::new() };
+                let s = point(e, "shift", cx, &img);
+                let (dx, dy) = (s.x - w as f64 / 2.0, s.y - h as f64 / 2.0);
+                FxOp::Offset { dx: dx.rem_euclid(w.max(1) as f64) as f32, dy: dy.rem_euclid(h.max(1) as f64) as f32, blend: f(e, "blend", cx) / 100.0 }
             }
             _ => return None,
         })
@@ -1557,6 +1678,8 @@ impl FxOp {
                     key_gain,
                     show_mask,
                     node_mask,
+                    grade_space,
+                    hdr_specular,
                     ..
                 } = op.as_ref();
                 let (input_lut, look_lut) = (input_lut.as_deref(), look_lut.as_deref());
@@ -1589,6 +1712,8 @@ impl FxOp {
                     None
                 };
                 let (w, h) = (img.w as f32, img.h as f32);
+                let (grade_space, hdr_specular) = (*grade_space, *hdr_specular);
+                let hdr = grade_space.is_hdr();
                 img.map_rgb(|c, x, y| {
                     let c = match input_lut {
                         Some(l) => dec(l.apply(enc(c))),
@@ -1596,7 +1721,7 @@ impl FxOp {
                     };
                     // white balance + exposure in linear light
                     let lin = [c[0] * gains[0] * exposure, c[1] * gains[1] * exposure, c[2] * gains[2] * exposure];
-                    let mut v = enc(lin);
+                    let mut v = grade_space.encode(lin);
                     // whites / blacks: endpoints
                     let b0 = -bl * 0.15;
                     let w0 = 1.0 - wh * 0.15;
@@ -1611,7 +1736,10 @@ impl FxOp {
                     v = v.map(|q| q * k + add);
                     // contrast: smooth S-curve around pivot
                     if contrast.abs() > 1e-4 {
-                        v = v.map(|q| apply_contrast_pivot(q, contrast, pivot));
+                        v = v.map(|q| if hdr && q > 1.0 { q } else { apply_contrast_pivot(q, contrast, pivot) });
+                    }
+                    if hdr && hdr_specular.abs() > 1e-4 {
+                        v = v.map(|q| if q > 1.0 { 1.0 + (q - 1.0) * (1.0 + hdr_specular).max(0.0) } else { q });
                     }
                     // faded film: lift blacks and compress
                     if faded > 0.0 {
@@ -1729,7 +1857,7 @@ impl FxOp {
                     if let Some(c) = cst {
                         v = apply_cst_unit(enc(dec(v)), c);
                     }
-                    dec(v)
+                    grade_space.decode(v)
                 });
                 if let Some(sz) = sizing {
                     sz.apply_image(img);
@@ -1960,5 +2088,75 @@ mod tests {
         e.params.get_mut("shutter_override").unwrap().value = ParamValue::Bool(false);
         e.params.get_mut("shutter_angle").unwrap().value = ParamValue::Float(360.0);
         assert!(on_gpu(&e), "the angle counts only with the override");
+    }
+
+    #[test]
+    fn ec_gpu_badge_matches_fxop_eval() {
+        let cx = FxCtx {
+            t: Tick::ZERO,
+            px_scale: 1.0,
+            seconds: 0.0,
+            timecode: "",
+            clip_name: "",
+            project: None,
+            env: None,
+            frame_rate: 24.0,
+            working: filmcraft_color::WorkingSpace::Rec709,
+        };
+        for d in filmcraft_project::effect_defs().iter().filter(|d| d.id.starts_with("ec.")) {
+            let inst = d.instance();
+            let has_gpu = FxOp::eval(&inst, &cx, 64, 36).is_some_and(|op| op.gpu_ok());
+            assert_eq!(d.accelerated, has_gpu, "{} accelerated badge ({}) must match FxOp::eval ({has_gpu})", d.id, d.accelerated);
+            if d.accelerated {
+                assert!(GPU_EFFECTS.contains(&d.id), "{} must be listed in gpufx::GPU_EFFECTS so plan.rs uses the GPU stage", d.id);
+            }
+        }
+    }
+
+    #[test]
+    fn ec_gpu_ops_match_cpu_semantics_and_fallback() {
+        let cx = FxCtx {
+            t: Tick::ZERO,
+            px_scale: 1.0,
+            seconds: 0.0,
+            timecode: "",
+            clip_name: "",
+            project: None,
+            env: None,
+            frame_rate: 24.0,
+            working: filmcraft_color::WorkingSpace::Rec709,
+        };
+        // Directional blur: length without extra *2 multiplier
+        let mut dir = find_effect("ec.blur.directional").unwrap().instance();
+        dir.params.get_mut("length").unwrap().value = ParamValue::Float(10.0);
+        dir.params.get_mut("direction").unwrap().value = ParamValue::Float(90.0);
+        match FxOp::eval(&dir, &cx, 64, 36).unwrap() {
+            FxOp::DirectionalBlur { dx, dy, .. } => {
+                assert!((dx - 10.0).abs() < 1e-4 && dy.abs() < 1e-4, "expected dx=10, dy=0, got ({dx}, {dy})");
+            }
+            other => panic!("unexpected op: {other:?}"),
+        }
+        // Sharpen: amount / 50.0
+        let mut sh = find_effect("ec.blur.sharpen").unwrap().instance();
+        sh.params.get_mut("amount").unwrap().value = ParamValue::Float(25.0);
+        match FxOp::eval(&sh, &cx, 64, 36).unwrap() {
+            FxOp::Unsharp { amount, .. } => assert!((amount - 0.5).abs() < 1e-6),
+            other => panic!("unexpected op: {other:?}"),
+        }
+        // Posterize: rounded & clamped level - 1.0
+        let mut post = find_effect("ec.stylize.posterize").unwrap().instance();
+        post.params.get_mut("level").unwrap().value = ParamValue::Float(4.6);
+        match FxOp::eval(&post, &cx, 64, 36).unwrap() {
+            FxOp::Posterize { n } => assert!((n - 4.0).abs() < 1e-6),
+            other => panic!("unexpected op: {other:?}"),
+        }
+        // Levels: per-channel edit or unclipped mode falls back to CPU (None)
+        let mut lvl = find_effect("ec.color.levels").unwrap().instance();
+        assert!(FxOp::eval(&lvl, &cx, 64, 36).is_some());
+        lvl.params.get_mut("redInBlack").unwrap().value = ParamValue::Float(0.2);
+        assert!(FxOp::eval(&lvl, &cx, 64, 36).is_none());
+        let mut lvl_noclip = find_effect("ec.color.levels").unwrap().instance();
+        lvl_noclip.params.get_mut("clipToOutputBlack").unwrap().value = ParamValue::Choice(0);
+        assert!(FxOp::eval(&lvl_noclip, &cx, 64, 36).is_none());
     }
 }
