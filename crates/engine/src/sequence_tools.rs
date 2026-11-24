@@ -1249,11 +1249,19 @@ pub struct SilencePrefs {
     pub pre_head: usize,
     pub post_tail: usize,
     pub min_strip: usize,
+    #[serde(default)]
+    pub preview_scope: Option<String>,
 }
 
 impl Default for SilencePrefs {
     fn default() -> Self {
-        Self { threshold: DEFAULT_THRESHOLD_DB, pre_head: DEFAULT_PRE_HEAD_FRAMES, post_tail: DEFAULT_POST_TAIL_FRAMES, min_strip: DEFAULT_MIN_STRIP_FRAMES }
+        Self {
+            threshold: DEFAULT_THRESHOLD_DB,
+            pre_head: DEFAULT_PRE_HEAD_FRAMES,
+            post_tail: DEFAULT_POST_TAIL_FRAMES,
+            min_strip: DEFAULT_MIN_STRIP_FRAMES,
+            preview_scope: None,
+        }
     }
 }
 
@@ -1422,18 +1430,27 @@ pub fn remove_silence(s: &mut Session, p: &Value) -> Result<Value> {
     let pre_head = (u64_p(p, "preHead").unwrap_or(s.prefs.silence.pre_head as u64) as usize).clamp(0, 120);
     let post_tail = (u64_p(p, "postTail").unwrap_or(s.prefs.silence.post_tail as u64) as usize).clamp(0, 120);
     let min_strip = (u64_p(p, "minStrip").unwrap_or(s.prefs.silence.min_strip as u64) as usize).clamp(1, 300);
+    let preview_scope = p
+        .get("previewScope")
+        .and_then(Value::as_str)
+        .filter(|v| *v == "visible" || *v == "all")
+        .map(str::to_string);
 
     // Persist last-used silence parameters so the user doesn't have to reconfigure them each time
     if (s.prefs.silence.threshold - threshold_db).abs() > 0.001
         || s.prefs.silence.pre_head != pre_head
         || s.prefs.silence.post_tail != post_tail
         || s.prefs.silence.min_strip != min_strip
+        || (preview_scope.is_some() && s.prefs.silence.preview_scope != preview_scope)
     {
         let mut next = s.prefs.clone();
         next.silence.threshold = threshold_db;
         next.silence.pre_head = pre_head;
         next.silence.post_tail = post_tail;
         next.silence.min_strip = min_strip;
+        if preview_scope.is_some() {
+            next.silence.preview_scope = preview_scope;
+        }
         let _ = s.set_prefs(next);
     }
 
