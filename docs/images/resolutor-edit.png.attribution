@@ -1,0 +1,8 @@
+asset:        resolutor-edit.png
+title:        README gallery: Edit workspace
+author:       Woldercraft Resolutor contributors
+source:       original work (screenshot of Woldercraft Resolutor running the built-in Demo Project)
+license:      MIT OR Apache-2.0
+license-file:
+added:        2026-11-25 by wolder
+notes:        Edit workspace showing the built-in Resolutor Demo Project (procedurally generated footage and audio), Program monitor with graded Ocean_Sunset.mp4, clip metadata, subtitles panel, project bins, multi-track timeline, and loudness meters. All UI icons are drawn in code; fonts are Inter and JetBrains Mono (OFL-1.1). Contains no Adobe artwork.
