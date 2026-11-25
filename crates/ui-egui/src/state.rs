@@ -525,11 +525,7 @@ impl MonitorView {
     /// The resolution frames are rendered at: Playback Resolution while playing (or the higher
     /// of it and Paused Resolution with High Quality Playback), Paused Resolution when stopped.
     pub fn effective_res(&self, playing: bool) -> PlaybackRes {
-        if !playing || (self.high_quality && self.paused_res.scale() > self.res.scale()) {
-            self.paused_res
-        } else {
-            self.res
-        }
+        if !playing || (self.high_quality && self.paused_res.scale() > self.res.scale()) { self.paused_res } else { self.res }
     }
     /// The display mode in effect (None = Multi-Camera).
     pub fn display_mode(&self) -> Option<DisplayMode> {

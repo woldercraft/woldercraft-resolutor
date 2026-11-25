@@ -15,8 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use filmcraft_geom::{Affine, Vec2};
 use filmcraft_project::{
-    EffectInstance, LayerBlendMode, MergeOperator, Param, ParamValue, VfxEndpoint, VfxGraph, VfxInputSlot, VfxNode, VfxNodeId, VfxNodeKind,
-    VfxNodeSettings,
+    EffectInstance, LayerBlendMode, MergeOperator, Param, ParamValue, VfxEndpoint, VfxGraph, VfxInputSlot, VfxNode, VfxNodeId, VfxNodeKind, VfxNodeSettings,
 };
 use filmcraft_time::Tick;
 use rayon::prelude::*;
@@ -226,18 +225,14 @@ fn is_concat_transform(graph: &VfxGraph, node: &VfxNode, cx: &FxCtx) -> Option<E
     if inst.effect != "transform" || !inst.masks.is_empty() {
         return None;
     }
-    let shutter = inst.param("shutter_override").and_then(|p| p.value.as_bool()).unwrap_or(false)
-        && inst.f64_at("shutter_angle", cx.t) > 0.5;
+    let shutter = inst.param("shutter_override").and_then(|p| p.value.as_bool()).unwrap_or(false) && inst.f64_at("shutter_angle", cx.t) > 0.5;
     if shutter { None } else { Some(inst) }
 }
 
 fn transform_affine_and_opacity(fx: &EffectInstance, cx: &FxCtx, w: usize, h: usize) -> (Affine, f32) {
     let pt = |id: &str| -> Vec2 {
         let v = fx.param(id).map(|p| p.vec2_at(cx.t)).unwrap_or(Vec2::new(f64::NAN, f64::NAN));
-        Vec2::new(
-            if v.x.is_nan() { w as f64 / 2.0 } else { v.x * cx.px_scale as f64 },
-            if v.y.is_nan() { h as f64 / 2.0 } else { v.y * cx.px_scale as f64 },
-        )
+        Vec2::new(if v.x.is_nan() { w as f64 / 2.0 } else { v.x * cx.px_scale as f64 }, if v.y.is_nan() { h as f64 / 2.0 } else { v.y * cx.px_scale as f64 })
     };
     let anchor = pt("anchor");
     let pos = pt("position");
@@ -248,9 +243,7 @@ fn transform_affine_and_opacity(fx: &EffectInstance, cx: &FxCtx, w: usize, h: us
     let skew = fx.f64_at("skew", cx.t).to_radians().tan();
     let skew_axis = fx.f64_at("skew_axis", cx.t);
     let op = (fx.f64_at("opacity", cx.t) as f32 / 100.0).clamp(0.0, 1.0);
-    let sk = Affine::rotate_deg(skew_axis)
-        .then_apply(&Affine { a: 1.0, b: 0.0, c: skew, d: 1.0, e: 0.0, f: 0.0 })
-        .then_apply(&Affine::rotate_deg(-skew_axis));
+    let sk = Affine::rotate_deg(skew_axis).then_apply(&Affine { a: 1.0, b: 0.0, c: skew, d: 1.0, e: 0.0, f: 0.0 }).then_apply(&Affine::rotate_deg(-skew_axis));
     let m = Affine::translate(pos.x, pos.y)
         .then_apply(&Affine::rotate_deg(rot))
         .then_apply(&sk)
@@ -299,14 +292,7 @@ impl<'a, 'cx> GraphEval<'a, 'cx> {
             if let Some(cached) = self.mask_memo.get(&mask_id) {
                 return (cached.clone(), key);
             }
-            let cov = crate::mask::effect_coverage(
-                std::slice::from_ref(mask),
-                self.cx.t,
-                self.cx.px_scale,
-                self.media_in.w,
-                self.media_in.h,
-            )
-            .map(Arc::new);
+            let cov = crate::mask::effect_coverage(std::slice::from_ref(mask), self.cx.t, self.cx.px_scale, self.media_in.w, self.media_in.h).map(Arc::new);
             self.mask_memo.insert(mask_id, cov.clone());
             return (cov, key);
         }
@@ -317,11 +303,7 @@ impl<'a, 'cx> GraphEval<'a, 'cx> {
         let has_alpha_var = pixels.iter().any(|p| p[3] < 0.999);
         let mut matte = Vec::with_capacity(n);
         for p in pixels {
-            let v = if has_alpha_var {
-                p[3].clamp(0.0, 1.0)
-            } else {
-                (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]).clamp(0.0, 1.0)
-            };
+            let v = if has_alpha_var { p[3].clamp(0.0, 1.0) } else { (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]).clamp(0.0, 1.0) };
             matte.push(v);
         }
         (Some(Arc::new(matte)), src.key ^ 0x9E37_79B9_7F4A_7C15)
@@ -353,20 +335,17 @@ impl<'a, 'cx> GraphEval<'a, 'cx> {
         // Pass-Through (`Ctrl+P` / disabled) passes Main (or transparent if Merge has none) untouched.
         if !node.enabled {
             return match &node.kind {
-                VfxNodeKind::Mask(_) => EvalFrame {
-                    img: Arc::new(Image::new(self.media_in.w, self.media_in.h)),
-                    key: 0,
-                },
-                _ => main_src
-                    .map(|s| self.eval_endpoint(s, depth + 1))
-                    .unwrap_or_else(|| EvalFrame { img: Arc::clone(&self.media_in), key: self.media_in_key }),
+                VfxNodeKind::Mask(_) => EvalFrame { img: Arc::new(Image::new(self.media_in.w, self.media_in.h)), key: 0 },
+                _ => {
+                    main_src.map(|s| self.eval_endpoint(s, depth + 1)).unwrap_or_else(|| EvalFrame { img: Arc::clone(&self.media_in), key: self.media_in_key })
+                }
             };
         }
 
         match &node.kind {
-            VfxNodeKind::PipeRouter => main_src
-                .map(|s| self.eval_endpoint(s, depth + 1))
-                .unwrap_or_else(|| EvalFrame { img: Arc::clone(&self.media_in), key: self.media_in_key }),
+            VfxNodeKind::PipeRouter => {
+                main_src.map(|s| self.eval_endpoint(s, depth + 1)).unwrap_or_else(|| EvalFrame { img: Arc::clone(&self.media_in), key: self.media_in_key })
+            }
 
             VfxNodeKind::Mask(_) => {
                 // Direct viewer inspection of a Mask node renders white matte over black.
@@ -395,9 +374,7 @@ impl<'a, 'cx> GraphEval<'a, 'cx> {
 
     fn eval_effect_node(&mut self, node: &VfxNode, main_src: Option<VfxEndpoint>, depth: usize) -> EvalFrame {
         let Some(fx) = self.graph.resolve_effect(node.id) else {
-            return main_src
-                .map(|s| self.eval_endpoint(s, depth + 1))
-                .unwrap_or_else(|| EvalFrame { img: Arc::clone(&self.media_in), key: self.media_in_key });
+            return main_src.map(|s| self.eval_endpoint(s, depth + 1)).unwrap_or_else(|| EvalFrame { img: Arc::clone(&self.media_in), key: self.media_in_key });
         };
 
         // Transform concatenation: combine consecutive upstream unmodified `"transform"` nodes in one warp pass.
@@ -408,9 +385,7 @@ impl<'a, 'cx> GraphEval<'a, 'cx> {
             return self.eval_concat_transforms(node.id, depth);
         }
 
-        let base = main_src
-            .map(|s| self.eval_endpoint(s, depth + 1))
-            .unwrap_or_else(|| EvalFrame { img: Arc::clone(&self.media_in), key: self.media_in_key });
+        let base = main_src.map(|s| self.eval_endpoint(s, depth + 1)).unwrap_or_else(|| EvalFrame { img: Arc::clone(&self.media_in), key: self.media_in_key });
 
         let mask_ep = self.incoming(VfxEndpoint::Node(node.id), VfxInputSlot::EffectMask);
         let (mask_cov, mask_key) = match mask_ep {
@@ -595,34 +570,29 @@ fn composite_merge(bg: &mut Image, fg: &Image, blend_mode: LayerBlendMode, opera
 fn apply_node_settings(base: &Image, out: &mut Image, settings: &VfxNodeSettings, mask_cov: Option<&[f32]>, t: Tick) {
     let blend = (settings.blend.f64_at(t) as f32).clamp(0.0, 1.0);
     let ch = settings.channels;
-    let fast_identity =
-        mask_cov.is_none() && (blend - 1.0).abs() <= 1e-5 && !settings.multiply_by_mask && ch == [true, true, true, true];
+    let fast_identity = mask_cov.is_none() && (blend - 1.0).abs() <= 1e-5 && !settings.multiply_by_mask && ch == [true, true, true, true];
     if fast_identity {
         return;
     }
     let n = out.px.len().min(base.px.len()) / 4;
-    out.px[..n * 4]
-        .par_chunks_mut(4)
-        .zip(base.px[..n * 4].par_chunks(4))
-        .enumerate()
-        .for_each(|(i, (o, b))| {
-            let m = match mask_cov {
-                Some(cov) => {
-                    let raw = cov.get(i).copied().unwrap_or(1.0).clamp(0.0, 1.0);
-                    if settings.invert_mask { 1.0 - raw } else { raw }
-                }
-                None => 1.0,
-            };
-            let k = (blend * m).clamp(0.0, 1.0);
-            let mul = if settings.multiply_by_mask && mask_cov.is_some() { m } else { 1.0 };
-            for c in 0..4 {
-                if !ch[c] {
-                    o[c] = b[c];
-                } else {
-                    o[c] = (b[c] + (o[c] - b[c]) * k) * mul;
-                }
+    out.px[..n * 4].par_chunks_mut(4).zip(base.px[..n * 4].par_chunks(4)).enumerate().for_each(|(i, (o, b))| {
+        let m = match mask_cov {
+            Some(cov) => {
+                let raw = cov.get(i).copied().unwrap_or(1.0).clamp(0.0, 1.0);
+                if settings.invert_mask { 1.0 - raw } else { raw }
             }
-        });
+            None => 1.0,
+        };
+        let k = (blend * m).clamp(0.0, 1.0);
+        let mul = if settings.multiply_by_mask && mask_cov.is_some() { m } else { 1.0 };
+        for c in 0..4 {
+            if !ch[c] {
+                o[c] = b[c];
+            } else {
+                o[c] = (b[c] + (o[c] - b[c]) * k) * mul;
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -631,8 +601,8 @@ mod tests {
 
     use filmcraft_color::WorkingSpace;
     use filmcraft_project::{
-        LayerBlendMode, Mask, MaskKind, MaskMode, MergeOperator, Param, ParamValue, VfxEdge, VfxEndpoint, VfxGraph, VfxInputSlot, VfxNode,
-        VfxNodeKind, VfxNodeSettings, VfxPortKind, find_effect,
+        LayerBlendMode, Mask, MaskKind, MaskMode, MergeOperator, Param, ParamValue, VfxEdge, VfxEndpoint, VfxGraph, VfxInputSlot, VfxNode, VfxNodeKind,
+        VfxNodeSettings, VfxPortKind, find_effect,
     };
 
     use super::*;
@@ -703,7 +673,8 @@ mod tests {
         // Background = MediaIn, Foreground = invert(MediaIn) -> Add should give 1.0 across RGB
         g.connect(VfxEdge { from: VfxEndpoint::MediaIn, to: VfxEndpoint::Node(inv_id), to_slot: VfxInputSlot::Main, kind: VfxPortKind::Image }).unwrap();
         g.connect(VfxEdge { from: VfxEndpoint::MediaIn, to: VfxEndpoint::Node(merge_id), to_slot: VfxInputSlot::Main, kind: VfxPortKind::Image }).unwrap();
-        g.connect(VfxEdge { from: VfxEndpoint::Node(inv_id), to: VfxEndpoint::Node(merge_id), to_slot: VfxInputSlot::Foreground, kind: VfxPortKind::Image }).unwrap();
+        g.connect(VfxEdge { from: VfxEndpoint::Node(inv_id), to: VfxEndpoint::Node(merge_id), to_slot: VfxInputSlot::Foreground, kind: VfxPortKind::Image })
+            .unwrap();
         g.connect(VfxEdge { from: VfxEndpoint::Node(merge_id), to: VfxEndpoint::MediaOut, to_slot: VfxInputSlot::Main, kind: VfxPortKind::Image }).unwrap();
 
         let base = Image::filled(4, 4, [0.02, 0.02, 0.02, 1.0]);
@@ -726,14 +697,7 @@ mod tests {
         mask.feather = Param::new(ParamValue::Float(0.0));
         mask.mode = MaskMode::Add;
         mask.kind = MaskKind::Path;
-        g.nodes.push(VfxNode {
-            id: mask_id,
-            kind: VfxNodeKind::Mask(mask),
-            enabled: true,
-            label: None,
-            settings: VfxNodeSettings::default(),
-            pos: [0.0, 0.0],
-        });
+        g.nodes.push(VfxNode { id: mask_id, kind: VfxNodeKind::Mask(mask), enabled: true, label: None, settings: VfxNodeSettings::default(), pos: [0.0, 0.0] });
 
         let fx_id = g.alloc_id();
         let mut inv = fx("invert");
@@ -754,7 +718,8 @@ mod tests {
         });
 
         g.connect(VfxEdge { from: VfxEndpoint::MediaIn, to: VfxEndpoint::Node(fx_id), to_slot: VfxInputSlot::Main, kind: VfxPortKind::Image }).unwrap();
-        g.connect(VfxEdge { from: VfxEndpoint::Node(mask_id), to: VfxEndpoint::Node(fx_id), to_slot: VfxInputSlot::EffectMask, kind: VfxPortKind::Mask }).unwrap();
+        g.connect(VfxEdge { from: VfxEndpoint::Node(mask_id), to: VfxEndpoint::Node(fx_id), to_slot: VfxInputSlot::EffectMask, kind: VfxPortKind::Mask })
+            .unwrap();
         g.connect(VfxEdge { from: VfxEndpoint::Node(fx_id), to: VfxEndpoint::MediaOut, to_slot: VfxInputSlot::Main, kind: VfxPortKind::Image }).unwrap();
 
         let mut img = Image::filled(8, 8, [0.02, 0.02, 0.02, 1.0]);
@@ -774,14 +739,7 @@ mod tests {
         let src_id = g.alloc_id();
         let mut inv = fx("invert");
         inv.params.entry("blend_with_original".to_string()).and_modify(|p| p.value = ParamValue::Float(0.0));
-        g.nodes.push(VfxNode {
-            id: src_id,
-            kind: VfxNodeKind::Effect(inv),
-            enabled: true,
-            label: None,
-            settings: VfxNodeSettings::default(),
-            pos: [0.0, 0.0],
-        });
+        g.nodes.push(VfxNode { id: src_id, kind: VfxNodeKind::Effect(inv), enabled: true, label: None, settings: VfxNodeSettings::default(), pos: [0.0, 0.0] });
         let inst_id = g.alloc_id();
         let mut overrides = BTreeMap::new();
         // Instance overrides blend_with_original to 100% (no-op invert)

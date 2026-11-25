@@ -80,9 +80,8 @@ pub(crate) fn segments_intersect(a0: Pos2, a1: Pos2, b0: Pos2, b1: Pos2) -> bool
     if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0)) && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0)) {
         return true;
     }
-    let on_seg = |o: Pos2, a: Pos2, p: Pos2| {
-        p.x >= o.x.min(a.x) - 1e-3 && p.x <= o.x.max(a.x) + 1e-3 && p.y >= o.y.min(a.y) - 1e-3 && p.y <= o.y.max(a.y) + 1e-3
-    };
+    let on_seg =
+        |o: Pos2, a: Pos2, p: Pos2| p.x >= o.x.min(a.x) - 1e-3 && p.x <= o.x.max(a.x) + 1e-3 && p.y >= o.y.min(a.y) - 1e-3 && p.y <= o.y.max(a.y) + 1e-3;
     (d1.abs() < 1e-3 && on_seg(a0, a1, b0))
         || (d2.abs() < 1e-3 && on_seg(a0, a1, b1))
         || (d3.abs() < 1e-3 && on_seg(b0, b1, a0))
@@ -114,10 +113,7 @@ fn eval_cubic_bezier(p0: Pos2, p1: Pos2, p2: Pos2, p3: Pos2, t: f32) -> Pos2 {
     let uu = u * u;
     let uuu = uu * u;
     let ttt = tt * t;
-    Pos2::new(
-        uuu * p0.x + 3.0 * uu * t * p1.x + 3.0 * u * tt * p2.x + ttt * p3.x,
-        uuu * p0.y + 3.0 * uu * t * p1.y + 3.0 * u * tt * p2.y + ttt * p3.y,
-    )
+    Pos2::new(uuu * p0.x + 3.0 * uu * t * p1.x + 3.0 * u * tt * p2.x + ttt * p3.x, uuu * p0.y + 3.0 * uu * t * p1.y + 3.0 * u * tt * p2.y + ttt * p3.y)
 }
 
 fn point_segment_distance(p: Pos2, a: Pos2, b: Pos2) -> f32 {
@@ -155,13 +151,8 @@ fn draw_dashed_line(painter: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke) {
 
 pub(crate) fn resolve_target_clip(app: &FilmcraftApp) -> Option<(ClipId, String)> {
     let seq = app.session.active_sequence()?;
-    if let Some(cid) = app
-        .session
-        .state
-        .selection
-        .iter()
-        .copied()
-        .find(|&c| seq.find_item(c).and_then(|(tid, _)| seq.track(tid)).is_some_and(|t| t.kind == TrackKind::Video))
+    if let Some(cid) =
+        app.session.state.selection.iter().copied().find(|&c| seq.find_item(c).and_then(|(tid, _)| seq.track(tid)).is_some_and(|t| t.kind == TrackKind::Video))
     {
         let (_, it) = seq.find_item(cid)?;
         let name = app.session.project.item(it.item).map(|p| p.name.clone()).unwrap_or_else(|| format!("Clip {}", cid.0));
@@ -335,10 +326,7 @@ fn render_toolbar(
         app.auto.add("vfxNodes.addTool", add_btn.rect, "Add VFX Tool");
         if add_btn.clicked() {
             ui.ctx().data_mut(|d| {
-                d.insert_temp(
-                    popup_id,
-                    SelectToolPopup { open: true, query: String::new(), after_node: app.ui.vfx_active_node_id },
-                );
+                d.insert_temp(popup_id, SelectToolPopup { open: true, query: String::new(), after_node: app.ui.vfx_active_node_id });
             });
         }
 
@@ -395,10 +383,7 @@ fn render_toolbar(
         let ul_btn = ui.small_button(tl!("+ Group")).on_hover_text(tl!("Add visual Underlay to group nodes"));
         app.auto.add("vfxNodes.addUnderlay", ul_btn.rect, "Add Underlay");
         if ul_btn.clicked() {
-            let _ = app.session.execute(
-                "vfxGraph.addUnderlay",
-                json!({"clip": clip_id.0, "title": tl!("VFX Group"), "rect": [90.0, 70.0, 380.0, 170.0]}),
-            );
+            let _ = app.session.execute("vfxGraph.addUnderlay", json!({"clip": clip_id.0, "title": tl!("VFX Group"), "rect": [90.0, 70.0, 380.0, 170.0]}));
         }
 
         ui.separator();
@@ -418,18 +403,14 @@ fn render_toolbar(
 
         ui.separator();
         let kf_on = app.ui.vfx_bottom_drawer == 1;
-        let kf_btn = ui
-            .selectable_label(kf_on, "Keyframes")
-            .on_hover_text(tl!("Show keyframes for selected node only"));
+        let kf_btn = ui.selectable_label(kf_on, "Keyframes").on_hover_text(tl!("Show keyframes for selected node only"));
         app.auto.add("vfxNodes.drawer.keyframes", kf_btn.rect, "Toggle Node Keyframes");
         if kf_btn.clicked() {
             app.ui.vfx_bottom_drawer = if kf_on { 0 } else { 1 };
         }
 
         let sp_on = app.ui.vfx_bottom_drawer == 2;
-        let sp_btn = ui
-            .selectable_label(sp_on, "Spline")
-            .on_hover_text(tl!("Show spline curves for selected node only"));
+        let sp_btn = ui.selectable_label(sp_on, "Spline").on_hover_text(tl!("Show spline curves for selected node only"));
         app.auto.add("vfxNodes.drawer.spline", sp_btn.rect, "Toggle Node Spline");
         if sp_btn.clicked() {
             app.ui.vfx_bottom_drawer = if sp_on { 0 } else { 2 };
@@ -702,11 +683,7 @@ fn paint_vfx_node_card(
     } else {
         Color32::from_rgb(34, 36, 44)
     };
-    let border = if is_active {
-        Stroke::new(2.0, accent)
-    } else {
-        Stroke::new(1.0, Color32::from_rgb(66, 70, 82))
-    };
+    let border = if is_active { Stroke::new(2.0, accent) } else { Stroke::new(1.0, Color32::from_rgb(66, 70, 82)) };
     painter.rect(nr, CornerRadius::same(6), bg, border, StrokeKind::Inside);
 
     let stripe = Rect::from_min_max(nr.left_top(), Pos2::new(nr.left() + (4.0 * zoom).max(3.0), nr.bottom()));
@@ -937,7 +914,8 @@ fn handle_knife_cut(
 ) {
     let knife_id = egui::Id::unique("vfx_nodes_knife_cut");
     let mut knife: Option<KnifeCut> = ui.ctx().data(|d| d.get_temp(knife_id));
-    if knife_mod && canvas_resp.drag_started_by(egui::PointerButton::Primary)
+    if knife_mod
+        && canvas_resp.drag_started_by(egui::PointerButton::Primary)
         && let Some(p) = ui.input(|i| i.pointer.interact_pos())
     {
         knife = Some(KnifeCut { start: p, current: p });
@@ -972,10 +950,7 @@ fn handle_vfx_shortcuts(app: &mut FilmcraftApp, ui: &mut egui::Ui, clip_id: Clip
     let shift_space = ui.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::Space));
     if shift_space {
         ui.ctx().data_mut(|d| {
-            d.insert_temp(
-                popup_id,
-                SelectToolPopup { open: true, query: String::new(), after_node: app.ui.vfx_active_node_id },
-            );
+            d.insert_temp(popup_id, SelectToolPopup { open: true, query: String::new(), after_node: app.ui.vfx_active_node_id });
         });
         return;
     }
@@ -1160,7 +1135,9 @@ fn render_bottom_drawer(
                         if pid == "__settings.blend" {
                             let _ = app.session.execute("vfxGraph.setNodeSetting", json!({"clip": clip_id.0, "node": node.id.0, "blendToggleAnimation": true}));
                         } else {
-                            let _ = app.session.execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node.id.0, "param": pid, "toggleAnimation": true}));
+                            let _ = app
+                                .session
+                                .execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node.id.0, "param": pid, "toggleAnimation": true}));
                         }
                     }
 
@@ -1196,14 +1173,12 @@ fn render_bottom_drawer(
             p.rect_filled(graph_r, CornerRadius::same(4), Color32::from_rgb(22, 24, 30));
             for i in 1..4 {
                 let y = graph_r.top() + graph_r.height() * (i as f32 / 4.0);
-                p.line_segment([Pos2::new(graph_r.left(), y), Pos2::new(graph_r.right(), y)], Stroke::new(0.8, Color32::from_rgba_unmultiplied(255, 255, 255, 18)));
+                p.line_segment(
+                    [Pos2::new(graph_r.left(), y), Pos2::new(graph_r.right(), y)],
+                    Stroke::new(0.8, Color32::from_rgba_unmultiplied(255, 255, 255, 18)),
+                );
             }
-            let palette = [
-                Color32::from_rgb(96, 165, 250),
-                Color32::from_rgb(52, 211, 153),
-                Color32::from_rgb(250, 204, 21),
-                Color32::from_rgb(244, 114, 182),
-            ];
+            let palette = [Color32::from_rgb(96, 165, 250), Color32::from_rgb(52, 211, 153), Color32::from_rgb(250, 204, 21), Color32::from_rgb(244, 114, 182)];
             let mut curve_idx = 0usize;
             for (_, pname, prm) in &params {
                 if !prm.is_animated() || !matches!(prm.value, ParamValue::Float(_)) {
@@ -1233,10 +1208,22 @@ fn render_bottom_drawer(
                     pts.push(Pos2::new(graph_r.left() + frac * graph_r.width(), graph_r.top() + 8.0 + ny * (graph_r.height() - 16.0)));
                 }
                 p.add(egui::Shape::line(pts, Stroke::new(1.8, col)));
-                p.text(Pos2::new(graph_r.left() + 8.0, graph_r.top() + 6.0 + (curve_idx - 1) as f32 * 13.0), egui::Align2::LEFT_TOP, pname, egui::FontId::proportional(10.0), col);
+                p.text(
+                    Pos2::new(graph_r.left() + 8.0, graph_r.top() + 6.0 + (curve_idx - 1) as f32 * 13.0),
+                    egui::Align2::LEFT_TOP,
+                    pname,
+                    egui::FontId::proportional(10.0),
+                    col,
+                );
             }
             if curve_idx == 0 {
-                p.text(graph_r.center(), egui::Align2::CENTER_CENTER, "Activa keyframes (◆) en un parámetro del nodo para editar su curva Spline", egui::FontId::proportional(11.0), t.text_dim);
+                p.text(
+                    graph_r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Activa keyframes (◆) en un parámetro del nodo para editar su curva Spline",
+                    egui::FontId::proportional(11.0),
+                    t.text_dim,
+                );
             }
             let ph_x = graph_r.left() + ph_frac * graph_r.width();
             p.line_segment([Pos2::new(ph_x, graph_r.top()), Pos2::new(ph_x, graph_r.bottom())], Stroke::new(1.4, Color32::from_rgb(239, 68, 68)));

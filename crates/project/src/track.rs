@@ -247,22 +247,15 @@ impl TrackItem {
     /// Effective clip-level [`crate::VfxGraph`]: returns the explicit DAG when present, or
     /// synthesizes a serial chain from non-intrinsic video effects in `effects`.
     pub fn effective_vfx_graph(&self) -> std::borrow::Cow<'_, crate::VfxGraph> {
-        if let Some(g) = &self.vfx_graph {
-            std::borrow::Cow::Borrowed(g)
-        } else {
-            std::borrow::Cow::Owned(crate::VfxGraph::from_serial_effects(&self.effects))
-        }
+        if let Some(g) = &self.vfx_graph { std::borrow::Cow::Borrowed(g) } else { std::borrow::Cow::Owned(crate::VfxGraph::from_serial_effects(&self.effects)) }
     }
     /// Synchronize non-intrinsic video effects in `self.effects` from `self.vfx_graph` in
     /// topological order so legacy commands and Effect Controls stay consistent.
     pub fn sync_vfx_effects_from_graph(&mut self) {
         let Some(g) = &self.vfx_graph else { return };
         let vfx = g.serial_effects();
-        let is_vfx = |e: &EffectInstance| {
-            e.effect != "lumetri"
-                && !graphic::is_layer(e)
-                && e.def().is_some_and(|d| !d.intrinsic && d.kind == crate::EffectKind::Video)
-        };
+        let is_vfx =
+            |e: &EffectInstance| e.effect != "lumetri" && !graphic::is_layer(e) && e.def().is_some_and(|d| !d.intrinsic && d.kind == crate::EffectKind::Video);
         let first_vfx = self.effects.iter().position(is_vfx);
         self.effects.retain(|e| !is_vfx(e));
         let insert_at = first_vfx.unwrap_or(self.effects.len()).min(self.effects.len());
@@ -274,11 +267,7 @@ impl TrackItem {
         let vfx: Vec<EffectInstance> = self
             .effects
             .iter()
-            .filter(|e| {
-                e.effect != "lumetri"
-                    && !graphic::is_layer(e)
-                    && e.def().is_some_and(|d| !d.intrinsic && d.kind == crate::EffectKind::Video)
-            })
+            .filter(|e| e.effect != "lumetri" && !graphic::is_layer(e) && e.def().is_some_and(|d| !d.intrinsic && d.kind == crate::EffectKind::Video))
             .cloned()
             .collect();
         let order = g.topo_order().unwrap_or_else(|| g.nodes.iter().map(|n| n.id).collect());

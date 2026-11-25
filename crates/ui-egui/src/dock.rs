@@ -227,19 +227,8 @@ fn vsplit(size: SplitSize, a: Node<PanelKind>, b: Node<PanelKind>) -> Node<Panel
     Node::Split { axis: SplitAxis::Vertical, size, first: Box::new(a), second: Box::new(b) }
 }
 
-pub const WORKSPACES: [&str; 11] = [
-    "Editing",
-    "Assembly",
-    "Color",
-    "Effects",
-    "Effects (Premiere)",
-    "Audio",
-    "Captions and Graphics",
-    "Vertical",
-    "Learning",
-    "Review",
-    "All Panels",
-];
+pub const WORKSPACES: [&str; 11] =
+    ["Editing", "Assembly", "Color", "Effects", "Effects (Premiere)", "Audio", "Captions and Graphics", "Vertical", "Learning", "Review", "All Panels"];
 
 /// The user's workspaces file, beside `preferences.json` in the data directory.
 pub const WORKSPACES_FILE: &str = "workspaces.json";
@@ -608,11 +597,7 @@ fn workspace_root(name: &str) -> Node<PanelKind> {
         }
         "Effects (Premiere)" => vsplit(
             Ratio(0.56),
-            hsplit(
-                Ratio(0.5),
-                tabs(&[EffectControls, Source, AudioClipMixer], 0),
-                tabs(&[Program, ReferenceMonitor], 0),
-            ),
+            hsplit(Ratio(0.5), tabs(&[EffectControls, Source, AudioClipMixer], 0), tabs(&[Program, ReferenceMonitor], 0)),
             hsplit(SplitSize::FixedFirst(290.0), tabs(&[Effects, Project, MediaBrowser, Markers, History], 0), bottom_editing()),
         ),
         "Audio" => hsplit(

@@ -1430,11 +1430,7 @@ pub fn remove_silence(s: &mut Session, p: &Value) -> Result<Value> {
     let pre_head = (u64_p(p, "preHead").unwrap_or(s.prefs.silence.pre_head as u64) as usize).clamp(0, 120);
     let post_tail = (u64_p(p, "postTail").unwrap_or(s.prefs.silence.post_tail as u64) as usize).clamp(0, 120);
     let min_strip = (u64_p(p, "minStrip").unwrap_or(s.prefs.silence.min_strip as u64) as usize).clamp(1, 300);
-    let preview_scope = p
-        .get("previewScope")
-        .and_then(Value::as_str)
-        .filter(|v| *v == "visible" || *v == "all")
-        .map(str::to_string);
+    let preview_scope = p.get("previewScope").and_then(Value::as_str).filter(|v| *v == "visible" || *v == "all").map(str::to_string);
 
     // Persist last-used silence parameters so the user doesn't have to reconfigure them each time
     if (s.prefs.silence.threshold - threshold_db).abs() > 0.001

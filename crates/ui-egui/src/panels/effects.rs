@@ -886,24 +886,24 @@ fn handle_selected_node_key(
     sel_item: &mut Option<String>,
     actions: &mut EffectRowActions,
 ) {
-    let jump_parent = |app: &mut FilmcraftApp, parent: Option<String>, sel_folder: &mut Option<String>, sel_item: &mut Option<String>, actions: &mut EffectRowActions| {
-        if let Some(p) = parent
-            && let Some(VisibleNode::Folder { key, rect, .. }) = actions.visible_nodes.iter().find(|n| matches!(n, VisibleNode::Folder { key: k, .. } if k == &p)).cloned()
-        {
-            app.ui.selected_effect = None;
-            *sel_folder = Some(key);
-            *sel_item = None;
-            actions.scroll_to_rect = Some(rect);
-        }
-    };
+    let jump_parent =
+        |app: &mut FilmcraftApp, parent: Option<String>, sel_folder: &mut Option<String>, sel_item: &mut Option<String>, actions: &mut EffectRowActions| {
+            if let Some(p) = parent
+                && let Some(VisibleNode::Folder { key, rect, .. }) =
+                    actions.visible_nodes.iter().find(|n| matches!(n, VisibleNode::Folder { key: k, .. } if k == &p)).cloned()
+            {
+                app.ui.selected_effect = None;
+                *sel_folder = Some(key);
+                *sel_item = None;
+                actions.scroll_to_rect = Some(rect);
+            }
+        };
 
     match cur {
         VisibleNode::Folder { key, open, parent, .. } => {
             if right && !open || left && open || enter {
                 toggle_folder_open(app, ui, &key, filter, open);
-            } else if right
-                && let Some(next) = actions.visible_nodes.get(idx + 1).cloned()
-            {
+            } else if right && let Some(next) = actions.visible_nodes.get(idx + 1).cloned() {
                 match next {
                     VisibleNode::Effect { id, rect, .. } => {
                         app.ui.selected_effect = Some(id.to_string());
