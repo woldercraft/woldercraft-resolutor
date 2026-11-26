@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use filmcraft_geom::Vec2;
 use filmcraft_project::{
-    ClipId, EffectKind, LayerBlendMode, MAX_VFX_NODES, Mask, MaskPath, MergeOperator, Param, ParamKind, ParamValue, TrackKind, VfxEdge, VfxEndpoint,
-    VfxGraph, VfxInputSlot, VfxNode, VfxNodeId, VfxNodeKind, VfxNodeSettings, VfxPortKind, VfxUnderlay, find_effect,
+    ClipId, EffectKind, LayerBlendMode, MAX_VFX_NODES, Mask, MaskPath, MergeOperator, Param, ParamKind, ParamValue, TrackKind, VfxEdge, VfxEndpoint, VfxGraph,
+    VfxInputSlot, VfxNode, VfxNodeId, VfxNodeKind, VfxNodeSettings, VfxPortKind, VfxUnderlay, find_effect,
 };
 use filmcraft_time::Tick;
 use serde_json::{Value, json};
@@ -50,23 +50,13 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             r#"{"clip":id?,"from":"in"|id,"to":"out"|id,"slot":"main"|"fg"|"mask"?,"kind":"image"|"mask"?}"#,
             connect_ports,
         ),
-        spec(
-            "vfxGraph.disconnect",
-            "Disconnect VFX Node Input",
-            r#"{"clip":id?,"to":"out"|id,"slot":"main"|"fg"|"mask"?}"#,
-            disconnect_port,
-        ),
+        spec("vfxGraph.disconnect", "Disconnect VFX Node Input", r#"{"clip":id?,"to":"out"|id,"slot":"main"|"fg"|"mask"?}"#, disconnect_port),
         spec("vfxGraph.swapInputs", "Swap Merge Inputs", r#"{"clip":id?,"node":id}"#, swap_inputs),
         spec("vfxGraph.togglePassThrough", "Toggle VFX Node Pass-Through", r#"{"clip":id?,"node":id}"#, toggle_pass_through),
         spec("vfxGraph.removeNode", "Remove VFX Node", r#"{"clip":id?,"node":id}"#, remove_node),
         spec("vfxGraph.duplicateNode", "Duplicate VFX Node", r#"{"clip":id?,"node":id}"#, duplicate_node),
         spec("vfxGraph.createInstance", "Create VFX Node Instance", r#"{"clip":id?,"source":id}"#, create_instance),
-        spec(
-            "vfxGraph.deinstanceParam",
-            "De-instance VFX Parameter",
-            r#"{"clip":id?,"node":id,"param":str,"reinstance":bool?}"#,
-            deinstance_param,
-        ),
+        spec("vfxGraph.deinstanceParam", "De-instance VFX Parameter", r#"{"clip":id?,"node":id,"param":str,"reinstance":bool?}"#, deinstance_param),
         spec(
             "vfxGraph.setNodeSetting",
             "Set VFX Node Settings",
@@ -79,12 +69,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             r#"{"clip":id?,"node":id,"param":str,"value":val,"keyframe":bool?,"toggleAnimation":bool?,"merge":str|bool?}"#,
             set_node_param,
         ),
-        spec(
-            "vfxGraph.addUnderlay",
-            "Add VFX Underlay",
-            r#"{"clip":id?,"title":str?,"color":[r,g,b]?,"rect":[x,y,w,h]}"#,
-            add_underlay,
-        ),
+        spec("vfxGraph.addUnderlay", "Add VFX Underlay", r#"{"clip":id?,"title":str?,"color":[r,g,b]?,"rect":[x,y,w,h]}"#, add_underlay),
         spec("vfxGraph.removeUnderlay", "Remove VFX Underlay", r#"{"clip":id?,"underlay":id}"#, remove_underlay),
         spec("vfxGraph.autoLayout", "Auto-Layout VFX Graph", r#"{"clip":id?}"#, auto_layout),
     ]
@@ -95,12 +80,8 @@ fn resolve_target_clip(s: &Session, p: &Value) -> Option<ClipId> {
         return Some(c);
     }
     let seq = s.active_sequence()?;
-    if let Some(c) = s
-        .state
-        .selection
-        .iter()
-        .copied()
-        .find(|&c| seq.find_item(c).and_then(|(tid, _)| seq.track(tid)).is_some_and(|t| t.kind == TrackKind::Video))
+    if let Some(c) =
+        s.state.selection.iter().copied().find(|&c| seq.find_item(c).and_then(|(tid, _)| seq.track(tid)).is_some_and(|t| t.kind == TrackKind::Video))
     {
         return Some(c);
     }
@@ -236,9 +217,8 @@ fn add_node(s: &mut Session, p: &Value) -> Result<Value> {
         let (node_kind, default_label, is_mask) = match kind_raw.as_str() {
             "effect" => {
                 let req = effect_name.as_deref().ok_or_else(|| bad(CMD, "need `effect` for effect node"))?;
-                let def = find_effect(req)
-                    .or_else(|| filmcraft_project::find_effect_by_name(req))
-                    .ok_or_else(|| bad(CMD, format!("unknown effect `{req}`")))?;
+                let def =
+                    find_effect(req).or_else(|| filmcraft_project::find_effect_by_name(req)).ok_or_else(|| bad(CMD, format!("unknown effect `{req}`")))?;
                 if def.intrinsic || def.kind != EffectKind::Video || def.id == "lumetri" || filmcraft_project::graphic::is_layer_id(def.id) {
                     return Err(bad(CMD, format!("`{}` cannot be added as a VFX node", def.name)));
                 }
@@ -284,12 +264,7 @@ fn add_node(s: &mut Session, p: &Value) -> Result<Value> {
 
         if is_mask {
             if let Some(target_id) = connect_to.or(after) {
-                let _ = g.connect(VfxEdge {
-                    from: ep,
-                    to: VfxEndpoint::Node(target_id),
-                    to_slot: VfxInputSlot::EffectMask,
-                    kind: VfxPortKind::Mask,
-                });
+                let _ = g.connect(VfxEdge { from: ep, to: VfxEndpoint::Node(target_id), to_slot: VfxInputSlot::EffectMask, kind: VfxPortKind::Mask });
             }
         } else if let Some(target_id) = connect_to {
             let _ = g.connect(VfxEdge { from: ep, to: VfxEndpoint::Node(target_id), to_slot: slot, kind: VfxPortKind::Image });
@@ -298,11 +273,8 @@ fn add_node(s: &mut Session, p: &Value) -> Result<Value> {
             let src_ep = after.map(VfxEndpoint::Node).unwrap_or_else(|| {
                 g.edges.iter().find(|e| e.to == VfxEndpoint::MediaOut && e.to_slot == VfxInputSlot::Main).map_or(VfxEndpoint::MediaIn, |e| e.from)
             });
-            let existing_out: Option<(VfxEndpoint, VfxInputSlot)> = g
-                .edges
-                .iter()
-                .find(|e| e.from == src_ep && e.to_slot == VfxInputSlot::Main)
-                .map(|e| (e.to, e.to_slot));
+            let existing_out: Option<(VfxEndpoint, VfxInputSlot)> =
+                g.edges.iter().find(|e| e.from == src_ep && e.to_slot == VfxInputSlot::Main).map(|e| (e.to, e.to_slot));
             g.connect(VfxEdge { from: src_ep, to: ep, to_slot: VfxInputSlot::Main, kind: VfxPortKind::Image }).map_err(|e| bad(CMD, e))?;
             let next_target = existing_out.unwrap_or((VfxEndpoint::MediaOut, VfxInputSlot::Main));
             g.connect(VfxEdge { from: ep, to: next_target.0, to_slot: next_target.1, kind: VfxPortKind::Image }).map_err(|e| bad(CMD, e))?;
@@ -685,12 +657,7 @@ mod tests {
     fn session_with_clip() -> (Session, u64) {
         let mut s = Session::default();
         s.execute("file.openDemoProject", json!({})).unwrap();
-        let clip_id = s
-            .active_sequence()
-            .and_then(|q| q.video_tracks.iter().flat_map(|t| &t.items).next())
-            .expect("demo has a video clip")
-            .id
-            .0;
+        let clip_id = s.active_sequence().and_then(|q| q.video_tracks.iter().flat_map(|t| &t.items).next()).expect("demo has a video clip").id.0;
         (s, clip_id)
     }
 
@@ -714,7 +681,11 @@ mod tests {
             let (_, it) = seq.find_item(filmcraft_project::ClipId(clip)).unwrap();
             let g = it.vfx_graph.as_ref().unwrap();
             assert!(g.edges.iter().any(|e| e.from == VfxEndpoint::MediaIn && e.to == VfxEndpoint::Node(VfxNodeId(nm)) && e.to_slot == VfxInputSlot::Main));
-            assert!(g.edges.iter().any(|e| e.from == VfxEndpoint::Node(VfxNodeId(n2)) && e.to == VfxEndpoint::Node(VfxNodeId(nm)) && e.to_slot == VfxInputSlot::Foreground));
+            assert!(
+                g.edges
+                    .iter()
+                    .any(|e| e.from == VfxEndpoint::Node(VfxNodeId(n2)) && e.to == VfxEndpoint::Node(VfxNodeId(nm)) && e.to_slot == VfxInputSlot::Foreground)
+            );
         }
 
         // Create Instance of n2 (gaussian_blur) and de-instance `blurriness`

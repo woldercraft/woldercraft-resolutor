@@ -17,38 +17,21 @@
   <a href="#license-and-credits"><img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-8b5cf6?style=flat-square"></a>
   <img alt="Written in pure Rust" src="https://img.shields.io/badge/pure-Rust-6a3fd6?style=flat-square&logo=rust&logoColor=white">
   <img alt="Runs on macOS, Windows and Linux" src="https://img.shields.io/badge/runs%20on-macOS%20%7C%20Windows%20%7C%20Linux-8b5cf6?style=flat-square">
-  <a href="#status"><img alt="Status: young and moving fast" src="https://img.shields.io/badge/status-young%20and%20moving%20fast-6a3fd6?style=flat-square"></a>
-  <br>
-  <a href="https://sonarcloud.io/project/overview?id=storytold_filmcraft"><img alt="Scanned by SonarCloud" src="https://img.shields.io/badge/Scanned_by-SonarCloud-4b9fd5?style=flat-square&logo=sonarqubecloud&logoColor=white"></a>
-  <a href="https://coderabbit.ai"><img alt="Reviewed by CodeRabbit" src="https://img.shields.io/coderabbit/prs/github/storytold/filmcraft?style=flat-square&label=Reviewed%20by%20CodeRabbit&logo=coderabbit"></a>
-</p>
-
-<p align="center">
-  <a href="https://discord.gg/artcraft"><img alt="Join the ArtCraft community on Discord" src="https://img.shields.io/badge/Join%20us%20on%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" height="40"></a>
-</p>
-
-<p align="center">
-  <a href="https://getartcraft.com/apps/filmcraft"><b>FilmCraft on getartcraft.com</b></a> ·
-  <a href="https://getartcraft.com/">ArtCraft</a> ·
-  <a href="https://getartcraft.com/apps">All Crafting Apps</a>
+  <a href="#status"><img alt="Status: active development" src="https://img.shields.io/badge/status-active%20development-6a3fd6?style=flat-square"></a>
 </p>
 
 <br>
 
 <p align="center">
-  <img src="docs/images/filmcraft-hero.png" alt="FilmCraft in the Color workspace, mid-way through an Apollo 11 documentary cut from NASA footage: the Program monitor on the Saturn V clearing the launch tower with a Launch Complex 39A lower third and an air-to-ground subtitle, Effect Controls with color grading and Scale keyframes on the shot, the color grading panel, bins of NASA selects, and a timeline with 49 picture cuts, B-roll, titles, a caption track, mission audio, a ducked music bed, named markers, a rendered section and live loudness meters" width="100%">
+  <img src="docs/images/resolutor-edit.png" alt="Woldercraft Resolutor in the Edit workspace running the built-in Demo Project: Program monitor showing Ocean_Sunset.mp4 with color grading and vignette, clip metadata on the left, subtitles panel on the right, project bins, multi-track timeline with thumbnails and waveforms, and live loudness meters" width="100%">
 </p>
 
-<p align="center"><sub><i>Apollo 11 - Tranquility</i>: a three-minute documentary edit of NASA's 1969 launch, landing and moonwalk film, with subtitles from the mission transcript. Every frame in these screenshots comes from public-domain footage, decoded, composited and graded by FilmCraft's own code.</sub></p>
-
-> [!NOTE]
-> **ArtCraft is a community of artists from all walks of life.** Digital, generative, music,
-> games &mdash; if you make things, you're one of us. **[Come say hi on Discord](https://discord.gg/artcraft).**
+<p align="center"><sub><i>Woldercraft Resolutor</i> running the built-in Demo Project: multi-track timeline, Program monitor, clip metadata, and live loudness meters. Every frame is decoded, composited, and graded by Resolutor's own Rust engine.</sub></p>
 
 <p align="center">
   <a href="#edit">Edit</a> ·
   <a href="#color">Color</a> ·
-  <a href="#effects-and-motion">Effects</a> ·
+  <a href="#effects-and-motion">Effects &amp; VFX</a> ·
   <a href="#audio">Audio</a> ·
   <a href="#titles-and-captions">Titles</a> ·
   <a href="#formats-and-codecs">Formats</a> ·
@@ -56,92 +39,61 @@
   <a href="#interchange">Interchange</a> ·
   <a href="#built-for-agents">Agents</a> ·
   <a href="#get-started">Get started</a> ·
-  <a href="#downloads">Downloads</a> ·
   <a href="#documentation">Docs</a> ·
   <a href="#status">Status</a>
 </p>
 
 <br>
 
-FilmCraft is a professional non-linear editor: familiar panels, workspaces, tools and shortcuts, so your hands already know where everything is. Underneath, it is new from the bitstream up. The H.264, HEVC, ProRes and AAC codecs are our own, written in Rust from the public specifications. A GPU compositor works in linear light. Frame math runs on exact integer time, so edits never drift. And every action in the app is a command that an AI agent can drive as precisely as you can.
+**Woldercraft Resolutor** is a pure-Rust non-linear video editor, color grader, and node-based VFX compositor built on [FilmCraft](https://github.com/storytold/filmcraft) (ArtCraft) and powered by **EffectCraft VFX**. Familiar panels, workspaces, tools, and shortcuts let you get straight to cutting, while underneath everything is written in Rust from the public specifications: H.264, HEVC, ProRes, VP8/VP9, AV1, and AAC/Opus codecs, a linear-light Vulkan/wgpu GPU compositor, non-linear Color &amp; VFX node graphs, exact integer time math so edits never drift, and a full command/MCP layer for AI agents.
 
 <br>
 
 ## Edit
 
-<p align="center">
-  <img src="docs/images/filmcraft-assembly.png" alt="Assembly workspace: bins of film thumbnails, Carnival of Souls in the Source monitor, a Night of the Living Dead cemetery shot in the Program monitor, and the trailer on a three-track timeline with a Chopin score on A2 and loudness meters" width="100%">
-</p>
-
-<p align="center"><sub>The Assembly workspace, cutting a trailer for <i>Night of the Living Dead</i> (1968) with an insert from <i>Carnival of Souls</i> (1962).</sub></p>
-
-**A timeline you already know.** Source and Program monitors, bins with thumbnails, a multi-track timeline with patch and target buttons, sync locks and linked selection. The Editing, Assembly, Color, Effects and Audio workspaces are all there, and every panel docks wherever you want it.
+**A timeline you already know.** Source and Program monitors, bins with thumbnails, a multi-track timeline with patch and target buttons, sync locks, and linked selection. Dedicated **Projects**, **Edit**, **Effects**, **Color**, and **Export** workspaces keep each stage focused, and every panel docks wherever you want it.
 
 - **Three-point editing.** Mark In and Out in the Source monitor, then insert (`,`) or overwrite (`.`) onto the patched tracks. Lift (`;`) and extract (`'`) take ranges back out.
 - **Every trim.** Ripple, roll, slip, slide, rate stretch and razor tools. Trim mode selects edit points as ripple, roll or trim, nudges them a frame at a time (`⌥←` `⌥→`, ×5 with `⇧`), toggles the trim type with `⌃T` and extends them to the playhead with `E`. `Q` and `W` ripple-trim to the playhead. The **Trim Monitor** shows both sides of the edit, and **dynamic trimming** trims live while it plays: `L` forward, `J` back, `K` to stop and commit as one undo step.
 - **Exact time.** Every edit is computed on integer ticks: 254,016,000,000 per second, which divides evenly by every common frame rate and sample rate. 23.976, 29.97 drop-frame and 59.94 are exact, not approximate.
 - **The details pros rely on.** Markers with colours, names and durations; export sequence review notes with **Markers ▸ Export Markers as CSV…**; add edit (`⌘K`) on one or all tracks; nesting; copy, paste and paste insert; ripple delete and close gap; snapping; unlimited undo with a History panel.
-- **Your keys.** A Keyboard Shortcuts editor (`⌥⌘K`) with a drawn keyboard, panel-specific shortcuts, conflict warnings and presets for FilmCraft and standard NLE key layouts.
+- **Your keys.** A Keyboard Shortcuts editor (`⌥⌘K`) with a drawn keyboard, panel-specific shortcuts, conflict warnings and presets for Resolutor / FilmCraft and standard NLE key layouts.
 - **Never lose work.** Saves are atomic, auto-save keeps a rolling set of versions, and a crash-recovery journal written about a second after each edit brings back unsaved changes after a crash or power cut.
-
-<p align="center">
-  <img src="docs/images/filmcraft-timeline.png" alt="Timeline close-up: Night of the Living Dead shots with dissolves on V1, a Carnival of Souls insert on V2, the Chopin nocturne as a green waveform on A2, coloured markers along the ruler, and the loudness meter reading momentary, short-term, integrated and true-peak values" width="100%">
-</p>
-
-<p align="center"><sub>Up close: dissolves, an insert on V2, the score on A2, coloured markers, and the loudness meters on the right.</sub></p>
 
 <br>
 
 ## Color
 
 <p align="center">
-  <img src="docs/images/filmcraft-color.png" alt="Color workspace on Charade (1963): Cary Grant and Audrey Hepburn in the Program monitor, the waveform and vectorscope on the left, and the trailer bins and timeline below" width="100%">
+  <img src="docs/images/resolutor-color.png" alt="Color workspace in Woldercraft Resolutor: Program monitor, Color Nodes DAG (Node 01 PRI/VIG to Node 02 GRADE), clip strip with node and FX badges, Lift/Gamma/Gain/Offset color wheels, RGB curves, and live RGB Parade video scopes" width="100%">
 </p>
 
-<p align="center"><sub>The Color workspace on <i>Charade</i> (1963), with live scopes beside the Program monitor.</sub></p>
+<p align="center"><sub>The Color workspace: node-based Color Nodes graph, clip strip, Lift/Gamma/Gain/Offset color wheels, RGB curves, and live RGB Parade scopes.</sub></p>
 
-**A complete color grading panel**, in the order a colourist works:
+**A node-based color grading workspace**, in the order a colourist works:
 
-- **Basic Correction:** temperature and tint, exposure, contrast, highlights, shadows, whites, blacks, saturation.
-- **Creative:** eight built-in looks with an intensity control, plus faded film, sharpen and vibrance. The looks are colour transforms written in code, not LUT files.
+- **Color Nodes DAG:** chain Serial, Parallel, Layer, Outside, and Split nodes per clip, with Pre-Clip, Clip, Post-Clip, and Timeline scopes.
+- **Basic &amp; Primary Correction:** temperature and tint, exposure, contrast, highlights, shadows, whites, blacks, saturation, and Lift/Gamma/Gain/Offset color wheels, plus Log and HDR wheels.
+- **Creative:** built-in looks with an intensity control, plus faded film, sharpen and vibrance. The looks are colour transforms written in code, not LUT files.
 - **Curves:** an RGB curve editor with monotone-cubic interpolation (no overshoot), and hue vs saturation, hue vs hue, hue vs luma, luma vs saturation and saturation vs saturation.
-- **Color Wheels:** shadow, midtone and highlight wheels, each with its own lightness control.
-- **HSL Secondary:** key a colour by hue, saturation and luma, view the key as a matte, and correct only what you selected.
-- **Vignette:** amount, midpoint, roundness and feather.
-
-<table>
-  <tr>
-    <td width="34%" valign="top" align="center">
-      <img src="docs/images/filmcraft-color-panel.png" alt="The color grading panel on Charade (1963): Basic Correction sliders with coloured temperature and tint tracks, collapsed Creative and Curves sections, shadow, midtone and highlight colour wheels, and HSL Secondary and Vignette toggles"><br>
-      <sub><b>The color grading panel.</b> Basic Correction, Color Wheels and every other section, each with its own on/off switch.</sub>
-    </td>
-    <td width="66%" valign="top" align="center">
-      <img src="docs/images/filmcraft-scopes.png" alt="The video scopes: a green luma waveform and a vectorscope of a Charade (1963) frame"><br>
-      <sub><b>Scopes that tell the truth.</b> The waveform and vectorscope are computed from the graded frame. All grading happens in linear light, in 32-bit float.</sub>
-    </td>
-  </tr>
-</table>
+- **HSL Secondary &amp; Vignette:** key a colour by hue, saturation and luma, view the key as a matte, and shape vignettes with amount, midpoint, roundness and feather.
+- **Live Video Scopes:** RGB Parade, Waveform, Vectorscope, and Histogram computed from the graded frame in 32-bit float linear light.
 
 <br>
 
 ## Effects and motion
 
 <p align="center">
-  <img src="docs/images/filmcraft-effects.png" alt="Effects workspace: Effect Controls with Motion, Opacity, Time Remapping and a colour grade, NASA's Earth Views from the ISS in the Program monitor, and the Effects browser open on the Dissolve transitions" width="100%">
+  <img src="docs/images/resolutor-effects.png" alt="Effects workspace in Woldercraft Resolutor: EffectCraft VFX browser on the left, Program monitor, Transform/Crop/Speed/Effects inspector toggles, VFX Nodes DAG with Unsharp Mask GPU node, Effect Controls keyframe lanes, and live RGB Parade scopes" width="100%">
 </p>
 
-<p align="center"><sub>NASA's <i>Earth Views from the ISS</i> with a look applied, and the Effects browser open on the dissolves.</sub></p>
+<p align="center"><sub>The Effects workspace: EffectCraft VFX browser, VFX Nodes graph, Effect Controls keyframe lanes, and live RGB Parade scopes.</sub></p>
 
-- **A comprehensive Video Effects bin (over 90 effects across 16 categories), legacy effects, plus around 30 transitions.** Blurs (Bokeh, Focus, Compound), keys (Ultra Key, Track Matte), distortions (Corner Pin, Turbulent Displace, Warp Stabilizer), Lights & Glows, Immersive Video (VR) effects on equirectangular footage, Posterize Time, Echo and more. Cross dissolve, dip to black or white, film dissolve, wipes, irises, pushes, slides, zooms, page peel, cube spin and more.
+- **EffectCraft VFX &amp; Video Effects (over 90 effects across 16 categories), plus around 30 transitions.** Blurs (Bokeh, Focus, Compound), keys (Ultra Key, Track Matte), distortions (Corner Pin, Turbulent Displace, Warp Stabilizer), Lights &amp; Glows, Immersive Video (VR) effects on equirectangular footage, Posterize Time, Echo and more. Cross dissolve, dip to black or white, film dissolve, wipes, irises, pushes, slides, zooms, page peel, cube spin and more.
+- **Non-linear VFX Nodes:** build per-clip VFX DAGs with GPU-accelerated nodes, inspect parameters in `VfxInspector`, and animate them in `VfxKeyframes`.
 - **Motion and opacity on every clip:** position, scale, rotation, anchor point and anti-flicker, plus 26 blend modes.
-- **Advanced keyframing:** linear, Bezier, auto and continuous Bezier, hold, ease in and ease out. Effect Controls shows a keyframe lane for every parameter under a time ruler with the playhead's handle, and each animated parameter opens into **value and velocity graphs** with draggable influence handles. Effect Controls and the Properties panel share the keyframe navigator (◀ ◆ ▶): add or remove the keyframe at the playhead, step to the previous or next one.
+- **Advanced keyframing:** linear, Bezier, auto and continuous Bezier, hold, ease in and ease out. Effect Controls shows a keyframe lane for every parameter under a time ruler with the playhead's handle, and each animated parameter opens into **value and velocity graphs** with draggable influence handles.
 - **A GPU compositor** built on wgpu (Metal, Vulkan, DirectX 12, WebGPU). It samples YUV straight from the decoder with footprint supersampling and blends in linear light. A CPU path renders the same frames, and the two are tested against each other.
-
-<p align="center">
-  <img src="docs/images/filmcraft-keyframes.png" alt="Effect Controls with the value and velocity graphs of an eased Scale push-in on the Night of the Living Dead title card, the Program monitor showing the title over a country road, and the Properties panel with Transform and Crop" width="100%">
-</p>
-
-<p align="center"><sub>An eased push-in on the title card: the value graph, the velocity graph and the Bezier influence handle.</sub></p>
 
 <br>
 
@@ -191,10 +143,10 @@ Also imported: MPEG-2 / MPEG-1 video, AC-3, MP2, MXF (OP1a / OP-Atom), MPEG tran
 ## Export
 
 <p align="center">
-  <img src="docs/images/filmcraft-export.png" alt="Export mode: destinations for Media File, YouTube, Vimeo, TikTok, Instagram and FTP on the left, a Night of the Living Dead frame in the preview, and H.264 settings on the right (1440x1080 at 23.976 fps, 48000 Hz stereo, entire sequence)" width="100%">
+  <img src="docs/images/resolutor-export.png" alt="Export workspace in Woldercraft Resolutor: H.264 MP4 settings, GPU hardware encoding and Vulkan render pipeline status, Ocean_Sunset.mp4 preview, output summary, and export queue" width="100%">
 </p>
 
-<p align="center"><sub>Export mode, set to write the trailer as H.264 MP4.</sub></p>
+<p align="center"><sub>Export workspace, configured for GPU-accelerated Vulkan rendering and hardware H.264 MP4 encoding.</sub></p>
 
 - **H.264 MP4 with AAC, using our own encoders.** A 6-second 960×540 render takes 1.3 seconds and decodes in ffmpeg without a single warning, with strict error detection on.
 - **Also:** Apple ProRes 422 HQ and Motion JPEG in QuickTime, MXF OP1a and standard OP-Atom (DNxHR, ProRes or H.264 with PCM and start timecode), PNG sequences, animated GIF and WAV.
@@ -231,7 +183,7 @@ Every menu item, button, slider and drag in FilmCraft is a **command** with an i
 {"method": "ui.screenshot", "params": {"path": "frame.png"}}
 ```
 
-The trailer and the grades in these screenshots were built exactly this way, by an agent driving the running app.
+The grades, effects, and node setups in these screenshots were driven directly over the control channel on the built-in Demo Project.
 
 <br>
 
@@ -461,7 +413,7 @@ with its author, source and license in [ATTRIBUTION.md](ATTRIBUTION.md). Builds 
 [craft-fonts](https://github.com/storytold/craft-fonts) (all official releases) also embed its fonts
 (OFL-1.1), listed in its [ATTRIBUTION.md](https://github.com/storytold/craft-fonts/blob/main/ATTRIBUTION.md).
 
-**Footage and music in the screenshots:** NASA's Apollo 11 film and television footage from [images.nasa.gov](https://images.nasa.gov) (launch, Launch Control Center, lunar surface and recovery) and the Apollo 11 air-to-ground voice transcript, all US Government works in the public domain (NASA does not endorse this project); *Night of the Living Dead* (1968), *Carnival of Souls* (1962) and *Charade* (1963), all in the US public domain; *Earth Views from the ISS* by NASA; Chopin's Nocturne Op. 48 No. 1 and Ballade No. 1, performed for Musopen and released under CC0. The media itself is not in this repository. Sources and details for every asset are in [ATTRIBUTION.md](ATTRIBUTION.md).
+**Media in the screenshots:** All frames and audio waveforms shown in the README screenshots come from the built-in procedural Demo Project (`Ocean_Sunset.mp4`, `Aurora_Timelapse.mp4`, `City_Night_Drive.mp4`, `Desert_Dunes.mp4`, `Misty_Forest.mp4`, `Neon_Loop.mov`, and `Ambient_Score.wav`), generated by the engine's own Rust code under `MIT OR Apache-2.0`. Sources and details for every asset are in [ATTRIBUTION.md](ATTRIBUTION.md).
 
 FilmCraft is an independent implementation. It contains no proprietary code, icons, images, presets or LUTs, and no GPL or LGPL code; every icon is drawn in code and every asset is openly licensed and attributed ([AGENTS.md](AGENTS.md)), apart from the ArtCraft name and logos, which are trademarks of the ArtCraft Team used under [`docs/brand/LICENSE-brand.txt`](docs/brand/LICENSE-brand.txt). ffmpeg is used only as an external test oracle.
 

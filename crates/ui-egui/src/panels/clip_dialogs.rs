@@ -296,7 +296,7 @@ fn defaults(app: &FilmcraftApp, id: &str) -> (Value, Value) {
                 "preHead": s.prefs.silence.pre_head,
                 "postTail": s.prefs.silence.post_tail,
                 "minStrip": s.prefs.silence.min_strip,
-                "previewScope": "visible"
+                "previewScope": s.prefs.silence.preview_scope.as_deref().unwrap_or("visible")
             }),
             Value::Null,
         ),
@@ -309,7 +309,7 @@ fn defaults(app: &FilmcraftApp, id: &str) -> (Value, Value) {
                     "postTail": s.prefs.silence.post_tail,
                     "minStrip": s.prefs.silence.min_strip,
                     "clips": c,
-                    "previewScope": "all"
+                    "previewScope": s.prefs.silence.preview_scope.as_deref().unwrap_or("all")
                 }),
                 Value::Null,
             )
@@ -745,6 +745,11 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     });
                     if p.get("previewScope").and_then(Value::as_str) != Some(&scope) {
                         p["previewScope"] = json!(scope);
+                        if app.session.prefs.silence.preview_scope.as_deref() != Some(scope.as_str()) {
+                            let mut next = app.session.prefs.clone();
+                            next.silence.preview_scope = Some(scope);
+                            let _ = app.session.set_prefs(next);
+                        }
                     }
                     ui.end_row();
                 });

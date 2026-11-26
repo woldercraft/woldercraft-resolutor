@@ -45,12 +45,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 
     // Resolve active node (defaulting cleanly to first node if unset or deleted)
-    let active_id = app
-        .ui
-        .vfx_active_node_id
-        .map(VfxNodeId)
-        .filter(|id| graph.node(*id).is_some())
-        .or_else(|| graph.nodes.first().map(|n| n.id));
+    let active_id = app.ui.vfx_active_node_id.map(VfxNodeId).filter(|id| graph.node(*id).is_some()).or_else(|| graph.nodes.first().map(|n| n.id));
     let Some(nid) = active_id else { return };
     app.ui.vfx_active_node_id = Some(nid.0);
     let Some(node) = graph.node(nid).cloned() else { return };
@@ -101,13 +96,7 @@ fn render_node_header(app: &mut FilmcraftApp, ui: &mut egui::Ui, t: &Tokens, cli
         }
 
         ui.label(egui::RichText::new(title).strong().size(13.0).color(t.text));
-        ui.label(
-            egui::RichText::new(kind_tag)
-                .size(9.5)
-                .strong()
-                .color(accent)
-                .background_color(accent.gamma_multiply(0.16)),
-        );
+        ui.label(egui::RichText::new(kind_tag).size(9.5).strong().color(accent).background_color(accent.gamma_multiply(0.16)));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(6.0);
@@ -130,11 +119,7 @@ fn render_filter_bar(app: &mut FilmcraftApp, ui: &mut egui::Ui, t: &Tokens) {
     ui.horizontal(|ui| {
         ui.add_space(6.0);
         let w = (ui.available_width() - 40.0).max(80.0);
-        let te = ui.add(
-            egui::TextEdit::singleline(&mut app.ui.effect_controls_search)
-                .hint_text(tl!("Filter parameters…"))
-                .desired_width(w),
-        );
+        let te = ui.add(egui::TextEdit::singleline(&mut app.ui.effect_controls_search).hint_text(tl!("Filter parameters…")).desired_width(w));
         app.auto.add("vfxInspector.search", te.rect, "Filter parameters");
         let anim_on = app.ui.effect_controls_animated_only;
         let btn = ui
@@ -204,13 +189,9 @@ fn node_keyframe_nav(
         app.auto.add(&format!("vfxInspector.kf.{}.{param_id}", node_id.0), dr, "Toggle Keyframe");
         if dresp.on_hover_text(tl!("Add or remove keyframe at current frame")).clicked() {
             if is_settings_blend {
-                let _ = app
-                    .session
-                    .execute("vfxGraph.setNodeSetting", json!({"clip": clip_id.0, "node": node_id.0, "blendToggleKeyframe": true}));
+                let _ = app.session.execute("vfxGraph.setNodeSetting", json!({"clip": clip_id.0, "node": node_id.0, "blendToggleKeyframe": true}));
             } else {
-                let _ = app
-                    .session
-                    .execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node_id.0, "param": param_id, "toggleKeyframe": true}));
+                let _ = app.session.execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node_id.0, "param": param_id, "toggleKeyframe": true}));
             }
         }
 
@@ -291,11 +272,7 @@ fn resolve_slider_row(
         // Editable numeric box
         let dv = ui.add_sized(
             vec2(num_w, 18.0),
-            egui::DragValue::new(&mut val)
-                .range(hard_min..=hard_max)
-                .speed((span / 250.0).max(0.01))
-                .max_decimals(decimals)
-                .suffix(unit),
+            egui::DragValue::new(&mut val).range(hard_min..=hard_max).speed((span / 250.0).max(0.01)).max_decimals(decimals).suffix(unit),
         );
         if dv.changed() {
             changed = true;
@@ -317,10 +294,9 @@ fn resolve_slider_row(
         let out_val = val / scale_display;
         let auto_kf = param.is_animated();
         if is_settings_blend {
-            let _ = app.session.execute(
-                "vfxGraph.setNodeSetting",
-                json!({"clip": clip_id.0, "node": node_id.0, "blend": out_val, "blendKeyframe": auto_kf, "merge": true}),
-            );
+            let _ = app
+                .session
+                .execute("vfxGraph.setNodeSetting", json!({"clip": clip_id.0, "node": node_id.0, "blend": out_val, "blendKeyframe": auto_kf, "merge": true}));
         } else {
             let _ = app.session.execute(
                 "vfxGraph.setNodeParam",
@@ -331,15 +307,7 @@ fn resolve_slider_row(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_settings_tab(
-    app: &mut FilmcraftApp,
-    ui: &mut egui::Ui,
-    t: &Tokens,
-    clip_id: ClipId,
-    item: &TrackItem,
-    node: &VfxNode,
-    mt_now: Tick,
-) {
+fn render_settings_tab(app: &mut FilmcraftApp, ui: &mut egui::Ui, t: &Tokens, clip_id: ClipId, item: &TrackItem, node: &VfxNode, mt_now: Tick) {
     resolve_slider_row(
         app,
         ui,
@@ -368,9 +336,7 @@ fn render_settings_tab(
         ui.add_space(6.0);
         let mut mul_m = node.settings.multiply_by_mask;
         if ui.checkbox(&mut mul_m, tl!("Multiply by Mask")).changed() {
-            let _ = app
-                .session
-                .execute("vfxGraph.setNodeSetting", json!({"clip": clip_id.0, "node": node.id.0, "multiplyByMask": mul_m}));
+            let _ = app.session.execute("vfxGraph.setNodeSetting", json!({"clip": clip_id.0, "node": node.id.0, "multiplyByMask": mul_m}));
         }
     });
 
@@ -444,25 +410,25 @@ fn render_controls_tab(
             ui.horizontal(|ui| {
                 ui.add_space(6.0);
                 ui.label(tl!("Operator:"));
-                craft_ui::ComboBox::from_id_salt(("vfx_ins_op", node.id.0))
-                    .selected_text(operator.label())
-                    .show_ui(ui, |ui| {
-                        for op in MergeOperator::ALL {
-                            if ui.selectable_label(*operator == op, op.label()).clicked() {
-                                let _ = app.session.execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node.id.0, "param": "operator", "value": op.label()}));
-                            }
+                craft_ui::ComboBox::from_id_salt(("vfx_ins_op", node.id.0)).selected_text(operator.label()).show_ui(ui, |ui| {
+                    for op in MergeOperator::ALL {
+                        if ui.selectable_label(*operator == op, op.label()).clicked() {
+                            let _ = app
+                                .session
+                                .execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node.id.0, "param": "operator", "value": op.label()}));
                         }
-                    });
+                    }
+                });
                 ui.label(tl!("Blend Mode:"));
-                craft_ui::ComboBox::from_id_salt(("vfx_ins_bm", node.id.0))
-                    .selected_text(blend_mode.label())
-                    .show_ui(ui, |ui| {
-                        for bm in LayerBlendMode::ALL {
-                            if ui.selectable_label(*blend_mode == bm, bm.label()).clicked() {
-                                let _ = app.session.execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node.id.0, "param": "blendMode", "value": bm.label()}));
-                            }
+                craft_ui::ComboBox::from_id_salt(("vfx_ins_bm", node.id.0)).selected_text(blend_mode.label()).show_ui(ui, |ui| {
+                    for bm in LayerBlendMode::ALL {
+                        if ui.selectable_label(*blend_mode == bm, bm.label()).clicked() {
+                            let _ = app
+                                .session
+                                .execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node.id.0, "param": "blendMode", "value": bm.label()}));
                         }
-                    });
+                    }
+                });
             });
             ui.add_space(4.0);
             // Center (Vec2 + < ◆ >)
@@ -487,18 +453,74 @@ fn render_controls_tab(
                 resolve_slider_row(app, ui, t, clip_id, item, node.id, "size", "Size", size, (0.05, 4.0, 0.01, 10.0, 2, "", 1.0), mt_now, 1.0, false);
             }
             if (!anim_only || angle.is_animated()) && (q.is_empty() || "angle".contains(&q)) {
-                resolve_slider_row(app, ui, t, clip_id, item, node.id, "angle", "Angle", angle, (-180.0, 180.0, -3600.0, 3600.0, 1, "°", 0.0), mt_now, 1.0, false);
+                resolve_slider_row(
+                    app,
+                    ui,
+                    t,
+                    clip_id,
+                    item,
+                    node.id,
+                    "angle",
+                    "Angle",
+                    angle,
+                    (-180.0, 180.0, -3600.0, 3600.0, 1, "°", 0.0),
+                    mt_now,
+                    1.0,
+                    false,
+                );
             }
         }
         VfxNodeKind::Mask(mask) => {
             if (!anim_only || mask.feather.is_animated()) && (q.is_empty() || "feather".contains(&q)) {
-                resolve_slider_row(app, ui, t, clip_id, item, node.id, "feather", "Feather", &mask.feather, (0.0, 150.0, 0.0, 1000.0, 1, " px", 10.0), mt_now, 1.0, false);
+                resolve_slider_row(
+                    app,
+                    ui,
+                    t,
+                    clip_id,
+                    item,
+                    node.id,
+                    "feather",
+                    "Feather",
+                    &mask.feather,
+                    (0.0, 150.0, 0.0, 1000.0, 1, " px", 10.0),
+                    mt_now,
+                    1.0,
+                    false,
+                );
             }
             if (!anim_only || mask.opacity.is_animated()) && (q.is_empty() || "opacity".contains(&q)) {
-                resolve_slider_row(app, ui, t, clip_id, item, node.id, "opacity", "Opacity", &mask.opacity, (0.0, 100.0, 0.0, 100.0, 1, "%", 100.0), mt_now, 1.0, false);
+                resolve_slider_row(
+                    app,
+                    ui,
+                    t,
+                    clip_id,
+                    item,
+                    node.id,
+                    "opacity",
+                    "Opacity",
+                    &mask.opacity,
+                    (0.0, 100.0, 0.0, 100.0, 1, "%", 100.0),
+                    mt_now,
+                    1.0,
+                    false,
+                );
             }
             if (!anim_only || mask.expansion.is_animated()) && (q.is_empty() || "expansion".contains(&q)) {
-                resolve_slider_row(app, ui, t, clip_id, item, node.id, "expansion", "Expansion", &mask.expansion, (-100.0, 100.0, -1000.0, 1000.0, 1, " px", 0.0), mt_now, 1.0, false);
+                resolve_slider_row(
+                    app,
+                    ui,
+                    t,
+                    clip_id,
+                    item,
+                    node.id,
+                    "expansion",
+                    "Expansion",
+                    &mask.expansion,
+                    (-100.0, 100.0, -1000.0, 1000.0, 1, " px", 0.0),
+                    mt_now,
+                    1.0,
+                    false,
+                );
             }
             ui.horizontal(|ui| {
                 ui.add_space(6.0);
@@ -513,10 +535,7 @@ fn render_controls_tab(
                 ui.horizontal_wrapped(|ui| {
                     ui.add_space(6.0);
                     ui.label(
-                        egui::RichText::new(tlf!("Instance linked to Node #{id}", id = source.0))
-                            .strong()
-                            .size(11.0)
-                            .color(Color32::from_rgb(16, 185, 129)),
+                        egui::RichText::new(tlf!("Instance linked to Node #{id}", id = source.0)).strong().size(11.0).color(Color32::from_rgb(16, 185, 129)),
                     );
                     if let Some(fx) = graph.resolve_effect(node.id)
                         && let Some(def) = fx.def()
@@ -525,7 +544,9 @@ fn render_controls_tab(
                             let is_over = overrides.contains_key(pd.id);
                             let lbl = if is_over { format!("{} (Indep.)", crate::i18n::t(pd.label)) } else { format!("{} (Link)", crate::i18n::t(pd.label)) };
                             if ui.small_button(lbl).on_hover_text("De-instance / Re-instance").clicked() {
-                                let _ = app.session.execute("vfxGraph.deinstanceParam", json!({"clip": clip_id.0, "node": node.id.0, "param": pd.id, "reinstance": is_over}));
+                                let _ = app
+                                    .session
+                                    .execute("vfxGraph.deinstanceParam", json!({"clip": clip_id.0, "node": node.id.0, "param": pd.id, "reinstance": is_over}));
                             }
                         }
                     }
@@ -600,7 +621,10 @@ fn render_controls_tab(
                         ui.horizontal(|ui| {
                             ui.add_space(6.0);
                             if ui.checkbox(&mut v, localized).changed() {
-                                let _ = app.session.execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node.id.0, "param": pd.id, "value": v, "keyframe": prm.is_animated()}));
+                                let _ = app.session.execute(
+                                    "vfxGraph.setNodeParam",
+                                    json!({"clip": clip_id.0, "node": node.id.0, "param": pd.id, "value": v, "keyframe": prm.is_animated()}),
+                                );
                             }
                             if pd.animatable {
                                 node_keyframe_nav(app, ui, clip_id, item, node.id, pd.id, &prm, mt_now, false);
@@ -612,15 +636,15 @@ fn render_controls_tab(
                         ui.horizontal(|ui| {
                             ui.add_space(6.0);
                             ui.label(localized);
-                            craft_ui::ComboBox::from_id_salt(("vfx_ins_ch", node.id.0, pd.id))
-                                .selected_text(cur_lbl)
-                                .show_ui(ui, |ui| {
-                                    for (i, opt) in opts.iter().enumerate() {
-                                        if ui.selectable_label(c as usize == i, *opt).clicked() {
-                                            let _ = app.session.execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node.id.0, "param": pd.id, "value": i}));
-                                        }
+                            craft_ui::ComboBox::from_id_salt(("vfx_ins_ch", node.id.0, pd.id)).selected_text(cur_lbl).show_ui(ui, |ui| {
+                                for (i, opt) in opts.iter().enumerate() {
+                                    if ui.selectable_label(c as usize == i, *opt).clicked() {
+                                        let _ = app
+                                            .session
+                                            .execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node.id.0, "param": pd.id, "value": i}));
                                     }
-                                });
+                                }
+                            });
                             if pd.animatable {
                                 node_keyframe_nav(app, ui, clip_id, item, node.id, pd.id, &prm, mt_now, false);
                             }
@@ -650,7 +674,10 @@ fn render_controls_tab(
                             ui.add_space(6.0);
                             ui.label(localized);
                             if ui.color_edit_button_rgba_unmultiplied(&mut c).changed() {
-                                let _ = app.session.execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node.id.0, "param": pd.id, "value": c, "keyframe": prm.is_animated()}));
+                                let _ = app.session.execute(
+                                    "vfxGraph.setNodeParam",
+                                    json!({"clip": clip_id.0, "node": node.id.0, "param": pd.id, "value": c, "keyframe": prm.is_animated()}),
+                                );
                             }
                             if pd.animatable {
                                 node_keyframe_nav(app, ui, clip_id, item, node.id, pd.id, &prm, mt_now, false);
@@ -663,7 +690,8 @@ fn render_controls_tab(
                             ui.add_space(6.0);
                             ui.label(localized);
                             if ui.text_edit_singleline(&mut buf).changed() {
-                                let _ = app.session.execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node.id.0, "param": pd.id, "value": buf}));
+                                let _ =
+                                    app.session.execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": node.id.0, "param": pd.id, "value": buf}));
                             }
                         });
                     }

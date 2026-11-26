@@ -264,11 +264,7 @@ impl VfxGraph {
         let mut g = Self::new();
         let vfx: Vec<&EffectInstance> = effects
             .iter()
-            .filter(|e| {
-                e.effect != "lumetri"
-                    && !crate::graphic::is_layer(e)
-                    && e.def().is_some_and(|d| !d.intrinsic && d.kind == crate::EffectKind::Video)
-            })
+            .filter(|e| e.effect != "lumetri" && !crate::graphic::is_layer(e) && e.def().is_some_and(|d| !d.intrinsic && d.kind == crate::EffectKind::Video))
             .collect();
         if vfx.is_empty() {
             return g;
@@ -522,11 +518,7 @@ impl VfxGraph {
 
     fn resolve_effect_non_recursive(&self, id: VfxNodeId) -> Option<EffectInstance> {
         let node = self.node(id)?;
-        if let VfxNodeKind::Effect(inst) = &node.kind {
-            Some(inst.clone())
-        } else {
-            None
-        }
+        if let VfxNodeKind::Effect(inst) = &node.kind { Some(inst.clone()) } else { None }
     }
 
     /// Extract serial [`EffectInstance`]s in topological order for syncing back to `TrackItem::effects`.
@@ -562,9 +554,20 @@ mod tests {
     fn rejects_cycles_and_incompatible_ports() {
         let mut g = VfxGraph::from_serial_effects(&[fx("ec.blur.gaussian"), fx("ec.stylize.glow")]);
         // Closing loop N2 -> N1 must fail
-        assert!(g.connect(VfxEdge { from: VfxEndpoint::Node(VfxNodeId(2)), to: VfxEndpoint::Node(VfxNodeId(1)), to_slot: VfxInputSlot::Main, kind: VfxPortKind::Image }).is_err());
+        assert!(
+            g.connect(VfxEdge {
+                from: VfxEndpoint::Node(VfxNodeId(2)),
+                to: VfxEndpoint::Node(VfxNodeId(1)),
+                to_slot: VfxInputSlot::Main,
+                kind: VfxPortKind::Image
+            })
+            .is_err()
+        );
         // Foreground slot on non-Merge node must fail
-        assert!(g.connect(VfxEdge { from: VfxEndpoint::MediaIn, to: VfxEndpoint::Node(VfxNodeId(1)), to_slot: VfxInputSlot::Foreground, kind: VfxPortKind::Image }).is_err());
+        assert!(
+            g.connect(VfxEdge { from: VfxEndpoint::MediaIn, to: VfxEndpoint::Node(VfxNodeId(1)), to_slot: VfxInputSlot::Foreground, kind: VfxPortKind::Image })
+                .is_err()
+        );
     }
 
     #[test]
@@ -604,7 +607,13 @@ mod tests {
             pos: [300.0, 120.0],
         });
         g.connect(VfxEdge { from: VfxEndpoint::MediaIn, to: VfxEndpoint::Node(merge_id), to_slot: VfxInputSlot::Main, kind: VfxPortKind::Image }).unwrap();
-        g.connect(VfxEdge { from: VfxEndpoint::Node(VfxNodeId(1)), to: VfxEndpoint::Node(merge_id), to_slot: VfxInputSlot::Foreground, kind: VfxPortKind::Image }).unwrap();
+        g.connect(VfxEdge {
+            from: VfxEndpoint::Node(VfxNodeId(1)),
+            to: VfxEndpoint::Node(merge_id),
+            to_slot: VfxInputSlot::Foreground,
+            kind: VfxPortKind::Image,
+        })
+        .unwrap();
         g.swap_merge_inputs(merge_id).unwrap();
         assert!(g.edges.iter().any(|e| e.from == VfxEndpoint::MediaIn && e.to == VfxEndpoint::Node(merge_id) && e.to_slot == VfxInputSlot::Foreground));
         assert!(g.edges.iter().any(|e| e.from == VfxEndpoint::Node(VfxNodeId(1)) && e.to == VfxEndpoint::Node(merge_id) && e.to_slot == VfxInputSlot::Main));

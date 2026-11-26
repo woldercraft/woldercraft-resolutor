@@ -1,0 +1,8 @@
+asset:        resolutor-export.png
+title:        README gallery: Export workspace
+author:       Woldercraft Resolutor contributors
+source:       original work (screenshot of Woldercraft Resolutor running the built-in Demo Project)
+license:      MIT OR Apache-2.0
+license-file:
+added:        2026-11-25 by wolder
+notes:        Export workspace showing H.264 MP4 settings, GPU hardware encoding & Vulkan render pipeline status, Ocean_Sunset.mp4 preview, output summary, and export queue. All UI icons are drawn in code; fonts are Inter and JetBrains Mono (OFL-1.1). Contains no Adobe artwork.

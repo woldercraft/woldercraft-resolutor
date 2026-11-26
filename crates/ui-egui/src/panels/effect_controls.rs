@@ -247,9 +247,13 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let clip_w = (head.width() * 0.36).clamp(60.0, 180.0);
         let clip_r = Rect::from_min_size(head.min, vec2(clip_w, 24.0));
         ui.painter().rect_filled(clip_r, 4.0, t.pill_active_bg);
-        ui.painter()
-            .with_clip_rect(clip_r.shrink(2.0))
-            .text(pos2(clip_r.min.x + 8.0, clip_r.center().y), Align2::LEFT_CENTER, format!("{} · {}", seq_name(app), it.name), Tokens::ui(11.5), t.text);
+        ui.painter().with_clip_rect(clip_r.shrink(2.0)).text(
+            pos2(clip_r.min.x + 8.0, clip_r.center().y),
+            Align2::LEFT_CENTER,
+            format!("{} · {}", seq_name(app), it.name),
+            Tokens::ui(11.5),
+            t.text,
+        );
         let inline_toolbar = Rect::from_min_max(pos2(clip_r.max.x + 6.0, head.min.y + 1.0), pos2(head.max.x, head.max.y - 1.0));
         show_ec_toolbar(app, ui, inline_toolbar, clip, scope, show_lane, false);
         head.max.y + 4.0
@@ -272,11 +276,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.auto.add("effectControls.ruler", scrub, "time ruler");
     }
     let body = Rect::from_min_max(pos2(rect.min.x, body_top), pos2(split, rect.max.y - 26.0));
-    let selection_area = if show_lane {
-        Rect::from_min_max(pos2(lane.min.x, bar.max.y), lane.max).intersect(ui.clip_rect())
-    } else {
-        Rect::NOTHING
-    };
+    let selection_area = if show_lane { Rect::from_min_max(pos2(lane.min.x, bar.max.y), lane.max).intersect(ui.clip_rect()) } else { Rect::NOTHING };
     let mut keys = Interaction::begin(app, ui, selection_area, clip.0);
     // the rows span the list and the keyframe area: the wheel scrolls anywhere over them and the
     // scrollbar sits at the panel's right edge (#643)
@@ -309,11 +309,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             // Premiere lists the fixed effects (Motion, Opacity, Time Remapping / Volume…) first.
             let mut order: Vec<usize> = (0..it.effects.len()).collect();
             order.sort_by_key(|i| !it.effects[*i].def().is_some_and(|d| d.intrinsic));
-            let non_intrinsic_order: Vec<usize> = order
-                .iter()
-                .copied()
-                .filter(|&i| it.effects.get(i).and_then(|e| e.def()).is_some_and(|d| !d.intrinsic))
-                .collect();
+            let non_intrinsic_order: Vec<usize> =
+                order.iter().copied().filter(|&i| it.effects.get(i).and_then(|e| e.def()).is_some_and(|d| !d.intrinsic)).collect();
             let active_sel = app.session.state.selected_effect.as_ref().filter(|s| s.clip == clip).and_then(|s| s.index(&it.effects));
             let active_target = active_sel.or_else(|| non_intrinsic_order.first().copied());
             let p_query = app.ui.effect_controls_search.trim().to_string();
@@ -333,8 +330,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     .iter()
                     .filter(|pd| {
                         let name_ok = p_query.is_empty() || crate::i18n::matches_query(pd.label, &p_query) || crate::i18n::matches_query(pd.id, &p_query);
-                        let anim_ok = !anim_only
-                            || e.params.get(pd.id).is_some_and(|p| p.is_animated() || p.value != pd.default);
+                        let anim_ok = !anim_only || e.params.get(pd.id).is_some_and(|p| p.is_animated() || p.value != pd.default);
                         name_ok && anim_ok
                     })
                     .collect();
@@ -350,10 +346,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     std::mem::take(&mut after_fixed)
                 };
                 let key = format!("ec:{}:{}", clip.0, idx);
-                let open = scope == crate::state::EffectControlsScope::ActiveNode
-                    || !p_query.is_empty()
-                    || anim_only
-                    || app.ui.expanded_fx.contains(&key);
+                let open = scope == crate::state::EffectControlsScope::ActiveNode || !p_query.is_empty() || anim_only || app.ui.expanded_fx.contains(&key);
                 let selected = active_sel == Some(idx);
                 let (r, resp) = bui.allocate_exact_size(vec2(body.width(), ROW_H), Sense::click());
                 ec_effect_header_row(app, bui, (r, &resp), (clip, idx, e, def), (open, selected, first_added, *kind), &lane, &key, &mut actions);
@@ -659,7 +652,8 @@ fn show_ec_toolbar(
 
     let anim_r = Rect::from_min_size(pos2(rx - 22.0, rect.min.y + 2.0), vec2(22.0, 18.0));
     let anim_on = app.ui.effect_controls_animated_only;
-    let anim_resp = ui.interact(anim_r, ui.scope_id().with("effectControls.filter.animated"), Sense::click()).on_hover_text(tl!("Animated or Modified Parameters Only"));
+    let anim_resp =
+        ui.interact(anim_r, ui.scope_id().with("effectControls.filter.animated"), Sense::click()).on_hover_text(tl!("Animated or Modified Parameters Only"));
     ui.painter().rect_filled(
         anim_r,
         3.0,

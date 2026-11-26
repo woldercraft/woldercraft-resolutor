@@ -1,0 +1,8 @@
+asset:        resolutor-color.png
+title:        README gallery: Color workspace
+author:       Woldercraft Resolutor contributors
+source:       original work (screenshot of Woldercraft Resolutor running the built-in Demo Project)
+license:      MIT OR Apache-2.0
+license-file:
+added:        2026-11-25 by wolder
+notes:        Color workspace showing the Program monitor, Color Nodes DAG (Node 01 PRI/VIG -> Node 02 GRADE), clip strip with node/FX badges, Lift/Gamma/Gain/Offset color wheels, RGB curves, and live RGB Parade video scopes. All UI icons are drawn in code; fonts are Inter and JetBrains Mono (OFL-1.1). Contains no Adobe artwork.

@@ -58,8 +58,8 @@ pub use multicam::{Camera, MergedClip, MulticamAudio, MulticamSel, MulticamSourc
 pub use narration::{Narration, VocalPitch};
 pub use transcript::{Speaker, Transcript, Word};
 pub use vfx_graph::{
-    MAX_VFX_EDGES, MAX_VFX_NODES, MergeOperator, VfxEdge, VfxEndpoint, VfxGraph, VfxInputSlot, VfxNode, VfxNodeId, VfxNodeKind, VfxNodeSettings,
-    VfxPortKind, VfxUnderlay,
+    MAX_VFX_EDGES, MAX_VFX_NODES, MergeOperator, VfxEdge, VfxEndpoint, VfxGraph, VfxInputSlot, VfxNode, VfxNodeId, VfxNodeKind, VfxNodeSettings, VfxPortKind,
+    VfxUnderlay,
 };
 
 macro_rules! id_type {

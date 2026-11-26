@@ -2,7 +2,7 @@
 //! third-party or Adobe artwork). Shapes follow NLE conventions (ripple brackets, razor blade…).
 
 use egui::epaint::{PathShape, PathStroke};
-use egui::{pos2, vec2, Color32, Painter, Pos2, Rect, Stroke};
+use egui::{Color32, Painter, Pos2, Rect, Stroke, pos2, vec2};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -828,18 +828,14 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, active: bool, t: &crate:
         t.icon
     };
     paint(ui.painter(), rect.shrink(size * 0.2), icon, col);
-    if tooltip.is_empty() {
-        resp
-    } else {
-        resp.on_hover_text(tooltip)
-    }
+    if tooltip.is_empty() { resp } else { resp.on_hover_text(tooltip) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui::epaint::{ColorMode, Shape};
     use Icon::*;
+    use egui::epaint::{ColorMode, Shape};
 
     const ALL: &[Icon] = &[
         Monitor,

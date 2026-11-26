@@ -7,14 +7,14 @@
 
 use std::collections::BTreeMap;
 
-use egui::{pos2, vec2, Align2, Rect, Sense};
+use egui::{Align2, Rect, Sense, pos2, vec2};
 use serde_json::json;
 
+use crate::FilmcraftApp;
 use crate::icons::{self, Icon};
 use crate::native_dialogs::FileDialog;
 use crate::state::SavePresetDraft;
 use crate::theme::Tokens;
-use crate::FilmcraftApp;
 use filmcraft_engine::presets::EffectPreset;
 
 /// Metadata for a hovered user/built-in preset, shown in the Effects panel info footer.
@@ -171,12 +171,7 @@ fn preset_row(
     }
     // inside the Presets folder (or sub-folder): icon and label one level deeper than it (#2329)
     let x = r.min.x + crate::panels::effects::tree_x(depth + 1) + 18.0;
-    icons::paint(
-        ui.painter(),
-        Rect::from_center_size(pos2(x, r.center().y), vec2(13.0, 13.0)),
-        Icon::Sparkle,
-        if p.builtin { t.text_dim } else { t.accent },
-    );
+    icons::paint(ui.painter(), Rect::from_center_size(pos2(x, r.center().y), vec2(13.0, 13.0)), Icon::Sparkle, if p.builtin { t.text_dim } else { t.accent });
     let label_clip = Rect::from_min_max(pos2(x + 12.0, r.min.y), pos2((right_x - 4.0).max(x + 12.0), r.max.y));
     ui.painter().with_clip_rect(label_clip).text(pos2(x + 12.0, r.center().y), Align2::LEFT_CENTER, crate::i18n::t(&p.name), Tokens::ui(12.0), t.text);
     app.auto.add(&format!("effects.preset.{}", p.name), r, &p.name);
@@ -331,11 +326,7 @@ pub fn run(app: &mut FilmcraftApp, ctx: &egui::Context, cmd: &str, name: &str) {
                     app.ui.expanded_fx.push("Presets".to_string());
                 }
                 app.ui.status = if let Some(e) = errors.first() {
-                    if imported > 0 {
-                        tlf!("Imported {n} preset(s); not imported: {error}", n = imported, error = e)
-                    } else {
-                        e.clone()
-                    }
+                    if imported > 0 { tlf!("Imported {n} preset(s); not imported: {error}", n = imported, error = e) } else { e.clone() }
                 } else if skipped > 0 && warnings > 0 {
                     tlf!(
                         "Imported {n} preset(s); {skipped} skipped, {warnings} with unsupported parameters",

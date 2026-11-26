@@ -1040,6 +1040,7 @@ fn remove_silence_persists_preferences() {
             "preHead": 5,
             "postTail": 7,
             "minStrip": 15,
+            "previewScope": "all",
         }),
     )
     .unwrap();
@@ -1049,6 +1050,7 @@ fn remove_silence_persists_preferences() {
     assert_eq!(s.prefs.silence.pre_head, 5);
     assert_eq!(s.prefs.silence.post_tail, 7);
     assert_eq!(s.prefs.silence.min_strip, 15);
+    assert_eq!(s.prefs.silence.preview_scope.as_deref(), Some("all"));
 
     // Verify preferences survive serialization / reload
     let json_val = serde_json::to_value(&s.prefs).unwrap();

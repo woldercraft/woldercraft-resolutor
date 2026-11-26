@@ -38,12 +38,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         return;
     }
 
-    let active_id = app
-        .ui
-        .vfx_active_node_id
-        .map(VfxNodeId)
-        .filter(|id| graph.node(*id).is_some())
-        .or_else(|| graph.nodes.first().map(|n| n.id));
+    let active_id = app.ui.vfx_active_node_id.map(VfxNodeId).filter(|id| graph.node(*id).is_some()).or_else(|| graph.nodes.first().map(|n| n.id));
     let Some(nid) = active_id else { return };
     app.ui.vfx_active_node_id = Some(nid.0);
     let Some(node) = graph.node(nid) else { return };
@@ -135,18 +130,13 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
                 if kf_resp.on_hover_text(tl!("Add or remove keyframe")).clicked() {
                     if pid == "__settings.blend" {
-                        let _ = app
-                            .session
-                            .execute("vfxGraph.setNodeSetting", json!({"clip": clip_id.0, "node": nid.0, "blendToggleKeyframe": true}));
+                        let _ = app.session.execute("vfxGraph.setNodeSetting", json!({"clip": clip_id.0, "node": nid.0, "blendToggleKeyframe": true}));
                     } else {
-                        let _ = app
-                            .session
-                            .execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": nid.0, "param": pid, "toggleKeyframe": true}));
+                        let _ = app.session.execute("vfxGraph.setNodeParam", json!({"clip": clip_id.0, "node": nid.0, "param": pid, "toggleKeyframe": true}));
                     }
                 }
 
-                p.with_clip_rect(left_r)
-                    .text(pos2(left_r.left() + 26.0, left_r.center().y), Align2::LEFT_CENTER, pname, Tokens::ui(11.5), t.text);
+                p.with_clip_rect(left_r).text(pos2(left_r.left() + 26.0, left_r.center().y), Align2::LEFT_CENTER, pname, Tokens::ui(11.5), t.text);
 
                 // Paint keyframes along the lane
                 for kf in &prm.keyframes {
@@ -186,12 +176,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 let y = graph_r.top() + graph_r.height() * (i as f32 / 4.0);
                 p.line_segment([pos2(graph_r.left(), y), pos2(graph_r.right(), y)], Stroke::new(0.8, t.separator));
             }
-            let palette = [
-                Color32::from_rgb(96, 165, 250),
-                Color32::from_rgb(52, 211, 153),
-                Color32::from_rgb(250, 204, 21),
-                Color32::from_rgb(244, 114, 182),
-            ];
+            let palette = [Color32::from_rgb(96, 165, 250), Color32::from_rgb(52, 211, 153), Color32::from_rgb(250, 204, 21), Color32::from_rgb(244, 114, 182)];
             let mut curve_idx = 0usize;
             for (_, pname, prm) in &params {
                 if !prm.is_animated() || !matches!(prm.value, ParamValue::Float(_)) {
